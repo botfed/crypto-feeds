@@ -1,0 +1,6 @@
+spot:
+  binance:  ["BTC_USDT", "AIXBT_USDT", "VIRTUAL_USDT", "USDT_USDC"]
+
+perp:
+  binance: ['BTC_USDT', 'AIXBT_USDT', 'AERO_USDT']
+  bybit: ['BTC_USDT', 'AIXBT_USDT', 'AERO_USDT']

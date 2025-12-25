@@ -1,0 +1,17 @@
+// Simplified wrapper for MEXC WebSocket messages
+// We only parse the fields we need for book ticker
+
+syntax = "proto3";
+
+import "PublicAggreBookTickerV3Api.proto";
+
+message MexcWrapper {
+  // Field 1: channel
+  string channel = 1;
+
+  // Field 3: symbol
+  string symbol = 3;
+
+  // Field 315: book ticker data (same field number as in PushDataV3ApiWrapper)
+  PublicAggreBookTickerV3Api publicAggreBookTicker = 315;
+}

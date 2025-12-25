@@ -1,0 +1,12 @@
+spot:
+  binance:  ["BTC_USD", "AIXBT_USDT", "VIRTUAL_USDT", "USDT_USDC"]
+  coinbase: ["BTC_USD", "ETH_USD", "VIRTUAL_USD", "USDT_USD"]
+  kraken:   ["BTC_USD", "ETH_USD", "AIXBT_USD"]
+  mexc:    ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
+  bybit:   ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
+
+perp:
+  binance: ['BTC_USDT', 'AIXBT_USDT', 'AERO_USDT']
+  bybit:   ['BTC_USDT', "AIXBT_USDT", "VIRTUAL_USDT", "AERO_USDT"]
+  mexc:    ['BTC_USDT', 'AERO_USDT', 'AIXBT_USDT']
+  lighter: ['BTC_USDC', "AERO_USDC"]
