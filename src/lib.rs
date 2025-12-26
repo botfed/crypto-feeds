@@ -5,6 +5,7 @@ pub mod exchange_fees;
 pub mod exchanges;
 pub mod market_data;
 pub mod orderbook;
+pub mod display;
 
 #[cfg(feature = "python")]
 pub mod python;

@@ -154,7 +154,7 @@ def main():
 
 if __name__ == "__main__":
     # Initialize logging
-    crypto_feeds.init_logging("info")
+    # crypto_feeds.init_logging("info")
 
     try:
         main()

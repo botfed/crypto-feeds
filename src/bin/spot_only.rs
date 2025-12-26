@@ -7,9 +7,9 @@ use std::time::Duration;
 use tokio::signal;
 use tokio::sync::Notify;
 
-use crate::app_config::*;
-use crate::mappers::*;
-use crate::market_data::InstrumentType;
+use crypto_feeds::app_config::*;
+use crypto_feeds::display::print_bbo_data;
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -43,80 +43,4 @@ async fn main() -> Result<()> {
     })
     .await?;
     Ok(())
-}
-async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notify>) -> Result<()> {
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
-    loop {
-        tokio::select! {
-            _ = shutdown.notified() => {
-                break Ok(());
-            }
-            _ = interval.tick() => {
-                println!("\n========== Market Data Snapshot ==========");
-
-                if let Ok(binance) = market_data.binance.lock() {
-                    print_market_collection("Binance ", &binance, &BinanceMapper);
-                }
-
-                if let Ok(coinbase) = market_data.coinbase.lock() {
-                    print_market_collection("Coinbase", &coinbase, &CoinbaseMapper);
-                }
-
-                if let Ok(bybit) = market_data.bybit.lock() {
-                    print_market_collection("Bybit", &bybit, &BybitMapper);
-                }
-
-                if let Ok(kraken) = market_data.kraken.lock() {
-                    print_market_collection("Kraken", &kraken, &KrakenMapper);
-                }
-
-                if let Ok(mexc) = market_data.mexc.lock() {
-                    print_market_collection("MEXC", &mexc, &MexcMapper);
-                }
-
-                if let Ok(lighter) = market_data.lighter.lock() {
-                    print_market_collection("Lighter", &lighter, &LighterMapper);
-                }
-            }
-        }
-    }
-}
-
-fn print_market_collection(
-    exchange_name: &str,
-    collection: &MarketDataCollection,
-    mapper: &dyn SymbolMapper,
-) {
-    if collection.data.is_empty() {
-        return;
-    }
-    let itype = InstrumentType::Spot;
-
-    println!("\n--- {} ---", exchange_name);
-
-    // Sort symbols for consistent output
-    let mut symbols: Vec<_> = collection.data.keys().collect();
-    symbols.sort();
-
-    for native_symbol in &symbols {
-        if let Some(md) = collection.data.get(*native_symbol) {
-            if let Some(mid) = md.midquote() {
-                // Normalize the symbol for display
-                let normalized = mapper
-                    .normalize(native_symbol, itype)
-                    .unwrap_or_else(|_| native_symbol.to_string());
-
-                println!(
-                    "  {} ({}): ${:.6} | bid: ${:.6} ({:.2}) | ask: ${:.6} ({:.2})",
-                    normalized,
-                    native_symbol,
-                    mid,
-                    md.bid.unwrap_or(0.0),
-                    md.bid_qty.unwrap_or(0.0),
-                    md.ask.unwrap_or(0.0),
-                    md.ask_qty.unwrap_or(0.0)
-                );
-            }
-        }
-    }
 }
