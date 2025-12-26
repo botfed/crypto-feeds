@@ -50,6 +50,6 @@ impl SymbolMapper for BybitMapper {
         }
     }
     fn exchange(&self) -> &str {
-        "binance"
+        "bybit"
     }
 }

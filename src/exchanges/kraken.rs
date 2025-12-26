@@ -19,14 +19,14 @@ pub fn get_fees() -> ExchangeFees {
 }
 
 struct KrakenFeed {
-    market: InstrumentType,
+    itype: InstrumentType,
     mapper: KrakenMapper,
 }
 
 impl KrakenFeed {
     fn new_spot() -> Self {
         Self {
-            market: InstrumentType::Spot,
+            itype: InstrumentType::Spot,
             mapper: KrakenMapper,
         }
     }
@@ -34,8 +34,11 @@ impl KrakenFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for KrakenFeed {
+    fn get_itype(&self) -> Result<&InstrumentType> {
+        Ok(&self.itype)
+    }
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
-        match self.market {
+        match self.itype {
             InstrumentType::Spot => Ok("wss://ws.kraken.com".to_string()),
             InstrumentType::Perp => Ok("wss://ws.kraken.com".to_string()),
             _ => anyhow::bail!("Invalid instrument type"),
@@ -47,12 +50,12 @@ impl ExchangeFeed for KrakenFeed {
         write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
         symbols: &[&str],
     ) -> Result<()> {
-        match self.market {
+        match self.itype {
             InstrumentType::Spot => {
                 // Kraken uses pairs like "XBT/USD", "ETH/USD"
                 let pairs: Vec<String> = symbols
                     .iter()
-                    .map(|s| self.mapper.denormalize(s, self.market))
+                    .map(|s| self.mapper.denormalize(s, self.itype))
                     .collect::<Result<Vec<_>, _>>()?;
                 let subscribe_msg = json!({
                     "event": "subscribe",
@@ -76,7 +79,7 @@ impl ExchangeFeed for KrakenFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
     ) -> Result<Option<(String, MarketData)>> {
-        match self.market {
+        match self.itype {
             InstrumentType::Perp => Ok(None),
             InstrumentType::Spot => {
                 match msg {

@@ -1,6 +1,25 @@
+use crate::symbol_registry::{MAX_SYMBOLS, SymbolId};
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+#[repr(C)]
+pub struct MarketDataAtomic {
+    bid: AtomicU64,
+    ask: AtomicU64,
+    bid_qty: AtomicU64,
+    ask_qty: AtomicU64,
+    received_ts: AtomicU64,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct MarketData {
+    pub bid: Option<f64>,
+    pub ask: Option<f64>,
+    pub bid_qty: Option<f64>,
+    pub ask_qty: Option<f64>,
+    pub received_ts: Option<DateTime<Utc>>,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum InstrumentType {
@@ -21,24 +40,16 @@ impl InstrumentType {
     }
 }
 
-#[derive(Debug)]
-pub struct MarketData {
-    pub bid: Option<f64>,
-    pub ask: Option<f64>,
-    pub bid_qty: Option<f64>,
-    pub ask_qty: Option<f64>,
-    pub received_ts: Option<DateTime<Utc>>,
-}
-
 impl MarketData {
     pub fn midquote(&self) -> Option<f64> {
         return Some((self.bid? + self.ask?) / 2.0);
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MarketDataCollection {
-    pub data: HashMap<String, MarketData>,
+    // pub data: HashMap<String, MarketData>,
+    pub data: [Option<MarketData>; MAX_SYMBOLS],
 }
 
 #[derive(Debug)]
@@ -92,27 +103,31 @@ impl AllMarketData {
 impl MarketDataCollection {
     pub fn new() -> Self {
         Self {
-            data: HashMap::new(),
+            data: [None; MAX_SYMBOLS],
         }
     }
 
-    pub fn insert(&mut self, symbol: String, market_data: MarketData) {
-        self.data.insert(symbol, market_data);
+    pub fn insert(&mut self, id: &SymbolId, market_data: MarketData) {
+        self.data[*id] = Some(market_data);
     }
 
-    pub fn get(&self, symbol: &str) -> Option<&MarketData> {
-        self.data.get(symbol)
+    pub fn get(&self, id: &SymbolId) -> Option<&MarketData> {
+        self.data[*id].as_ref()
     }
 
-    pub fn get_midquote(&self, symbol: &str) -> Option<f64> {
-        let market_data = self.data.get(symbol)?;
-        let bid = market_data.bid?;
-        let ask = market_data.ask?;
-        Some((bid + ask) / 2.0)
+    pub fn get_midquote(&self, id: &SymbolId) -> Option<f64> {
+        if let Some(md) = self.get(id) {
+            let bid = md.bid?;
+            let ask = md.ask?;
+            return Some((bid + ask) / 2.0);
+        }
+        None
     }
-    pub fn get_midquote_w_timestamp(&self, symbol: &str) -> Option<(f64, DateTime<Utc>)> {
-        let mid = self.get_midquote(symbol)?;
-        let received_ts = self.data.get(symbol)?.received_ts?;
-        Some((mid, received_ts))
+    pub fn get_midquote_w_timestamp(&self, id: &SymbolId) -> Option<(f64, DateTime<Utc>)> {
+        if let Some(md) = self.get(id) {
+            let mid = (md.bid? + md.ask?) / 2.0;
+            return Some((mid, md.received_ts?));
+        }
+        None
     }
 }

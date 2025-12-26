@@ -9,6 +9,7 @@ use tokio::sync::Notify;
 use crypto_feeds::app_config::{load_config, load_perp, AppConfig};
 use crypto_feeds::mappers::*;
 use crypto_feeds::market_data::{AllMarketData, InstrumentType, MarketDataCollection};
+use crypto_feeds::symbol_registry::{REGISTRY};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -95,21 +96,15 @@ fn print_market_collection(
     println!("\n--- {} ---", exchange_name);
 
     // Sort symbols for consistent output
-    let mut symbols: Vec<_> = collection.data.keys().collect();
-    symbols.sort();
+    let count = collection.data.len();
 
-    for native_symbol in &symbols {
-        if let Some(md) = collection.data.get(*native_symbol) {
-            if let Some(mid) = md.midquote() {
-                // Normalize the symbol for display
-                let normalized = mapper
-                    .normalize(native_symbol, itype)
-                    .unwrap_or_else(|_| native_symbol.to_string());
+    for id in 0..count {
+        if let Some(md) = collection.get(&id) {
+            if let Some(mid) = md.midquote() && let Some(normalized) = REGISTRY.get_symbol(id){
 
                 println!(
-                    "  {} ({}): ${:.6} | bid: ${:.6} ({:.2}) | ask: ${:.6} ({:.2})",
+                    "  {}: ${:.6} | bid: ${:.6} ({:.2}) | ask: ${:.6} ({:.2})",
                     normalized,
-                    native_symbol,
                     mid,
                     md.bid.unwrap_or(0.0),
                     md.bid_qty.unwrap_or(0.0),

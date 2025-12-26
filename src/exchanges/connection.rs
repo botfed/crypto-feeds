@@ -2,13 +2,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
-use log::{error, info, warn, debug};
+use log::{debug, error, info, warn};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::interval;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
+use crate::market_data::InstrumentType;
+use crate::symbol_registry::REGISTRY;
 use crate::{MarketDataCollection, market_data::MarketData};
 
 #[derive(Clone)]
@@ -48,6 +50,9 @@ pub enum WireMessage<'a> {
 
 #[async_trait]
 pub trait ExchangeFeed {
+
+    fn get_itype(&self) -> Result<&InstrumentType>;
+
     async fn send_subscription(
         &self,
         _write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
@@ -149,6 +154,7 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
     symbols: &[&str],
     config: &ConnectionConfig,
 ) -> Result<ConnectionResult> {
+    let itype = feed.get_itype()?;
     let url = match feed.build_url(symbols) {
         Ok(v) => v,
         Err(e) => {
@@ -221,7 +227,9 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                         match feed.parse_message(WireMessage::Text(text.as_str()), received_ts) {
                             Ok(Some((sym, md))) => {
                                 let mut collection = data.lock().unwrap();
-                                collection.data.insert(sym, md);
+                                if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
+                                    collection.data[id] = Some(md);
+                                }
                             }
                             Ok(None) => {
                                 // intentionally ignored (heartbeats, sub acks, etc.)
@@ -240,7 +248,9 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                         match feed.parse_message(WireMessage::Binary(&bytes), received_ts) {
                             Ok(Some((sym, md))) => {
                                 let mut collection = data.lock().unwrap();
-                                collection.data.insert(sym, md);
+                                if let Some(id) = REGISTRY.lookup(&sym, &itype) {
+                                    collection.data[*id] = Some(md);
+                                };
                             }
                             Ok(None) => {
                                 // intentionally ignored

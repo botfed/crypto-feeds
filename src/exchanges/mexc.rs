@@ -91,7 +91,7 @@ type Book = Arc<Mutex<OrderBook>>;
 struct MexcFeed {
     // Used for perps depth -> BBO derivation
     books: HashMap<String, Book>,
-    market: InstrumentType,
+    itype: InstrumentType,
     mapper: MexcMapper,
 }
 
@@ -109,7 +109,7 @@ impl MexcFeed {
         }
 
         Self {
-            market: itype,
+            itype: itype,
             books: books,
             mapper: mapper,
         }
@@ -127,7 +127,7 @@ impl MexcFeed {
         }
 
         Self {
-            market: itype,
+            itype: itype,
             books,
             mapper: mapper,
         }
@@ -136,18 +136,21 @@ impl MexcFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for MexcFeed {
+    fn get_itype(&self) -> Result<&InstrumentType> {
+        Ok(&self.itype)
+    }
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
-        match self.market {
+        match self.itype {
             // Spot WS market streams
             InstrumentType::Spot => Ok("wss://wbs-api.mexc.com/ws".to_string()),
             // Futures WS base url
             InstrumentType::Perp => Ok("wss://contract.mexc.com/edge".to_string()), // updated base url in docs/log :contentReference[oaicite:4]{index=4}
-            _ => anyhow::bail!("Unsupported instrument type for MEXC: {:?}", self.market),
+            _ => anyhow::bail!("Unsupported instrument type for MEXC: {:?}", self.itype),
         }
     }
 
     fn heartbeat_message(&self) -> Option<Message> {
-        match self.market {
+        match self.itype {
             InstrumentType::Perp => Some(Message::Text(r#"{"method":"ping"}"#.into())),
             _ => None,
         }
@@ -158,7 +161,7 @@ impl ExchangeFeed for MexcFeed {
         write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
         symbols: &[&str],
     ) -> Result<()> {
-        match self.market {
+        match self.itype {
             InstrumentType::Spot => {
                 // Spot protobuf bookTicker stream (true BBO) :contentReference[oaicite:5]{index=5}
                 let params: Vec<String> = symbols
@@ -208,7 +211,7 @@ impl ExchangeFeed for MexcFeed {
                 Ok(())
             }
             _ => {
-                anyhow::bail!("Unsupported asset class {:?}", self.market)
+                anyhow::bail!("Unsupported asset class {:?}", self.itype)
             }
         }
     }
@@ -218,7 +221,7 @@ impl ExchangeFeed for MexcFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
     ) -> Result<Option<(String, MarketData)>> {
-        match self.market {
+        match self.itype {
             InstrumentType::Spot => match msg {
                 WireMessage::Binary(bytes) => {
                     if let Some((symbol, bid, ask, bid_qty, ask_qty)) =
@@ -309,7 +312,7 @@ impl ExchangeFeed for MexcFeed {
                 Ok(Some((depth.symbol, md)))
             }
             _ => {
-                anyhow::bail!("Unsupported asset class {:?}", self.market)
+                anyhow::bail!("Unsupported asset class {:?}", self.itype)
             }
         }
     }

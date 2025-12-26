@@ -42,6 +42,6 @@ impl SymbolMapper for CoinbaseMapper {
         }
     }
     fn exchange(&self) -> &str {
-        "mexc"
+        "coinbase"
     }
 }

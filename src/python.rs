@@ -1,6 +1,6 @@
 use crate::app_config::{AppConfig, load_config, load_perp, load_spot};
 use crate::market_data::{AllMarketData, MarketData};
-use chrono::{Duration, DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
@@ -238,8 +238,8 @@ pub struct PyFeedManager {
     runtime: Runtime,
     market_data: Py<PyMarketData>,
     shutdown: Arc<Notify>,
-    handles: Vec<JoinHandle<()>>,
-    spot_handles: Vec<JoinHandle<Result<(), anyhow::Error>>>,
+    perp_handles: Vec<JoinHandle<()>>,
+    spot_handles: Vec<JoinHandle<()>>,
 }
 
 #[pymethods]
@@ -257,7 +257,7 @@ impl PyFeedManager {
             runtime,
             market_data,
             shutdown,
-            handles: Vec::new(),
+            perp_handles: Vec::new(),
             spot_handles: Vec::new(),
         })
     }
@@ -291,7 +291,7 @@ impl PyFeedManager {
 
         self.runtime
             .block_on(async {
-                load_perp(&mut self.handles, &config.config, &all_data, &self.shutdown)
+                load_perp(&mut self.perp_handles, &config.config, &all_data, &self.shutdown)
             })
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(

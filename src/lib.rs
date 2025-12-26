@@ -1,3 +1,4 @@
+pub mod symbol_registry;
 pub mod app_config;
 pub mod mappers;
 pub mod exchange_fees;

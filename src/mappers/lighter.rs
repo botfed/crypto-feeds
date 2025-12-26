@@ -57,6 +57,6 @@ impl SymbolMapper for LighterMapper {
         }
     }
     fn exchange(&self) -> &str {
-        "binance"
+        "lighter"
     }
 }

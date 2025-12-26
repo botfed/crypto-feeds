@@ -1,5 +1,7 @@
-use anyhow::Result;
 use crate::market_data::InstrumentType;
+use anyhow::Result;
+use once_cell::sync::Lazy;
+use rustc_hash::FxHashMap;
 
 /// Converts between exchange-native and normalized symbol formats
 pub trait SymbolMapper: Send + Sync {
@@ -12,7 +14,7 @@ pub trait SymbolMapper: Send + Sync {
 /// Helper to parse normalized symbols
 pub fn parse_normalized(normalized: &str) -> Result<(String, String)> {
     let parts: Vec<&str> = normalized.split('_').collect();
-    
+
     match parts.as_slice() {
         [_itype, base, quote] => Ok((base.to_string(), quote.to_string())),
         [base, quote] => Ok((base.to_string(), quote.to_string())),

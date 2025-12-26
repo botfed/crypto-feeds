@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use log::warn;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
@@ -42,7 +42,7 @@ struct BinanceFeed {
     /// "wss://stream.binance.com:9443/stream" for spot
     /// "wss://fstream.binance.com/stream" for perp
     base_url: &'static str,
-    market: InstrumentType,
+    itype: InstrumentType,
     mapper: BinanceMapper,
 }
 
@@ -50,7 +50,7 @@ impl BinanceFeed {
     fn new_spot() -> Self {
         Self {
             base_url: "wss://stream.binance.com:9443/stream",
-            market: InstrumentType::Spot,
+            itype: InstrumentType::Spot,
             mapper: BinanceMapper,
         }
     }
@@ -58,7 +58,7 @@ impl BinanceFeed {
     fn new_perp() -> Self {
         Self {
             base_url: "wss://fstream.binance.com/stream",
-            market: InstrumentType::Perp,
+            itype: InstrumentType::Perp,
             mapper: BinanceMapper,
         }
     }
@@ -66,6 +66,9 @@ impl BinanceFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for BinanceFeed {
+    fn get_itype(&self) -> Result<&InstrumentType> {
+        Ok(&self.itype)
+    }
     fn build_url(&self, symbols: &[&str]) -> Result<String> {
         // Now symbols can be either normalized or native
         let streams: Vec<String> = symbols
@@ -74,7 +77,9 @@ impl ExchangeFeed for BinanceFeed {
                 // Try to denormalize first, fall back to treating as native
                 let native = self
                     .mapper
-                    .denormalize(s, self.market).unwrap().to_lowercase();
+                    .denormalize(s, self.itype)
+                    .unwrap()
+                    .to_lowercase();
                 format!("{}@bookTicker", native)
             })
             .collect();

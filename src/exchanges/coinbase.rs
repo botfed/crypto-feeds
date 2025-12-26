@@ -64,6 +64,10 @@ impl CoinbaseFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for CoinbaseFeed {
+
+    fn get_itype(&self) -> Result<&InstrumentType> {
+        Ok(&self.itype)
+    }
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
         // Coinbase uses a fixed URL; subscription carries symbols.
         Ok(self.url.to_string())

@@ -23,7 +23,7 @@ pub fn get_fees() -> ExchangeFees {
 #[derive(Clone)]
 struct BybitFeed {
     url: &'static str,
-    market: InstrumentType,
+    itype: InstrumentType,
     mapper: BybitMapper,
 }
 
@@ -31,14 +31,14 @@ impl BybitFeed {
     fn new_spot() -> Self {
         Self {
             url: "wss://stream.bybit.com/v5/public/spot",
-            market: InstrumentType::Spot,
+            itype: InstrumentType::Spot,
             mapper: BybitMapper,
         }
     }
     fn new_perp() -> Self {
         Self {
             url: "wss://stream.bybit.com/v5/public/linear",
-            market: InstrumentType::Perp,
+            itype: InstrumentType::Perp,
             mapper: BybitMapper,
         }
     }
@@ -46,6 +46,9 @@ impl BybitFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for BybitFeed {
+    fn get_itype(&self) -> Result<&InstrumentType> {
+        Ok(&self.itype)
+    }
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
         // Coinbase uses a fixed URL; subscription carries symbols.
         Ok(self.url.to_string())
@@ -60,7 +63,7 @@ impl ExchangeFeed for BybitFeed {
             .map(|symbol| {
                 format!(
                     "orderbook.1.{}",
-                    self.mapper.denormalize(symbol, self.market).unwrap()
+                    self.mapper.denormalize(symbol, self.itype).unwrap()
                 )
             })
             .collect();

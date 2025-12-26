@@ -151,6 +151,9 @@ fn parse_market_index(channel: &str) -> Option<u32> {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for LighterFeed {
+    fn get_itype(&self) -> Result<&InstrumentType> {
+        Ok(&self.itype)
+    }
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
         Ok("wss://mainnet.zklighter.elliot.ai/stream".to_string())
     }
