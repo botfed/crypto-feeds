@@ -1,5 +1,6 @@
 use crate::app_config::{AppConfig, load_config, load_perp, load_spot};
-use crate::market_data::{AllMarketData, MarketData};
+use crate::market_data::{AllMarketData, InstrumentType};
+use crate::symbol_registry::{SymbolId, REGISTRY};
 use chrono::{DateTime, Duration, Utc};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -39,6 +40,55 @@ fn init_logging(level: &str) -> PyResult<()> {
 }
 
 #[pyclass]
+pub struct PySymbolRegistry;
+
+#[pymethods]
+impl PySymbolRegistry {
+    #[new]
+    fn new() -> Self {
+        Self
+    }
+
+    /// Lookup a symbol and return its integer ID.
+    ///
+    /// Args:
+    ///     symbol: The symbol string (e.g., "BTCUSDT", "BTC-USDT", "BTC/USDT")
+    ///     instrument_type: The instrument type ("spot" or "perp")
+    ///
+    /// Returns:
+    ///     The integer symbol ID, or None if not found
+    fn lookup(&self, symbol: &str, instrument_type: &str) -> PyResult<Option<SymbolId>> {
+        let itype = match instrument_type.to_lowercase().as_str() {
+            "spot" => InstrumentType::Spot,
+            "perp" => InstrumentType::Perp,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid instrument type: {}. Must be 'spot' or 'perp'",
+                    instrument_type
+                )))
+            }
+        };
+
+        Ok(REGISTRY.lookup(symbol, &itype).copied())
+    }
+
+    /// Get the canonical symbol name from an integer ID.
+    ///
+    /// Args:
+    ///     symbol_id: The integer symbol ID
+    ///
+    /// Returns:
+    ///     The canonical symbol string (e.g., "SPOT-BTC-USDT"), or None if not found
+    fn get_symbol(&self, symbol_id: SymbolId) -> PyResult<Option<String>> {
+        // Check bounds to avoid panic
+        if symbol_id >= crate::symbol_registry::MAX_SYMBOLS {
+            return Ok(None);
+        }
+        Ok(REGISTRY.get_symbol(symbol_id).map(|s| s.to_string()))
+    }
+}
+
+#[pyclass]
 pub struct PyMarketData {
     all_data: Arc<AllMarketData>,
 }
@@ -52,40 +102,40 @@ impl PyMarketData {
         }
     }
 
-    fn get_bid(&self, exchange: &str, symbol: &str) -> PyResult<Option<f64>> {
+    fn get_bid(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
         let lock = collection.lock().unwrap();
-        Ok(lock.get(symbol).and_then(|md| md.bid))
+        Ok(lock.get(&symbol_id).and_then(|md| md.bid))
     }
 
-    fn get_ask(&self, exchange: &str, symbol: &str) -> PyResult<Option<f64>> {
+    fn get_ask(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
         let lock = collection.lock().unwrap();
-        Ok(lock.get(symbol).and_then(|md| md.ask))
+        Ok(lock.get(&symbol_id).and_then(|md| md.ask))
     }
 
-    fn get_bid_qty(&self, exchange: &str, symbol: &str) -> PyResult<Option<f64>> {
+    fn get_bid_qty(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
         let lock = collection.lock().unwrap();
-        Ok(lock.get(symbol).and_then(|md| md.bid_qty))
+        Ok(lock.get(&symbol_id).and_then(|md| md.bid_qty))
     }
 
-    fn get_ask_qty(&self, exchange: &str, symbol: &str) -> PyResult<Option<f64>> {
+    fn get_ask_qty(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
         let lock = collection.lock().unwrap();
-        Ok(lock.get(symbol).and_then(|md| md.ask_qty))
+        Ok(lock.get(&symbol_id).and_then(|md| md.ask_qty))
     }
 
-    fn get_midquote(&self, exchange: &str, symbol: &str) -> PyResult<Option<f64>> {
+    fn get_midquote(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
         let lock = collection.lock().unwrap();
-        Ok(lock.get_midquote(symbol))
+        Ok(lock.get_midquote(&symbol_id))
     }
 
-    fn get_spread(&self, exchange: &str, symbol: &str) -> PyResult<Option<f64>> {
+    fn get_spread(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
         let lock = collection.lock().unwrap();
-        if let Some(md) = lock.get(symbol) {
+        if let Some(md) = lock.get(&symbol_id) {
             if let (Some(bid), Some(ask)) = (md.bid, md.ask) {
                 return Ok(Some(ask - bid));
             }
@@ -93,12 +143,12 @@ impl PyMarketData {
         Ok(None)
     }
 
-    fn get_midquote_mean(&self, symbol: &str) -> PyResult<Option<f64>> {
+    fn get_midquote_mean(&self, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let threshold = Utc::now() - Duration::seconds(1);
         let quotes: Vec<Option<(f64, DateTime<Utc>)>> = self
             .all_data
             .iter()
-            .map(|(_, data)| data.lock().unwrap().get_midquote_w_timestamp(symbol))
+            .map(|(_, data)| data.lock().unwrap().get_midquote_w_timestamp(&symbol_id))
             .collect();
         // Efficient - one pass without allocating
         let (sum, count) = quotes
@@ -115,22 +165,16 @@ impl PyMarketData {
         };
     }
 
-    fn get_all_symbols(&self, exchange: &str) -> PyResult<Vec<String>> {
-        let collection = self.get_collection(exchange)?;
-        let lock = collection.lock().unwrap();
-        Ok(lock.data.keys().cloned().collect())
-    }
-
     fn get_market_data(
         &self,
         exchange: &str,
-        symbol: &str,
+        symbol_id: SymbolId,
         py: Python,
     ) -> PyResult<Option<PyObject>> {
         let collection = self.get_collection(exchange)?;
         let lock = collection.lock().unwrap();
 
-        if let Some(md) = lock.get(symbol) {
+        if let Some(md) = lock.get(&symbol_id) {
             let dict = PyDict::new_bound(py);
             dict.set_item("bid", md.bid)?;
             dict.set_item("ask", md.ask)?;
@@ -315,6 +359,7 @@ impl PyFeedManager {
 #[pymodule]
 fn crypto_feeds(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_logging, m)?)?;
+    m.add_class::<PySymbolRegistry>()?;
     m.add_class::<PyMarketData>()?;
     m.add_class::<PyAppConfig>()?;
     m.add_class::<PyFeedManager>()?;
