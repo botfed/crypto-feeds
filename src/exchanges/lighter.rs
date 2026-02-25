@@ -302,11 +302,17 @@ impl ExchangeFeed for LighterFeed {
             }
         }
 
+        let exchange_ts = ob
+            .order_book
+            .timestamp
+            .and_then(|ms| DateTime::from_timestamp_millis(ms as i64));
+
         let md = MarketData {
             bid,
             ask,
             bid_qty,
             ask_qty,
+            exchange_ts,
             received_ts: Some(received_ts),
         };
 

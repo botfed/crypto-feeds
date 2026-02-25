@@ -122,11 +122,16 @@ impl ExchangeFeed for CoinbaseFeed {
                             }
                         }
 
+                        let exchange_ts = DateTime::parse_from_rfc3339(&ticker.time)
+                            .ok()
+                            .map(|dt| dt.with_timezone(&Utc));
+
                         let market_data = MarketData {
                             bid,
                             ask,
                             bid_qty,
                             ask_qty,
+                            exchange_ts,
                             received_ts: Some(received_ts),
                         };
 

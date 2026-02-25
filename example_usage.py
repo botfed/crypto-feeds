@@ -109,7 +109,7 @@ def main():
                 # Exchange may not have this symbol/type combination
                 pass
 
-    # Calculate cross-exchange midquote means
+    # Calculate cross-exchange midquote means with different filter configs
     print("\n4. Cross-Exchange Midquote Means:")
     print("-" * 70)
     for (symbol, itype), (symbol_id, description) in symbol_map.items():
@@ -117,31 +117,46 @@ def main():
             continue
 
         try:
-            mean = market_data.get_midquote_mean(symbol_id)
-            if mean is not None:
-                print(f"   {description:25} (ID: {symbol_id:3}): ${mean:>10.2f}")
+            # Default thresholds: 50ms receive, 150ms exchange
+            mean_default = market_data.get_midquote_mean(symbol_id)
+            # Relaxed: 1s receive, no exchange filter
+            mean_relaxed = market_data.get_midquote_mean(symbol_id,
+                max_receive_age_ns=1_000_000_000, max_exchange_age_ns=None)
+            # No filtering at all
+            mean_unfiltered = market_data.get_midquote_mean(symbol_id,
+                max_receive_age_ns=None, max_exchange_age_ns=None)
+
+            parts = []
+            if mean_default is not None:
+                parts.append(f"default=${mean_default:>10.2f}")
+            if mean_relaxed is not None:
+                parts.append(f"relaxed=${mean_relaxed:>10.2f}")
+            if mean_unfiltered is not None:
+                parts.append(f"unfiltered=${mean_unfiltered:>10.2f}")
+
+            if parts:
+                print(f"   {description:25} (ID: {symbol_id:3}): {' | '.join(parts)}")
         except Exception as e:
             pass
 
-    # Demonstrate getting full market data dict
-    print("\n5. Getting Full Market Data Objects:")
+    # Demonstrate getting full market data dict (now includes exchange_ts)
+    print("\n5. Getting Full Market Data Objects (with exchange_ts):")
     print("-" * 70)
     btc_usdt_spot_id = registry.lookup("BTC_USDT", "spot")
     btc_usd_spot_id = registry.lookup("BTC_USD", "spot")
-    if btc_usdt_spot_id is not None:
-        try:
-            data = market_data.get_market_data("binance", btc_usdt_spot_id)
-            if data:
-                print(f"   binance BTC/USDT spot: {data}")
-        except Exception as e:
-            pass
-    if btc_usd_spot_id is not None:
-        try:
-            data = market_data.get_market_data("coinbase", btc_usd_spot_id)
-            if data:
-                print(f"   coinbase BTC/USD spot: {data}")
-        except Exception as e:
-            pass
+    btc_usdt_perp_id = registry.lookup("BTC_USDT", "perp")
+    for label, exchange, sid in [
+        ("binance BTC/USDT spot", "binance", btc_usdt_spot_id),
+        ("coinbase BTC/USD spot", "coinbase", btc_usd_spot_id),
+        ("bybit BTC/USDT perp", "bybit", btc_usdt_perp_id),
+    ]:
+        if sid is not None:
+            try:
+                data = market_data.get_market_data(exchange, sid)
+                if data:
+                    print(f"   {label}: {data}")
+            except Exception as e:
+                pass
 
     print("\n6. Shutting Down:")
     print("-" * 70)

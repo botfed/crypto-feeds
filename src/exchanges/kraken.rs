@@ -133,11 +133,22 @@ impl ExchangeFeed for KrakenFeed {
                                                     .and_then(|v| v.as_str())
                                                     .and_then(|s| s.parse::<f64>().ok());
 
+                                                let exchange_ts = spread_array
+                                                    .get(2)
+                                                    .and_then(|v| v.as_str())
+                                                    .and_then(|s| s.parse::<f64>().ok())
+                                                    .and_then(|secs| {
+                                                        let whole = secs as i64;
+                                                        let nanos = ((secs - whole as f64) * 1_000_000_000.0) as u32;
+                                                        DateTime::from_timestamp(whole, nanos)
+                                                    });
+
                                                 let market_data = MarketData {
                                                     bid,
                                                     ask,
                                                     bid_qty,
                                                     ask_qty,
+                                                    exchange_ts,
                                                     received_ts: Some(received_ts),
                                                 };
                                                 return Ok(Some((symbol.to_string(), market_data)));

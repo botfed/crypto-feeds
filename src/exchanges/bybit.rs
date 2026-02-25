@@ -118,11 +118,16 @@ impl ExchangeFeed for BybitFeed {
                                 .get(0)
                                 .and_then(|(_, size)| size.parse::<f64>().ok());
 
+                            let exchange_ts =
+                                DateTime::from_timestamp_millis(response.ts as i64)
+                                    .map(|dt| dt.with_timezone(&Utc));
+
                             let market_data = MarketData {
                                 bid,
                                 ask,
                                 bid_qty,
                                 ask_qty,
+                                exchange_ts,
                                 received_ts: Some(received_ts),
                             };
                             return Ok(Some((response.data.symbol, market_data)));

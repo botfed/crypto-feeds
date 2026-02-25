@@ -232,6 +232,7 @@ impl ExchangeFeed for MexcFeed {
                             ask: Some(ask),
                             bid_qty: Some(bid_qty),
                             ask_qty: Some(ask_qty),
+                            exchange_ts: None,
                             received_ts: Some(received_ts),
                         };
                         Ok(Some((symbol, md)))
@@ -301,11 +302,16 @@ impl ExchangeFeed for MexcFeed {
                     return Ok(None);
                 }
 
+                let exchange_ts = depth
+                    .ts
+                    .and_then(|ms| DateTime::from_timestamp_millis(ms));
+
                 let md = MarketData {
                     bid: Some(bid),
                     ask: Some(ask),
                     bid_qty: Some(bid_qty),
                     ask_qty: Some(ask_qty),
+                    exchange_ts,
                     received_ts: Some(received_ts),
                 };
 

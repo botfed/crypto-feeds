@@ -1,7 +1,7 @@
 use crate::app_config::{AppConfig, load_config, load_perp, load_spot};
 use crate::market_data::{AllMarketData, InstrumentType};
 use crate::symbol_registry::{SymbolId, REGISTRY};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::collections::HashMap;
@@ -143,26 +143,56 @@ impl PyMarketData {
         Ok(None)
     }
 
-    fn get_midquote_mean(&self, symbol_id: SymbolId) -> PyResult<Option<f64>> {
-        let threshold = Utc::now() - Duration::seconds(1);
-        let quotes: Vec<Option<(f64, DateTime<Utc>)>> = self
+    #[pyo3(signature = (symbol_id, max_receive_age_ns=50_000_000, max_exchange_age_ns=150_000_000))]
+    fn get_midquote_mean(
+        &self,
+        symbol_id: SymbolId,
+        max_receive_age_ns: Option<i64>,
+        max_exchange_age_ns: Option<i64>,
+    ) -> PyResult<Option<f64>> {
+        let now = Utc::now();
+        let quotes: Vec<Option<(f64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>> = self
             .all_data
             .iter()
-            .map(|(_, data)| data.lock().unwrap().get_midquote_w_timestamp(&symbol_id))
+            .map(|(_, data)| data.lock().unwrap().get_midquote_w_timestamps(&symbol_id))
             .collect();
-        // Efficient - one pass without allocating
+
         let (sum, count) = quotes
             .iter()
             .flatten()
-            .filter(|(_, dt)| dt > &threshold)
-            .map(|(val, _)| val)
+            .filter(|(_, received_ts, exchange_ts)| {
+                if let Some(max_recv) = max_receive_age_ns {
+                    match received_ts {
+                        Some(ts) => {
+                            let age_ns = (now - *ts).num_nanoseconds().unwrap_or(i64::MAX);
+                            if age_ns >= max_recv {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+                if let Some(max_exch) = max_exchange_age_ns {
+                    match exchange_ts {
+                        Some(ts) => {
+                            let age_ns = (now - *ts).num_nanoseconds().unwrap_or(i64::MAX);
+                            if age_ns >= max_exch {
+                                return false;
+                            }
+                        }
+                        None => return false,
+                    }
+                }
+                true
+            })
+            .map(|(val, _, _)| val)
             .fold((0.0, 0), |(sum, count), &val| (sum + val, count + 1));
 
         if count > 0 {
-            return Ok(Some(sum / count as f64));
+            Ok(Some(sum / count as f64))
         } else {
-            return Ok(None); // No values matched the filter
-        };
+            Ok(None)
+        }
     }
 
     fn get_market_data(
@@ -180,6 +210,10 @@ impl PyMarketData {
             dict.set_item("ask", md.ask)?;
             dict.set_item("bid_qty", md.bid_qty)?;
             dict.set_item("ask_qty", md.ask_qty)?;
+            dict.set_item(
+                "exchange_ts",
+                md.exchange_ts.map(|ts| ts.timestamp_millis()),
+            )?;
             dict.set_item(
                 "received_ts",
                 md.received_ts.map(|ts| ts.timestamp_millis()),

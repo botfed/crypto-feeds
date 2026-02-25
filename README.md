@@ -207,3 +207,46 @@ Run the test:
 source venv/bin/activate
 python test_feeds.py
 ```
+
+
+
+## Building crypto-feeds Python Bindings on Ubuntu
+
+### Prerequisites
+
+Install system dependencies:
+```bash
+sudo apt update
+sudo apt install -y build-essential libssl-dev pkg-config protobuf-compiler
+```
+
+Install Rust:
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+Install uv (Python package manager):
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+```
+
+### Installation
+
+Add to your `pyproject.toml`:
+```toml
+dependencies = [
+    "crypto-feeds @ git+https://github.com/botfed/crypto-feeds.git",
+]
+```
+
+Then sync:
+```bash
+uv sync
+```
+
+### Verification
+```bash
+uv run python -c "import crypto_feeds; print('OK')"
+```

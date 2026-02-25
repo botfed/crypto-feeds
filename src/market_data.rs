@@ -9,6 +9,7 @@ pub struct MarketDataAtomic {
     ask: AtomicU64,
     bid_qty: AtomicU64,
     ask_qty: AtomicU64,
+    exchange_ts: AtomicU64,
     received_ts: AtomicU64,
 }
 
@@ -18,6 +19,7 @@ pub struct MarketData {
     pub ask: Option<f64>,
     pub bid_qty: Option<f64>,
     pub ask_qty: Option<f64>,
+    pub exchange_ts: Option<DateTime<Utc>>,
     pub received_ts: Option<DateTime<Utc>>,
 }
 
@@ -123,10 +125,13 @@ impl MarketDataCollection {
         }
         None
     }
-    pub fn get_midquote_w_timestamp(&self, id: &SymbolId) -> Option<(f64, DateTime<Utc>)> {
+    pub fn get_midquote_w_timestamps(
+        &self,
+        id: &SymbolId,
+    ) -> Option<(f64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> {
         if let Some(md) = self.get(id) {
             let mid = (md.bid? + md.ask?) / 2.0;
-            return Some((mid, md.received_ts?));
+            return Some((mid, md.received_ts, md.exchange_ts));
         }
         None
     }
