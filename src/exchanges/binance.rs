@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use log::warn;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
@@ -34,6 +34,9 @@ struct BinanceBookTickerData {
     #[serde(rename = "A")]
     ask_quantity: String,
     u: u64,
+    /// Event time (ms) — present on futures bookTicker, absent on spot
+    #[serde(rename = "E", default)]
+    event_time: Option<u64>,
 }
 
 /// Binance feed implemented using the generic connection abstraction.
@@ -115,12 +118,17 @@ impl ExchangeFeed for BinanceFeed {
                     }
                 }
 
+                let exchange_ts = msg
+                    .data
+                    .event_time
+                    .and_then(|ms| DateTime::from_timestamp_millis(ms as i64));
+
                 let market_data = MarketData {
                     bid,
                     ask,
                     bid_qty,
                     ask_qty,
-                    exchange_ts: None,
+                    exchange_ts,
                     received_ts: Some(received_ts),
                 };
 

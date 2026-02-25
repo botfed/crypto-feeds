@@ -139,22 +139,31 @@ def main():
         except Exception as e:
             pass
 
-    # Demonstrate getting full market data dict (now includes exchange_ts)
-    print("\n5. Getting Full Market Data Objects (with exchange_ts):")
+    # Show market data with exchange_ts and latency measurements
+    print("\n5. Market Data with Timestamp Latencies:")
     print("-" * 70)
+    now_ms = int(time.time() * 1000)
     btc_usdt_spot_id = registry.lookup("BTC_USDT", "spot")
     btc_usd_spot_id = registry.lookup("BTC_USD", "spot")
     btc_usdt_perp_id = registry.lookup("BTC_USDT", "perp")
+    eth_usdt_perp_id = registry.lookup("ETH_USDT", "perp")
     for label, exchange, sid in [
         ("binance BTC/USDT spot", "binance", btc_usdt_spot_id),
+        ("binance BTC/USDT perp", "binance", btc_usdt_perp_id),
         ("coinbase BTC/USD spot", "coinbase", btc_usd_spot_id),
         ("bybit BTC/USDT perp", "bybit", btc_usdt_perp_id),
+        ("bybit ETH/USDT perp", "bybit", eth_usdt_perp_id),
     ]:
         if sid is not None:
             try:
                 data = market_data.get_market_data(exchange, sid)
                 if data:
-                    print(f"   {label}: {data}")
+                    recv_ts = data.get("received_ts")
+                    exch_ts = data.get("exchange_ts")
+                    recv_lat = f"{now_ms - recv_ts:>6}ms" if recv_ts else "   N/A"
+                    exch_lat = f"{now_ms - exch_ts:>6}ms" if exch_ts else "   N/A"
+                    print(f"   {label:25} | recv_lat: {recv_lat} | exch_lat: {exch_lat} | "
+                          f"exchange_ts: {exch_ts} | received_ts: {recv_ts}")
             except Exception as e:
                 pass
 
