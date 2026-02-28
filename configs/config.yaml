@@ -6,7 +6,8 @@ spot:
   bybit:   ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
 
 perp:
-  binance: ['BTC_USDT', 'AIXBT_USDT', 'AERO_USDT']
-  bybit:   ['BTC_USDT', "AIXBT_USDT", "VIRTUAL_USDT", "AERO_USDT"]
-  mexc:    ['BTC_USDT', 'AERO_USDT', 'AIXBT_USDT']
-  lighter: ['BTC_USDC', "AERO_USDC"]
+  binance:  ['BTC_USDT', 'AIXBT_USDT', 'AERO_USDT']
+  coinbase: ['BTC_USD', 'ETH_USD']
+  bybit:    ['BTC_USDT', "AIXBT_USDT", "VIRTUAL_USDT", "AERO_USDT"]
+  mexc:     ['BTC_USDT', 'AERO_USDT', 'AIXBT_USDT']
+  lighter:  ['BTC_USDC', "AERO_USDC"]

@@ -1,6 +1,7 @@
 use crate::market_data::{AllMarketData, MarketDataCollection};
 use crate::symbol_registry::REGISTRY;
 use anyhow::Result;
+use chrono::Utc;
 use std::sync::Arc;
 use tokio::sync::Notify;
 
@@ -47,14 +48,35 @@ pub fn print_market_collection(exchange_name: &str, collection: &MarketDataColle
             if let Some(mid) = md.midquote()
                 && let Some(normalized) = REGISTRY.get_symbol(id)
             {
+                let now = Utc::now();
+                let exch_ts = md
+                    .exchange_ts
+                    .map(|t| t.format("%H:%M:%S%.3f").to_string())
+                    .unwrap_or_else(|| "N/A".into());
+                let recv_ts = md
+                    .received_ts
+                    .map(|t| t.format("%H:%M:%S%.3f").to_string())
+                    .unwrap_or_else(|| "N/A".into());
+                let exch_lat = md
+                    .exchange_ts
+                    .map(|t| format!("{}", (now - t).num_milliseconds()))
+                    .unwrap_or_else(|| "N/A".into());
+                let recv_lat = md
+                    .received_ts
+                    .map(|t| format!("{}", (now - t).num_milliseconds()))
+                    .unwrap_or_else(|| "N/A".into());
                 println!(
-                    "  {}: ${:.6} | bid: ${:.6} ({:.2}) | ask: ${:.6} ({:.2})",
+                    "  {}: ${:.6} | bid: ${:.6} ({:.2}) | ask: ${:.6} ({:.2}) | exch: {} | recv: {} | exch_lat: {}ms | recv_lat: {}ms",
                     normalized,
                     mid,
                     md.bid.unwrap_or(0.0),
                     md.bid_qty.unwrap_or(0.0),
                     md.ask.unwrap_or(0.0),
-                    md.ask_qty.unwrap_or(0.0)
+                    md.ask_qty.unwrap_or(0.0),
+                    exch_ts,
+                    recv_ts,
+                    exch_lat,
+                    recv_lat,
                 );
             }
         }

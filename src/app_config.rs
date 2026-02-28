@@ -112,6 +112,16 @@ pub fn load_perp(
             }
         }));
     }
+    if let Some(syms) = perp_syms("coinbase") {
+        let data = Arc::clone(&market_data.coinbase);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = coinbase::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("Coinbase perp listener exited with error {:?}", e);
+            }
+        }));
+    }
     if let Some(syms) = perp_syms("mexc") {
         let data = Arc::clone(&market_data.mexc);
         let shutdown = shutdown.clone();

@@ -36,6 +36,12 @@ impl SymbolMapper for CoinbaseMapper {
                 let quote = parts[1]; // "USDT"
                 return Ok((base.to_string(), quote.to_string()));
             }
+            InstrumentType::Perp => {
+                // BTC-PERP-INTX -> ("BTC", "USD")
+                let parts: Vec<&str> = native.split('-').collect();
+                let base = parts[0];
+                Ok((base.to_string(), "USD".to_string()))
+            }
             _ => {
                 anyhow::bail!("Unsupported itype {:?}", itype)
             }
