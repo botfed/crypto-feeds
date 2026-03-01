@@ -155,6 +155,10 @@ pub async fn print_bbo_with_analytics(
     result
 }
 
+fn fmt_f0(v: Option<f64>) -> String {
+    v.map(|x| format!("{:.0}", x)).unwrap_or_else(|| "-".into())
+}
+
 fn fmt_f6(v: Option<f64>) -> String {
     v.map(|x| format!("{:.6}", x)).unwrap_or_else(|| "-".into())
 }
@@ -171,19 +175,21 @@ fn write_header(buf: &mut String, has_analytics: bool) {
     if has_analytics {
         let _ = writeln!(
             buf,
-            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12}",
+            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10}",
             "Symbol", "Mid", "Bid", "BidQty", "Ask", "AskQty",
             "ELp50", "ELp9999", "RLp50", "RLp9999",
             "TWAP(10s)", "Sprd", "MdnSprd(1h)", "Vol(60s)", "MaxJmp(1h@100ms)",
             "MdnRng(1s)", "P99Rng(1s)",
+            "BidFl/hr", "BidN", "BidMkout", "AskFl/hr", "AskN", "AskMkout",
         );
         let _ = writeln!(
             buf,
-            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12}",
+            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10}",
             "", "", "", "", "", "",
             "(ms,1h)", "(ms,1h)", "(ms,1h)", "(ms,1h)",
             "", "(bps)", "(bps)", "(bps/s)", "(bps)",
             "(bps,1h)", "(bps,1h)",
+            "@p99/2", "", "(bps)", "@p99/2", "", "(bps)",
         );
     } else {
         let _ = writeln!(
@@ -252,9 +258,12 @@ pub fn write_market_collection(
 
             let (twap, mdn_sprd_bps, vol_bps_s, max_jump_bps,
                  el_p50, el_p9999, rl_p50, rl_p9999,
-                 mdn_rng_bps, p99_rng_bps) = match (analytics, exchange) {
+                 mdn_rng_bps, p99_rng_bps,
+                 bid_fills_hr, bid_n_fills, bid_mkout,
+                 ask_fills_hr, ask_n_fills, ask_mkout,
+            ) = match (analytics, exchange) {
                 (Some(a), Some(ex)) => {
-                    use crate::analytics::RangeStat;
+                    use crate::analytics::{QuoteSide, RangeStat};
                     const BUCKET_1S: usize = 10; // 10 snaps @ 100ms = 1s
                     let twap = a.midquote_twap(ex, id, 100);
                     let mdn_sprd = a.snap_median(ex, id, SnapshotField::Spread, ONE_HOUR)
@@ -271,14 +280,41 @@ pub fn write_market_collection(
                     let rl_p9999 = a.snap_quantile(ex, id, SnapshotField::ReceiveLatMs, ONE_HOUR, 0.9999);
                     let mdn_rng = a.mid_range_bps_stat(ex, id, ONE_HOUR, BUCKET_1S, RangeStat::Median);
                     let p99_rng = a.mid_range_bps_stat(ex, id, ONE_HOUR, BUCKET_1S, RangeStat::Quantile(0.99));
-                    (twap, mdn_sprd, vol, max_jump, el_p50, el_p9999, rl_p50, rl_p9999, mdn_rng, p99_rng)
+
+                    // Fill sim at half the p99 range as half-spread
+                    let half_spread = p99_rng.map(|r| r / 2.0);
+                    let (bf, bn, bm, af, an, am) = match half_spread {
+                        Some(hs) if hs > 0.0 => {
+                            let bid_sim = a.quote_fill_analysis(ex, id, QuoteSide::Bid, hs, ONE_HOUR);
+                            let ask_sim = a.quote_fill_analysis(ex, id, QuoteSide::Ask, hs, ONE_HOUR);
+                            // Normalize fills to per-hour rate using actual data duration
+                            // Each snapshot ≈ 100ms, so n_total snaps = n_total/10 seconds = n_total/36000 hours
+                            let bid_fph = bid_sim.as_ref().map(|r| {
+                                if r.n_total > 0 { r.n_fills as f64 * ONE_HOUR as f64 / r.n_total as f64 } else { 0.0 }
+                            });
+                            let ask_fph = ask_sim.as_ref().map(|r| {
+                                if r.n_total > 0 { r.n_fills as f64 * ONE_HOUR as f64 / r.n_total as f64 } else { 0.0 }
+                            });
+                            (
+                                bid_fph,
+                                bid_sim.as_ref().map(|r| r.n_fills as f64),
+                                bid_sim.as_ref().map(|r| r.mean_markout_bps),
+                                ask_fph,
+                                ask_sim.as_ref().map(|r| r.n_fills as f64),
+                                ask_sim.as_ref().map(|r| r.mean_markout_bps),
+                            )
+                        }
+                        _ => (None, None, None, None, None, None),
+                    };
+
+                    (twap, mdn_sprd, vol, max_jump, el_p50, el_p9999, rl_p50, rl_p9999, mdn_rng, p99_rng, bf, bn, bm, af, an, am)
                 }
-                _ => (None, None, None, None, None, None, None, None, None, None),
+                _ => (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
             };
 
             let _ = writeln!(
                 buf,
-                "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12}",
+                "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10}",
                 sym,
                 fmt_f6(mid),
                 fmt_f6(bid),
@@ -296,6 +332,12 @@ pub fn write_market_collection(
                 fmt_f2(max_jump_bps),
                 fmt_f2(mdn_rng_bps),
                 fmt_f2(p99_rng_bps),
+                fmt_f2(bid_fills_hr),
+                fmt_f0(bid_n_fills),
+                fmt_f2(bid_mkout),
+                fmt_f2(ask_fills_hr),
+                fmt_f0(ask_n_fills),
+                fmt_f2(ask_mkout),
             );
         } else {
             let (e_lat, r_lat) = match md {
