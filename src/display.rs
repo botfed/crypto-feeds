@@ -380,9 +380,10 @@ pub fn write_market_collection(
         } else {
             let (e_lat, r_lat) = match md {
                 Some(md) => (
-                    md.exchange_ts
-                        .map(|t| format!("{}", (now - t).num_milliseconds()))
-                        .unwrap_or_else(|| "-".into()),
+                    match (md.received_ts, md.exchange_ts) {
+                        (Some(r), Some(e)) => format!("{}", (r - e).num_milliseconds()),
+                        _ => "-".into(),
+                    },
                     md.received_ts
                         .map(|t| format!("{}", (now - t).num_milliseconds()))
                         .unwrap_or_else(|| "-".into()),

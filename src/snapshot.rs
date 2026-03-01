@@ -238,8 +238,8 @@ pub async fn run_snapshot_task(
                     .and_then(|ts| ts.timestamp_nanos_opt())
                     .unwrap_or(0);
 
-                let exchange_lat_ms = if exchange_ts_ns > 0 {
-                    (snap_ts_ns - exchange_ts_ns) as f64 / 1_000_000.0
+                let exchange_lat_ms = if exchange_ts_ns > 0 && received_ts_ns > 0 {
+                    (received_ts_ns - exchange_ts_ns) as f64 / 1_000_000.0
                 } else {
                     f64::NAN
                 };
