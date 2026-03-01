@@ -16,6 +16,12 @@ pub struct SnapshotData {
     pub midquote: f64,
     pub spread: f64,
     pub log_return: f64,
+    pub mid_high: f64,
+    pub mid_low: f64,
+    pub bid_high: f64,
+    pub ask_low: f64,
+    pub exchange_lat_ms: f64,
+    pub receive_lat_ms: f64,
     pub exchange_ts_ns: i64,
     pub received_ts_ns: i64,
     pub snap_ts_ns: i64,
@@ -151,6 +157,7 @@ pub async fn run_snapshot_task(
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut prev_mid = vec![f64::NAN; NUM_EXCHANGES * MAX_SYMBOLS];
+    let mut prev_tick_pos = vec![0u64; NUM_EXCHANGES * MAX_SYMBOLS];
 
     // Create the shutdown future once so we don't miss notifications
     // between loop iterations
@@ -186,7 +193,35 @@ pub async fn run_snapshot_task(
                 let midquote = (bid + ask) / 2.0;
                 let spread = ask - bid;
 
+                // Scan raw ticks since last snapshot for min/max midquote
                 let prev_idx = ex_idx * MAX_SYMBOLS + sym_id;
+                let (mid_high, mid_low, bid_high, ask_low) = if let Some(tick_buf) = tick_coll.get_buffer(&sym_id) {
+                    let cur_pos = tick_buf.write_pos();
+                    let start_pos = prev_tick_pos[prev_idx];
+                    let mut m_hi = midquote;
+                    let mut m_lo = midquote;
+                    let mut b_hi = bid;
+                    let mut a_lo = ask;
+                    // Walk ticks from prev snapshot pos to current pos
+                    // Cap at 1000 to bound work if something is weird
+                    let count = (cur_pos.saturating_sub(start_pos)).min(1000);
+                    for i in 0..count {
+                        if let Some(tick) = tick_buf.read_at(start_pos + i) {
+                            if let (Some(b), Some(a)) = (tick.bid, tick.ask) {
+                                let m = (b + a) / 2.0;
+                                if m > m_hi { m_hi = m; }
+                                if m < m_lo { m_lo = m; }
+                                if b > b_hi { b_hi = b; }
+                                if a < a_lo { a_lo = a; }
+                            }
+                        }
+                    }
+                    prev_tick_pos[prev_idx] = cur_pos;
+                    (m_hi, m_lo, b_hi, a_lo)
+                } else {
+                    (midquote, midquote, bid, ask)
+                };
+
                 let log_return = if prev_mid[prev_idx].is_nan() {
                     f64::NAN
                 } else {
@@ -203,6 +238,17 @@ pub async fn run_snapshot_task(
                     .and_then(|ts| ts.timestamp_nanos_opt())
                     .unwrap_or(0);
 
+                let exchange_lat_ms = if exchange_ts_ns > 0 {
+                    (snap_ts_ns - exchange_ts_ns) as f64 / 1_000_000.0
+                } else {
+                    f64::NAN
+                };
+                let receive_lat_ms = if received_ts_ns > 0 {
+                    (snap_ts_ns - received_ts_ns) as f64 / 1_000_000.0
+                } else {
+                    f64::NAN
+                };
+
                 snap_coll.push(
                     &sym_id,
                     SnapshotData {
@@ -213,6 +259,12 @@ pub async fn run_snapshot_task(
                         midquote,
                         spread,
                         log_return,
+                        mid_high,
+                        mid_low,
+                        bid_high,
+                        ask_low,
+                        exchange_lat_ms,
+                        receive_lat_ms,
                         exchange_ts_ns,
                         received_ts_ns,
                         snap_ts_ns,
@@ -242,6 +294,12 @@ mod tests {
             midquote: 100.25,
             spread: 0.5,
             log_return: f64::NAN,
+            mid_high: 100.30,
+            mid_low: 100.20,
+            bid_high: 100.05,
+            ask_low: 100.45,
+            exchange_lat_ms: f64::NAN,
+            receive_lat_ms: f64::NAN,
             exchange_ts_ns: 0,
             received_ts_ns: 0,
             snap_ts_ns: 1000,

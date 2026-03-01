@@ -164,7 +164,7 @@ impl ExchangeFeed for LighterFeed {
         write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
         symbols: &[&str],
     ) -> Result<()> {
-        println!("Lighter sending sub {:?}", symbols);
+        debug!("Lighter sending sub {:?}", symbols);
         for symbol in symbols {
             let native = self.mapper.denormalize(symbol, self.itype).unwrap();
             let Some(&market_index) = self.sym_to_index.get(&native) else {
@@ -176,7 +176,7 @@ impl ExchangeFeed for LighterFeed {
                 "type": "subscribe",
                 "channel": format!("order_book/{}", market_index),
             });
-            println!("Send lighter sub {}", subscribe_msg);
+            debug!("Send lighter sub {}", subscribe_msg);
 
             write
                 .send(Message::Text(subscribe_msg.to_string().into()))

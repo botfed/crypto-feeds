@@ -1,4 +1,4 @@
-use crate::analytics::{Analytics, SnapshotField};
+use crate::analytics::{Analytics, QuoteSide, RangeStat, SnapshotField};
 use crate::app_config::{AppConfig, load_config, load_perp, load_spot};
 use crate::market_data::{AllMarketData, Exchange, InstrumentType, MarketDataCollection};
 use crate::snapshot::{AllSnapshotData, SnapshotConfig, run_snapshot_task};
@@ -32,7 +32,7 @@ fn parse_exchange(exchange: &str) -> PyResult<Exchange> {
 fn parse_field(field: &str) -> PyResult<SnapshotField> {
     SnapshotField::from_str(field).ok_or_else(|| {
         pyo3::exceptions::PyValueError::new_err(format!(
-            "Unknown field: {}. Valid: bid, ask, bid_qty, ask_qty, midquote, spread, log_return",
+            "Unknown field: {}. Valid: bid, ask, bid_qty, ask_qty, midquote, spread, log_return, mid_high, mid_low, bid_high, ask_low, exchange_lat_ms (elat), receive_lat_ms (rlat)",
             field
         ))
     })
@@ -280,6 +280,16 @@ impl PyAnalytics {
         Ok(self.analytics.midquote_stdev(&ex, symbol_id, n))
     }
 
+    fn max_abs_log_return(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        n: usize,
+    ) -> PyResult<Option<f64>> {
+        let ex = parse_exchange(exchange)?;
+        Ok(self.analytics.max_abs_log_return(&ex, symbol_id, n))
+    }
+
     fn realized_vol(
         &self,
         exchange: &str,
@@ -338,6 +348,24 @@ impl PyAnalytics {
         Ok(self.analytics.snap_median(&ex, symbol_id, f, n))
     }
 
+    fn snap_quantile(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        field: &str,
+        n: usize,
+        q: f64,
+    ) -> PyResult<Option<f64>> {
+        if !(0.0..=1.0).contains(&q) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "q must be between 0.0 and 1.0",
+            ));
+        }
+        let ex = parse_exchange(exchange)?;
+        let f = parse_field(field)?;
+        Ok(self.analytics.snap_quantile(&ex, symbol_id, f, n, q))
+    }
+
     fn tick_midquote_mean(
         &self,
         exchange: &str,
@@ -346,6 +374,118 @@ impl PyAnalytics {
     ) -> PyResult<Option<f64>> {
         let ex = parse_exchange(exchange)?;
         Ok(self.analytics.tick_midquote_mean(&ex, symbol_id, n))
+    }
+
+    /// Simulate quoting at a fixed spread from mid and compute fill rate + markout.
+    ///
+    /// Args:
+    ///     exchange: Exchange name (e.g. "binance")
+    ///     symbol_id: Symbol ID
+    ///     side: "ask"/"a" or "bid"/"b"
+    ///     spread_bps: Distance from mid in basis points
+    ///     lookback_snaps: Number of snapshots to look back
+    ///
+    /// Returns dict with n_fills, n_total, mean_markout_bps, stdev_markout_bps or None.
+    fn quote_fill_analysis(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        side: &str,
+        spread_bps: f64,
+        lookback_snaps: usize,
+        py: Python,
+    ) -> PyResult<Option<PyObject>> {
+        let ex = parse_exchange(exchange)?;
+        let qs = QuoteSide::from_str(side).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown side: {}. Valid: bid/b, ask/a",
+                side
+            ))
+        })?;
+        if spread_bps < 0.0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "spread_bps must be >= 0",
+            ));
+        }
+        match self
+            .analytics
+            .quote_fill_analysis(&ex, symbol_id, qs, spread_bps, lookback_snaps)
+        {
+            Some(r) => {
+                let dict = PyDict::new_bound(py);
+                dict.set_item("n_fills", r.n_fills)?;
+                dict.set_item("n_total", r.n_total)?;
+                dict.set_item("mean_markout_bps", r.mean_markout_bps)?;
+                dict.set_item("stdev_markout_bps", r.stdev_markout_bps)?;
+                Ok(Some(dict.into()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Get resampled mid-range in bps per bucket.
+    ///
+    /// Args:
+    ///     exchange: Exchange name
+    ///     symbol_id: Symbol ID
+    ///     window_snaps: Total snapshots to look back (e.g. 36000 = 1 hour at 100ms)
+    ///     bucket_size: Snapshots per bucket (e.g. 10 = 1 second at 100ms)
+    ///
+    /// Returns list of range-in-bps values, one per bucket.
+    fn mid_range_bps_buckets(
+        &self,
+        py: Python,
+        exchange: &str,
+        symbol_id: SymbolId,
+        window_snaps: usize,
+        bucket_size: usize,
+    ) -> PyResult<Option<PyObject>> {
+        let ex = parse_exchange(exchange)?;
+        match self
+            .analytics
+            .mid_range_bps_buckets(&ex, symbol_id, window_snaps, bucket_size)
+        {
+            Some(v) => Ok(Some(PyList::new_bound(py, &v).into())),
+            None => Ok(None),
+        }
+    }
+
+    /// Compute a summary statistic over resampled mid-range bps buckets.
+    ///
+    /// Args:
+    ///     exchange: Exchange name
+    ///     symbol_id: Symbol ID
+    ///     window_snaps: Total snapshots to look back
+    ///     bucket_size: Snapshots per bucket
+    ///     stat: "mean", "median", or "quantile"
+    ///     q: Quantile value (0.0-1.0), only used when stat="quantile"
+    ///
+    /// Returns single f64 value or None.
+    #[pyo3(signature = (exchange, symbol_id, window_snaps, bucket_size, stat="median", q=0.5))]
+    fn mid_range_bps_stat(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        window_snaps: usize,
+        bucket_size: usize,
+        stat: &str,
+        q: f64,
+    ) -> PyResult<Option<f64>> {
+        let ex = parse_exchange(exchange)?;
+        let range_stat = RangeStat::from_str(stat, Some(q)).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown stat: {}. Valid: mean, median, quantile",
+                stat
+            ))
+        })?;
+        if matches!(range_stat, RangeStat::Quantile(_)) && !(0.0..=1.0).contains(&q) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "q must be between 0.0 and 1.0",
+            ));
+        }
+        Ok(self
+            .analytics
+            .mid_range_bps_stat(&ex, symbol_id, window_snaps, bucket_size, range_stat))
     }
 
     fn get_latest_snapshot(
@@ -371,6 +511,18 @@ impl PyAnalytics {
                     } else {
                         Some(s.log_return)
                     },
+                )?;
+                dict.set_item("mid_high", s.mid_high)?;
+                dict.set_item("mid_low", s.mid_low)?;
+                dict.set_item("bid_high", s.bid_high)?;
+                dict.set_item("ask_low", s.ask_low)?;
+                dict.set_item(
+                    "exchange_lat_ms",
+                    if s.exchange_lat_ms.is_nan() { None } else { Some(s.exchange_lat_ms) },
+                )?;
+                dict.set_item(
+                    "receive_lat_ms",
+                    if s.receive_lat_ms.is_nan() { None } else { Some(s.receive_lat_ms) },
                 )?;
                 dict.set_item("exchange_ts_ns", s.exchange_ts_ns)?;
                 dict.set_item("received_ts_ns", s.received_ts_ns)?;

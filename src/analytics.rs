@@ -12,6 +12,12 @@ pub enum SnapshotField {
     Midquote,
     Spread,
     LogReturn,
+    MidHigh,
+    MidLow,
+    BidHigh,
+    AskLow,
+    ExchangeLatMs,
+    ReceiveLatMs,
 }
 
 impl SnapshotField {
@@ -24,6 +30,12 @@ impl SnapshotField {
             Self::Midquote => snap.midquote,
             Self::Spread => snap.spread,
             Self::LogReturn => snap.log_return,
+            Self::MidHigh => snap.mid_high,
+            Self::MidLow => snap.mid_low,
+            Self::BidHigh => snap.bid_high,
+            Self::AskLow => snap.ask_low,
+            Self::ExchangeLatMs => snap.exchange_lat_ms,
+            Self::ReceiveLatMs => snap.receive_lat_ms,
         }
     }
 
@@ -36,9 +48,57 @@ impl SnapshotField {
             "midquote" | "mid" => Some(Self::Midquote),
             "spread" => Some(Self::Spread),
             "log_return" | "logreturn" => Some(Self::LogReturn),
+            "mid_high" | "midhigh" | "high" => Some(Self::MidHigh),
+            "mid_low" | "midlow" | "low" => Some(Self::MidLow),
+            "bid_high" | "bidhigh" => Some(Self::BidHigh),
+            "ask_low" | "asklow" => Some(Self::AskLow),
+            "exchange_lat_ms" | "elat" => Some(Self::ExchangeLatMs),
+            "receive_lat_ms" | "rlat" => Some(Self::ReceiveLatMs),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RangeStat {
+    Mean,
+    Median,
+    Quantile(f64),
+}
+
+impl RangeStat {
+    pub fn from_str(s: &str, q: Option<f64>) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "mean" => Some(Self::Mean),
+            "median" => Some(Self::Median),
+            "quantile" | "percentile" => Some(Self::Quantile(q.unwrap_or(0.5))),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QuoteSide {
+    Bid,
+    Ask,
+}
+
+impl QuoteSide {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "bid" | "b" => Some(Self::Bid),
+            "ask" | "a" => Some(Self::Ask),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QuoteFillResult {
+    pub n_fills: usize,
+    pub n_total: usize,
+    pub mean_markout_bps: f64,
+    pub stdev_markout_bps: f64,
 }
 
 pub struct Analytics {
@@ -117,6 +177,18 @@ impl Analytics {
         Some(median(&vals))
     }
 
+    pub fn snap_quantile(
+        &self,
+        exchange: &Exchange,
+        symbol_id: SymbolId,
+        field: SnapshotField,
+        n: usize,
+        q: f64,
+    ) -> Option<f64> {
+        let vals = self.read_snap_field(exchange, symbol_id, field, n)?;
+        Some(quantile(&vals, q))
+    }
+
     // -- convenience methods --
 
     pub fn midquote_twap(
@@ -155,6 +227,16 @@ impl Analytics {
         self.snap_stdev(exchange, symbol_id, SnapshotField::LogReturn, n)
     }
 
+    pub fn max_abs_log_return(
+        &self,
+        exchange: &Exchange,
+        symbol_id: SymbolId,
+        n: usize,
+    ) -> Option<f64> {
+        let vals = self.read_snap_field(exchange, symbol_id, SnapshotField::LogReturn, n)?;
+        vals.iter().map(|v| v.abs()).reduce(f64::max)
+    }
+
     pub fn log_returns(
         &self,
         exchange: &Exchange,
@@ -191,6 +273,169 @@ impl Analytics {
         }
     }
 
+    // -- fill analysis --
+
+    fn read_snaps(
+        &self,
+        exchange: &Exchange,
+        symbol_id: SymbolId,
+        n: usize,
+    ) -> Option<Vec<SnapshotData>> {
+        let coll = self.snap_data.get_collection(exchange);
+        let buf = coll.get_buffer(&symbol_id)?;
+        let mut raw = vec![SnapshotData::default(); n];
+        let count = buf.read_last_n(n, &mut raw);
+        if count < 2 {
+            return None;
+        }
+        // read_last_n returns most-recent first; reverse to chronological
+        let mut snaps = raw[..count].to_vec();
+        snaps.reverse();
+        Some(snaps)
+    }
+
+    /// Simulate quoting at a fixed spread from mid and compute fill rate + markout.
+    ///
+    /// For Ask side: quote_price = mid * (1 + spread_bps/10000)
+    ///   fill if bid_high >= quote_price
+    ///   markout = (quote_price - next_mid) / mid * 10000  (positive = MM profit)
+    ///
+    /// For Bid side: quote_price = mid * (1 - spread_bps/10000)
+    ///   fill if ask_low <= quote_price
+    ///   markout = (next_mid - quote_price) / mid * 10000  (positive = MM profit)
+    pub fn quote_fill_analysis(
+        &self,
+        exchange: &Exchange,
+        symbol_id: SymbolId,
+        side: QuoteSide,
+        spread_bps: f64,
+        lookback_snaps: usize,
+    ) -> Option<QuoteFillResult> {
+        let snaps = self.read_snaps(exchange, symbol_id, lookback_snaps)?;
+        let n = snaps.len();
+        if n < 2 {
+            return None;
+        }
+
+        let spread_mult = spread_bps / 10_000.0;
+        let mut markouts = Vec::new();
+        // We can evaluate fills for snaps[0..n-1] (need snaps[t+1] for markout)
+        let n_total = n - 1;
+
+        for t in 0..n_total {
+            let snap = &snaps[t];
+            let mid = snap.midquote;
+            if mid <= 0.0 || mid.is_nan() {
+                continue;
+            }
+
+            let (quote_price, filled) = match side {
+                QuoteSide::Ask => {
+                    let qp = mid * (1.0 + spread_mult);
+                    (qp, snap.bid_high >= qp)
+                }
+                QuoteSide::Bid => {
+                    let qp = mid * (1.0 - spread_mult);
+                    (qp, snap.ask_low <= qp)
+                }
+            };
+
+            if filled {
+                let next_mid = snaps[t + 1].midquote;
+                if next_mid <= 0.0 || next_mid.is_nan() {
+                    continue;
+                }
+                let markout = match side {
+                    QuoteSide::Ask => (quote_price - next_mid) / mid * 10_000.0,
+                    QuoteSide::Bid => (next_mid - quote_price) / mid * 10_000.0,
+                };
+                markouts.push(markout);
+            }
+        }
+
+        let n_fills = markouts.len();
+        if n_fills == 0 {
+            return Some(QuoteFillResult {
+                n_fills: 0,
+                n_total,
+                mean_markout_bps: 0.0,
+                stdev_markout_bps: 0.0,
+            });
+        }
+
+        let mean_mo = mean(&markouts);
+        let stdev_mo = stdev(&markouts).unwrap_or(0.0);
+
+        Some(QuoteFillResult {
+            n_fills,
+            n_total,
+            mean_markout_bps: mean_mo,
+            stdev_markout_bps: stdev_mo,
+        })
+    }
+
+    /// Resample mid-quote range into time buckets, returning range in bps per bucket.
+    ///
+    /// Groups `window_snaps` snapshots into chunks of `bucket_size`, and for each
+    /// bucket computes `(max(mid_high) - min(mid_low)) / avg * 10_000`.
+    ///
+    /// Example: with 100ms snapshots, `window_snaps=36000, bucket_size=10` gives
+    /// the mid-range in bps per 1-second bucket over the past hour.
+    pub fn mid_range_bps_buckets(
+        &self,
+        exchange: &Exchange,
+        symbol_id: SymbolId,
+        window_snaps: usize,
+        bucket_size: usize,
+    ) -> Option<Vec<f64>> {
+        if bucket_size == 0 {
+            return None;
+        }
+        let snaps = self.read_snaps(exchange, symbol_id, window_snaps)?;
+        let mut ranges = Vec::with_capacity(snaps.len() / bucket_size + 1);
+        for chunk in snaps.chunks(bucket_size) {
+            let mut hi = f64::NEG_INFINITY;
+            let mut lo = f64::INFINITY;
+            for s in chunk {
+                if s.mid_high > hi {
+                    hi = s.mid_high;
+                }
+                if s.mid_low < lo {
+                    lo = s.mid_low;
+                }
+            }
+            if hi > lo && lo > 0.0 {
+                let mid = (hi + lo) / 2.0;
+                ranges.push((hi - lo) / mid * 10_000.0);
+            }
+        }
+        if ranges.is_empty() {
+            None
+        } else {
+            Some(ranges)
+        }
+    }
+
+    /// Compute a summary statistic over resampled mid-range bps buckets.
+    ///
+    /// Combines `mid_range_bps_buckets` with a reducer (mean / median / quantile).
+    /// Use case: "median 1s mid-range over the past hour" as a candidate spread.
+    pub fn mid_range_bps_stat(
+        &self,
+        exchange: &Exchange,
+        symbol_id: SymbolId,
+        window_snaps: usize,
+        bucket_size: usize,
+        stat: RangeStat,
+    ) -> Option<f64> {
+        let ranges = self.mid_range_bps_buckets(exchange, symbol_id, window_snaps, bucket_size)?;
+        Some(match stat {
+            RangeStat::Mean => mean(&ranges),
+            RangeStat::Median => median(&ranges),
+            RangeStat::Quantile(q) => quantile(&ranges, q),
+        })
+    }
+
     pub fn get_latest_snapshot(
         &self,
         exchange: &Exchange,
@@ -216,13 +461,25 @@ fn stdev(vals: &[f64]) -> Option<f64> {
 }
 
 fn median(vals: &[f64]) -> f64 {
+    quantile(vals, 0.5)
+}
+
+/// Linear-interpolation quantile (same as numpy default).
+fn quantile(vals: &[f64], q: f64) -> f64 {
     let mut sorted = vals.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
-    if n % 2 == 0 {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    if n == 1 {
+        return sorted[0];
+    }
+    let pos = q * (n - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi {
+        sorted[lo]
     } else {
-        sorted[n / 2]
+        let frac = pos - lo as f64;
+        sorted[lo] * (1.0 - frac) + sorted[hi] * frac
     }
 }
 
@@ -254,6 +511,12 @@ mod tests {
             midquote: mid,
             spread: 1.0,
             log_return: f64::NAN,
+            mid_high: mid + 0.1,
+            mid_low: mid - 0.1,
+            bid_high: mid - 0.4,
+            ask_low: mid + 0.4,
+            exchange_lat_ms: f64::NAN,
+            receive_lat_ms: f64::NAN,
             exchange_ts_ns: 0,
             received_ts_ns: 0,
             snap_ts_ns: 0,
@@ -272,18 +535,6 @@ mod tests {
         let s = stdev(&vals).unwrap();
         // sample stdev (n-1): variance = 32/7 ≈ 4.571, stdev ≈ 2.138
         assert!((s - 2.138).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_median_odd() {
-        let vals = vec![1.0, 3.0, 2.0];
-        assert!((median(&vals) - 2.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_median_even() {
-        let vals = vec![1.0, 2.0, 3.0, 4.0];
-        assert!((median(&vals) - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -358,6 +609,253 @@ mod tests {
         let returns = analytics.log_returns(&Exchange::Binance, 0, 10);
         // NAN should be filtered out
         assert_eq!(returns.len(), 2);
+    }
+
+    #[test]
+    fn test_quantile_p99() {
+        let vals: Vec<f64> = (0..1000).map(|i| i as f64).collect();
+        let q = quantile(&vals, 0.9999);
+        // 0.9999 * 999 = 998.9001 → interpolate between 998 and 999
+        assert!((q - 998.9001).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_quantile_extremes() {
+        let vals = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        assert!((quantile(&vals, 0.0) - 10.0).abs() < f64::EPSILON);
+        assert!((quantile(&vals, 1.0) - 50.0).abs() < f64::EPSILON);
+        assert!((quantile(&vals, 0.5) - 30.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_median_uses_quantile() {
+        // Verify median still works after refactor
+        let vals = vec![1.0, 3.0, 2.0];
+        assert!((median(&vals) - 2.0).abs() < f64::EPSILON);
+        let vals = vec![1.0, 2.0, 3.0, 4.0];
+        assert!((median(&vals) - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_quote_fill_ask_side() {
+        // 10 snapshots at mid=100, bid_high=100.03 (3 bps above mid)
+        // Quote ask at 2 bps above mid → quote = 100.02 → bid_high 100.03 >= 100.02 → filled
+        let snaps: Vec<SnapshotData> = (0..10)
+            .map(|_| SnapshotData {
+                bid: 99.5,
+                ask: 100.5,
+                midquote: 100.0,
+                spread: 1.0,
+                bid_high: 100.03, // 3 bps above mid
+                ask_low: 99.97,
+                mid_high: 100.05,
+                mid_low: 99.95,
+                log_return: 0.0,
+                ..Default::default()
+            })
+            .collect();
+        let analytics = make_analytics(&[(0, snaps)]);
+
+        let result = analytics
+            .quote_fill_analysis(&Exchange::Binance, 0, QuoteSide::Ask, 2.0, 10)
+            .unwrap();
+        // All 9 evaluable snapshots should be filled (bid_high=100.03 >= 100.02)
+        assert_eq!(result.n_fills, 9);
+        assert_eq!(result.n_total, 9);
+        // markout = (100.02 - 100.0) / 100.0 * 10000 = 2.0 bps
+        assert!((result.mean_markout_bps - 2.0).abs() < 0.01);
+        // all markouts identical → stdev = 0
+        assert!(result.stdev_markout_bps < 0.01);
+    }
+
+    #[test]
+    fn test_quote_fill_bid_side() {
+        // ask_low = 99.97 (3 bps below mid)
+        // Quote bid at 2 bps below mid → quote = 99.98 → ask_low 99.97 <= 99.98 → filled
+        let snaps: Vec<SnapshotData> = (0..10)
+            .map(|_| SnapshotData {
+                bid: 99.5,
+                ask: 100.5,
+                midquote: 100.0,
+                spread: 1.0,
+                bid_high: 100.03,
+                ask_low: 99.97,
+                mid_high: 100.05,
+                mid_low: 99.95,
+                log_return: 0.0,
+                ..Default::default()
+            })
+            .collect();
+        let analytics = make_analytics(&[(0, snaps)]);
+
+        let result = analytics
+            .quote_fill_analysis(&Exchange::Binance, 0, QuoteSide::Bid, 2.0, 10)
+            .unwrap();
+        assert_eq!(result.n_fills, 9);
+        assert_eq!(result.n_total, 9);
+        // markout = (100.0 - 99.98) / 100.0 * 10000 = 2.0 bps
+        assert!((result.mean_markout_bps - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_quote_fill_no_fills() {
+        // bid_high = 100.01 (1 bp above mid)
+        // Quote ask at 5 bps → quote = 100.05 → bid_high 100.01 < 100.05 → no fill
+        let snaps: Vec<SnapshotData> = (0..10)
+            .map(|_| SnapshotData {
+                bid: 99.5,
+                ask: 100.5,
+                midquote: 100.0,
+                spread: 1.0,
+                bid_high: 100.01,
+                ask_low: 99.99,
+                mid_high: 100.02,
+                mid_low: 99.98,
+                log_return: 0.0,
+                ..Default::default()
+            })
+            .collect();
+        let analytics = make_analytics(&[(0, snaps)]);
+
+        let result = analytics
+            .quote_fill_analysis(&Exchange::Binance, 0, QuoteSide::Ask, 5.0, 10)
+            .unwrap();
+        assert_eq!(result.n_fills, 0);
+        assert_eq!(result.n_total, 9);
+    }
+
+    #[test]
+    fn test_quote_fill_with_varying_mids() {
+        // Mid moves: 100, 100.01, 100.02, 100.01, 100.0
+        // Ask quote at 2 bps: 100.02, 100.0302, 100.0400, 100.0302, 100.02
+        // bid_high always 100.03 → fills where 100.03 >= quote_price
+        // snap0: qp=100.02, fill yes, markout=(100.02-100.01)/100*10000=1.0 bps
+        // snap1: qp=100.0302, fill no (100.03 < 100.0302)
+        // snap2: qp=100.0400, fill no
+        // snap3: qp=100.0302, fill no
+        let snaps = vec![
+            SnapshotData { midquote: 100.0,  bid_high: 100.03, ask_low: 99.97, ..Default::default() },
+            SnapshotData { midquote: 100.01, bid_high: 100.03, ask_low: 99.97, ..Default::default() },
+            SnapshotData { midquote: 100.02, bid_high: 100.03, ask_low: 99.97, ..Default::default() },
+            SnapshotData { midquote: 100.01, bid_high: 100.03, ask_low: 99.97, ..Default::default() },
+            SnapshotData { midquote: 100.0,  bid_high: 100.03, ask_low: 99.97, ..Default::default() },
+        ];
+        let analytics = make_analytics(&[(0, snaps)]);
+
+        let result = analytics
+            .quote_fill_analysis(&Exchange::Binance, 0, QuoteSide::Ask, 2.0, 10)
+            .unwrap();
+        // Only snap0 fills (qp=100.02 <= 100.03)
+        assert_eq!(result.n_fills, 1);
+        assert_eq!(result.n_total, 4);
+        // markout = (100.02 - 100.01) / 100.0 * 10000 = 1.0 bps
+        assert!((result.mean_markout_bps - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_mid_range_bps_buckets() {
+        // 20 snapshots, bucket_size=5 → 4 buckets
+        // Each snap has mid_high = mid + 0.1, mid_low = mid - 0.1
+        // So each bucket: hi = max(mid_high), lo = min(mid_low)
+        // All mids = 100 → hi=100.1, lo=99.9 → range = 0.2, avg = 100.0
+        // range_bps = 0.2 / 100.0 * 10000 = 20.0
+        let snaps: Vec<SnapshotData> = (0..20).map(|_| snap_with_mid(100.0)).collect();
+        let analytics = make_analytics(&[(0, snaps)]);
+
+        let buckets = analytics
+            .mid_range_bps_buckets(&Exchange::Binance, 0, 20, 5)
+            .unwrap();
+        assert_eq!(buckets.len(), 4);
+        for &b in &buckets {
+            assert!((b - 20.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn test_mid_range_bps_buckets_varying() {
+        // 6 snapshots, bucket_size=3 → 2 buckets
+        // Bucket 0: mids 100, 101, 102 → mid_highs 100.1, 101.1, 102.1 → hi=102.1
+        //                                 mid_lows  99.9, 100.9, 101.9 → lo=99.9
+        //           range = 2.2, avg = 101.0, bps = 2.2/101.0 * 10000 ≈ 217.82
+        // Bucket 1: mids 103, 104, 105 → hi=105.1, lo=102.9
+        //           range = 2.2, avg = 104.0, bps = 2.2/104.0 * 10000 ≈ 211.54
+        let snaps: Vec<SnapshotData> = (0..6)
+            .map(|i| snap_with_mid(100.0 + i as f64))
+            .collect();
+        let analytics = make_analytics(&[(0, snaps)]);
+
+        let buckets = analytics
+            .mid_range_bps_buckets(&Exchange::Binance, 0, 6, 3)
+            .unwrap();
+        assert_eq!(buckets.len(), 2);
+        assert!((buckets[0] - 217.82).abs() < 0.1);
+        assert!((buckets[1] - 211.54).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_mid_range_bps_stat_mean() {
+        let snaps: Vec<SnapshotData> = (0..20).map(|_| snap_with_mid(100.0)).collect();
+        let analytics = make_analytics(&[(0, snaps)]);
+
+        let result = analytics
+            .mid_range_bps_stat(&Exchange::Binance, 0, 20, 5, RangeStat::Mean)
+            .unwrap();
+        assert!((result - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_mid_range_bps_stat_median() {
+        let snaps: Vec<SnapshotData> = (0..20).map(|_| snap_with_mid(100.0)).collect();
+        let analytics = make_analytics(&[(0, snaps)]);
+
+        let result = analytics
+            .mid_range_bps_stat(&Exchange::Binance, 0, 20, 5, RangeStat::Median)
+            .unwrap();
+        assert!((result - 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_mid_range_bps_stat_quantile() {
+        // Create varying buckets to make quantile meaningful
+        let mut snaps = Vec::new();
+        // 10 buckets of 2 snaps each, with increasing volatility
+        for i in 0..10 {
+            let base = 100.0;
+            let offset = i as f64 * 0.1; // increasing range per bucket
+            snaps.push(SnapshotData {
+                mid_high: base + offset,
+                mid_low: base - offset,
+                midquote: base,
+                ..Default::default()
+            });
+            snaps.push(SnapshotData {
+                mid_high: base + offset,
+                mid_low: base - offset,
+                midquote: base,
+                ..Default::default()
+            });
+        }
+        let analytics = make_analytics(&[(0, snaps)]);
+
+        // p90 should be near the high end of the range distribution
+        let p90 = analytics
+            .mid_range_bps_stat(&Exchange::Binance, 0, 20, 2, RangeStat::Quantile(0.9))
+            .unwrap();
+        let p10 = analytics
+            .mid_range_bps_stat(&Exchange::Binance, 0, 20, 2, RangeStat::Quantile(0.1))
+            .unwrap();
+        assert!(p90 > p10);
+    }
+
+    #[test]
+    fn test_mid_range_bps_empty() {
+        let analytics = make_analytics(&[]);
+        assert!(analytics
+            .mid_range_bps_buckets(&Exchange::Binance, 0, 100, 10)
+            .is_none());
+        assert!(analytics
+            .mid_range_bps_stat(&Exchange::Binance, 0, 100, 10, RangeStat::Median)
+            .is_none());
     }
 
     #[test]

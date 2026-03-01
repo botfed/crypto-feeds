@@ -233,12 +233,13 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                             Ok(None) => {
                                 // intentionally ignored (heartbeats, sub acks, etc.)
                                 if let Err(e) = feed.process_other(&mut write, &text).await {
-                                    error!("Error processing other{}: {}", text, e);
+                                    error!("Error processing other: {}", e);
                                     return Ok(ConnectionResult::Reconnect);
                                 }
                             }
                             Err(e) => {
-                                error!("{} parse error (text): {}  {}", feed_name, &text, e);
+                                let preview = if text.len() > 120 { &text[..120] } else { &text };
+                                error!("{} parse error: {}  {}", feed_name, preview, e);
                             }
                         }
                     }
