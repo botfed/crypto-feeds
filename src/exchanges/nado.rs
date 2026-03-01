@@ -122,7 +122,10 @@ impl ExchangeFeed for NadoFeed {
     }
 
     fn extra_headers(&self) -> Vec<(&str, &str)> {
-        vec![("Sec-WebSocket-Extensions", "permessage-deflate")]
+        vec![
+            ("Origin", "https://app.nado.xyz"),
+            ("User-Agent", "Mozilla/5.0"),
+        ]
     }
 
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
