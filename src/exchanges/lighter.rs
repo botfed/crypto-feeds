@@ -86,24 +86,31 @@ impl LighterFeed {
         let mut sym_to_index: HashMap<String, u32> = HashMap::new();
         let mut index_to_sym: HashMap<u32, String> = HashMap::new();
 
-        let native_symbols: Vec<String> = normalized_symbols
-            .iter()
-            .map(|normalized| mapper.denormalize(normalized, itype))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Fail fast if a configured symbol is not present
-        for sym in &native_symbols {
-            let idx = *api_map
-                .get(sym)
-                .ok_or_else(|| anyhow!("Lighter symbol '{sym}' not found in markets endpoint"))?;
-
-            sym_to_index.insert(sym.to_string(), idx);
-            index_to_sym.insert(idx, sym.to_string());
+        // Build parallel lists: native symbols (for API lookup) and config symbols
+        // (for registry lookup). Config symbols like "BTC_USDC" match registry aliases;
+        // bare native symbols like "BTC" do not.
+        let mut native_symbols: Vec<String> = Vec::new();
+        let mut config_symbols: Vec<String> = Vec::new();
+        for normalized in normalized_symbols {
+            let native = mapper.denormalize(normalized, itype)?;
+            native_symbols.push(native);
+            config_symbols.push(normalized.to_string());
         }
 
-        let books = native_symbols
+        // Fail fast if a configured symbol is not present
+        for (native, config_sym) in native_symbols.iter().zip(config_symbols.iter()) {
+            let idx = *api_map
+                .get(native)
+                .ok_or_else(|| anyhow!("Lighter symbol '{native}' not found in markets endpoint"))?;
+
+            sym_to_index.insert(native.to_string(), idx);
+            // Map index back to config symbol (e.g. "BTC_USDC") so the registry can look it up
+            index_to_sym.insert(idx, config_sym.to_string());
+        }
+
+        let books = config_symbols
             .iter()
-            .map(|s| ((*s).to_string(), Arc::new(Mutex::new(OrderBook::new()))))
+            .map(|s| (s.to_string(), Arc::new(Mutex::new(OrderBook::new()))))
             .collect();
 
         Ok(Self {
