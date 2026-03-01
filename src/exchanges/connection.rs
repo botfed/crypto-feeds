@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::interval;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message, tungstenite::client::IntoClientRequest, tungstenite::http};
 
 use crate::market_data::InstrumentType;
 use crate::symbol_registry::REGISTRY;
@@ -70,6 +70,11 @@ pub trait ExchangeFeed {
 
     fn heartbeat_message(&self) -> Option<Message> {
         return None;
+    }
+
+    /// Optional extra HTTP headers added to the WebSocket upgrade request.
+    fn extra_headers(&self) -> Vec<(&str, &str)> {
+        vec![]
     }
 
     fn build_url(&self, symbols: &[&str]) -> Result<String>;
@@ -163,9 +168,17 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
         }
     };
 
+    let mut request = url.into_client_request()?;
+    for (key, value) in feed.extra_headers() {
+        request.headers_mut().insert(
+            http::header::HeaderName::from_bytes(key.as_bytes())?,
+            http::header::HeaderValue::from_str(value)?,
+        );
+    }
+
     let ws_stream = match tokio::time::timeout(
         Duration::from_secs(config.message_timeout.as_secs()),
-        connect_async(url),
+        connect_async(request),
     )
     .await
     {
