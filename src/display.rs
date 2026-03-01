@@ -12,10 +12,10 @@ use tokio::sync::Notify;
 const ALT_SCREEN_ON: &str = "\x1B[?1049h";
 const ALT_SCREEN_OFF: &str = "\x1B[?1049l";
 const CURSOR_HOME: &str = "\x1B[H";
-const CLEAR_SCREEN: &str = "\x1B[2J";
 const CLEAR_BELOW: &str = "\x1B[J";
 const CURSOR_HIDE: &str = "\x1B[?25l";
 const CURSOR_SHOW: &str = "\x1B[?25h";
+const ERASE_EOL: &str = "\x1B[K";
 const NUM_EXCHANGES: usize = 6;
 const MAX_LOG_LINES: usize = 20;
 
@@ -63,6 +63,46 @@ fn write_log_section(buf: &mut String) {
     }
 }
 
+fn term_width() -> usize {
+    #[cfg(unix)]
+    {
+        use std::mem::MaybeUninit;
+        unsafe {
+            let mut ws = MaybeUninit::<libc::winsize>::zeroed();
+            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, ws.as_mut_ptr()) == 0 {
+                let ws = ws.assume_init();
+                if ws.ws_col > 0 {
+                    return ws.ws_col as usize;
+                }
+            }
+        }
+    }
+    // Fallback: check COLUMNS env var, or default to 120
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120)
+}
+
+/// Truncate each line to terminal width and append erase-to-EOL so that
+/// wrapped lines and stale characters from previous frames don't corrupt
+/// the display. This is critical for tmux / SSH where terminals are narrow.
+fn prepare_frame(raw: &str) -> String {
+    let cols = term_width();
+    let mut out = String::with_capacity(raw.len() + raw.lines().count() * 6);
+    for line in raw.lines() {
+        // Truncate to terminal width (byte-safe: only ASCII content)
+        if line.len() > cols {
+            out.push_str(&line[..cols]);
+        } else {
+            out.push_str(line);
+        }
+        out.push_str(ERASE_EOL);
+        out.push('\n');
+    }
+    out
+}
+
 fn flush_str(s: &str) -> Result<()> {
     let mut out = stdout().lock();
     write!(out, "{}", s)?;
@@ -92,16 +132,15 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                 let mut buf = String::with_capacity(8192);
                 let _ = writeln!(buf, "========== Market Data Snapshot ==========  uptime: {:02}:{:02}:{:02}", h, m, s);
                 write_header(&mut buf, false);
-                let mut changed = false;
-                changed |= write_market_collection(&mut buf, "Binance ", &market_data.binance, None, None, &mut seen[0]);
-                changed |= write_market_collection(&mut buf, "Coinbase", &market_data.coinbase, None, None, &mut seen[1]);
-                changed |= write_market_collection(&mut buf, "Bybit   ", &market_data.bybit, None, None, &mut seen[2]);
-                changed |= write_market_collection(&mut buf, "Kraken  ", &market_data.kraken, None, None, &mut seen[3]);
-                changed |= write_market_collection(&mut buf, "MEXC    ", &market_data.mexc, None, None, &mut seen[4]);
-                changed |= write_market_collection(&mut buf, "Lighter ", &market_data.lighter, None, None, &mut seen[5]);
+                write_market_collection(&mut buf, "Binance ", &market_data.binance, None, None, &mut seen[0]);
+                write_market_collection(&mut buf, "Coinbase", &market_data.coinbase, None, None, &mut seen[1]);
+                write_market_collection(&mut buf, "Bybit   ", &market_data.bybit, None, None, &mut seen[2]);
+                write_market_collection(&mut buf, "Kraken  ", &market_data.kraken, None, None, &mut seen[3]);
+                write_market_collection(&mut buf, "MEXC    ", &market_data.mexc, None, None, &mut seen[4]);
+                write_market_collection(&mut buf, "Lighter ", &market_data.lighter, None, None, &mut seen[5]);
                 write_log_section(&mut buf);
-                let clear = if changed { CLEAR_SCREEN } else { "" };
-                flush_str(&format!("{}{}{}{}", clear, CURSOR_HOME, buf, CLEAR_BELOW))?;
+                let frame = prepare_frame(&buf);
+                flush_str(&format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW))?;
             }
         }
     };
@@ -137,16 +176,15 @@ pub async fn print_bbo_with_analytics(
                 let _ = writeln!(buf, "========== Market Data + Analytics ==========  uptime: {:02}:{:02}:{:02}", h, m, s);
                 write_header(&mut buf, true);
                 let a = &analytics;
-                let mut changed = false;
-                changed |= write_market_collection(&mut buf, "Binance ", &market_data.binance, Some(a), Some(&Exchange::Binance), &mut seen[0]);
-                changed |= write_market_collection(&mut buf, "Coinbase", &market_data.coinbase, Some(a), Some(&Exchange::Coinbase), &mut seen[1]);
-                changed |= write_market_collection(&mut buf, "Bybit   ", &market_data.bybit, Some(a), Some(&Exchange::Bybit), &mut seen[2]);
-                changed |= write_market_collection(&mut buf, "Kraken  ", &market_data.kraken, Some(a), Some(&Exchange::Kraken), &mut seen[3]);
-                changed |= write_market_collection(&mut buf, "MEXC    ", &market_data.mexc, Some(a), Some(&Exchange::Mexc), &mut seen[4]);
-                changed |= write_market_collection(&mut buf, "Lighter ", &market_data.lighter, Some(a), Some(&Exchange::Lighter), &mut seen[5]);
+                write_market_collection(&mut buf, "Binance ", &market_data.binance, Some(a), Some(&Exchange::Binance), &mut seen[0]);
+                write_market_collection(&mut buf, "Coinbase", &market_data.coinbase, Some(a), Some(&Exchange::Coinbase), &mut seen[1]);
+                write_market_collection(&mut buf, "Bybit   ", &market_data.bybit, Some(a), Some(&Exchange::Bybit), &mut seen[2]);
+                write_market_collection(&mut buf, "Kraken  ", &market_data.kraken, Some(a), Some(&Exchange::Kraken), &mut seen[3]);
+                write_market_collection(&mut buf, "MEXC    ", &market_data.mexc, Some(a), Some(&Exchange::Mexc), &mut seen[4]);
+                write_market_collection(&mut buf, "Lighter ", &market_data.lighter, Some(a), Some(&Exchange::Lighter), &mut seen[5]);
                 write_log_section(&mut buf);
-                let clear = if changed { CLEAR_SCREEN } else { "" };
-                flush_str(&format!("{}{}{}{}", clear, CURSOR_HOME, buf, CLEAR_BELOW))?;
+                let frame = prepare_frame(&buf);
+                flush_str(&format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW))?;
             }
         }
     };

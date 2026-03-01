@@ -225,6 +225,7 @@ dependencies = [
  "dotenv",
  "env_logger",
  "futures-util",
+ "libc",
  "log",
  "once_cell",
  "ordered-float",
