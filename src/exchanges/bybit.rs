@@ -7,7 +7,7 @@ use futures_util::stream::SplitSink;
 use log::{debug, error};
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
@@ -171,7 +171,7 @@ struct BybitOrderbookData {
 }
 
 pub async fn listen_spot_bbo(
-    data: Arc<Mutex<MarketDataCollection>>,
+    data: Arc<MarketDataCollection>,
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
@@ -188,7 +188,7 @@ pub async fn listen_spot_bbo(
 }
 
 pub async fn listen_perp_bbo(
-    data: Arc<Mutex<MarketDataCollection>>,
+    data: Arc<MarketDataCollection>,
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {

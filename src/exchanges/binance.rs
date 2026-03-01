@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use log::warn;
 use serde::Deserialize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::exchange_fees::{ExchangeFees, FeeSchedule};
 use crate::exchanges::connection::{
@@ -140,7 +140,7 @@ impl ExchangeFeed for BinanceFeed {
 }
 
 pub async fn listen_spot_bbo(
-    data: Arc<Mutex<MarketDataCollection>>,
+    data: Arc<MarketDataCollection>,
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
@@ -157,7 +157,7 @@ pub async fn listen_spot_bbo(
 }
 
 pub async fn listen_perp_bbo(
-    data: Arc<Mutex<MarketDataCollection>>,
+    data: Arc<MarketDataCollection>,
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {

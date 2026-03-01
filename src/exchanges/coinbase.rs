@@ -5,7 +5,7 @@ use futures_util::stream::SplitSink;
 use log::{debug, warn};
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
@@ -155,7 +155,7 @@ impl ExchangeFeed for CoinbaseFeed {
 }
 
 pub async fn listen_spot_bbo(
-    data: Arc<Mutex<MarketDataCollection>>,
+    data: Arc<MarketDataCollection>,
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
@@ -303,7 +303,7 @@ impl ExchangeFeed for CoinbaseAdvancedFeed {
 }
 
 pub async fn listen_perp_bbo(
-    data: Arc<Mutex<MarketDataCollection>>,
+    data: Arc<MarketDataCollection>,
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {

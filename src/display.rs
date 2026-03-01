@@ -1,5 +1,5 @@
 use crate::market_data::{AllMarketData, MarketDataCollection};
-use crate::symbol_registry::REGISTRY;
+use crate::symbol_registry::{MAX_SYMBOLS, REGISTRY};
 use anyhow::Result;
 use chrono::Utc;
 use std::sync::Arc;
@@ -14,37 +14,21 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
             }
             _ = interval.tick() => {
                 println!("\n========== Market Data Snapshot ==========");
-                if let Ok(binance) = market_data.binance.lock() {
-                    print_market_collection("Binance ", &binance);
-                }
-                if let Ok(coinbase) = market_data.coinbase.lock() {
-                    print_market_collection("Coinbase", &coinbase);
-                }
-                if let Ok(bybit) = market_data.bybit.lock() {
-                    print_market_collection("Bybit", &bybit);
-                }
-                if let Ok(kraken) = market_data.kraken.lock() {
-                    print_market_collection("Kraken", &kraken);
-                }
-                if let Ok(mexc) = market_data.mexc.lock() {
-                    print_market_collection("MEXC", &mexc);
-                }
-                if let Ok(lighter) = market_data.lighter.lock() {
-                    print_market_collection("Lighter", &lighter);
-                }
+                print_market_collection("Binance ", &market_data.binance);
+                print_market_collection("Coinbase", &market_data.coinbase);
+                print_market_collection("Bybit", &market_data.bybit);
+                print_market_collection("Kraken", &market_data.kraken);
+                print_market_collection("MEXC", &market_data.mexc);
+                print_market_collection("Lighter", &market_data.lighter);
             }
         }
     }
 }
 
 pub fn print_market_collection(exchange_name: &str, collection: &MarketDataCollection) {
-    if collection.data.is_empty() {
-        return;
-    }
     println!("\n--- {} ---", exchange_name);
-    let count = collection.data.len();
-    for id in 0..count {
-        if let Some(md) = collection.get(&id) {
+    for id in 0..MAX_SYMBOLS {
+        if let Some(md) = collection.latest(&id) {
             if let Some(mid) = md.midquote()
                 && let Some(normalized) = REGISTRY.get_symbol(id)
             {

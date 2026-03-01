@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use log::{debug, error, info, warn};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::interval;
@@ -86,7 +86,7 @@ pub trait ExchangeFeed {
 }
 
 pub async fn listen_with_reconnect<F: ExchangeFeed + Send + Sync>(
-    data: Arc<Mutex<MarketDataCollection>>,
+    data: Arc<MarketDataCollection>,
     symbols: &[&str],
     feed: Arc<F>,
     feed_name: &str,
@@ -148,7 +148,7 @@ pub async fn listen_with_reconnect<F: ExchangeFeed + Send + Sync>(
 }
 
 async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
-    data: &Arc<Mutex<MarketDataCollection>>,
+    data: &Arc<MarketDataCollection>,
     feed: &Arc<F>,
     feed_name: &str,
     symbols: &[&str],
@@ -226,9 +226,8 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                     Some(Ok(Message::Text(text))) => {
                         match feed.parse_message(WireMessage::Text(text.as_str()), received_ts) {
                             Ok(Some((sym, md))) => {
-                                let mut collection = data.lock().unwrap();
                                 if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
-                                    collection.data[id] = Some(md);
+                                    data.push(&id, md);
                                 }
                             }
                             Ok(None) => {
@@ -247,10 +246,9 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                     Some(Ok(Message::Binary(bytes))) => {
                         match feed.parse_message(WireMessage::Binary(&bytes), received_ts) {
                             Ok(Some((sym, md))) => {
-                                let mut collection = data.lock().unwrap();
                                 if let Some(id) = REGISTRY.lookup(&sym, &itype) {
-                                    collection.data[*id] = Some(md);
-                                };
+                                    data.push(id, md);
+                                }
                             }
                             Ok(None) => {
                                 // intentionally ignored

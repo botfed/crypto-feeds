@@ -17,6 +17,8 @@ use crate::mappers::{MexcMapper, SymbolMapper};
 use crate::market_data::{InstrumentType, MarketData, MarketDataCollection};
 use crate::orderbook::OrderBook;
 
+// Note: Mutex is still used here for OrderBook (per-symbol order books), not for MarketDataCollection.
+
 use crate::exchange_fees::{ExchangeFees, FeeSchedule};
 
 pub fn get_fees() -> ExchangeFees {
@@ -325,7 +327,7 @@ impl ExchangeFeed for MexcFeed {
 }
 
 pub async fn listen_spot_bbo(
-    data: Arc<Mutex<MarketDataCollection>>,
+    data: Arc<MarketDataCollection>,
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
@@ -342,7 +344,7 @@ pub async fn listen_spot_bbo(
 }
 
 pub async fn listen_perp_bbo(
-    data: Arc<Mutex<MarketDataCollection>>,
+    data: Arc<MarketDataCollection>,
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {

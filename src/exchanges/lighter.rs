@@ -10,6 +10,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpStream;
+// Note: Mutex is still used here for OrderBook (per-symbol order books), not for MarketDataCollection.
 
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
@@ -323,7 +324,7 @@ impl ExchangeFeed for LighterFeed {
 /// Public entry point (perp “BBO” derived from order book best levels)
 /// IMPORTANT: `symbols` must be API symbols exactly as returned by the markets endpoint (e.g. ["ETH", "BTC"]).
 pub async fn listen_perp_bbo(
-    data: Arc<Mutex<MarketDataCollection>>,
+    data: Arc<MarketDataCollection>,
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {

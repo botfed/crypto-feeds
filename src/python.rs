@@ -1,10 +1,11 @@
+use crate::analytics::{Analytics, SnapshotField};
 use crate::app_config::{AppConfig, load_config, load_perp, load_spot};
-use crate::market_data::{AllMarketData, InstrumentType};
+use crate::market_data::{AllMarketData, Exchange, InstrumentType, MarketDataCollection};
+use crate::snapshot::{AllSnapshotData, SnapshotConfig, run_snapshot_task};
 use crate::symbol_registry::{SymbolId, REGISTRY};
 use chrono::{DateTime, Utc};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
-use std::collections::HashMap;
+use pyo3::types::{PyDict, PyList};
 use std::sync::Arc;
 use std::sync::Once;
 use tokio::runtime::Runtime;
@@ -12,6 +13,30 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 static INIT_LOGGER: Once = Once::new();
+
+fn parse_exchange(exchange: &str) -> PyResult<Exchange> {
+    match exchange.to_lowercase().as_str() {
+        "binance" => Ok(Exchange::Binance),
+        "coinbase" => Ok(Exchange::Coinbase),
+        "bybit" => Ok(Exchange::Bybit),
+        "kraken" => Ok(Exchange::Kraken),
+        "lighter" => Ok(Exchange::Lighter),
+        "mexc" => Ok(Exchange::Mexc),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown exchange: {}",
+            exchange
+        ))),
+    }
+}
+
+fn parse_field(field: &str) -> PyResult<SnapshotField> {
+    SnapshotField::from_str(field).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "Unknown field: {}. Valid: bid, ask, bid_qty, ask_qty, midquote, spread, log_return",
+            field
+        ))
+    })
+}
 
 /// Initialize Rust logging for the Python module.
 /// Must be called explicitly by Python users to enable logging.
@@ -50,13 +75,6 @@ impl PySymbolRegistry {
     }
 
     /// Lookup a symbol and return its integer ID.
-    ///
-    /// Args:
-    ///     symbol: The symbol string (e.g., "BTCUSDT", "BTC-USDT", "BTC/USDT")
-    ///     instrument_type: The instrument type ("spot" or "perp")
-    ///
-    /// Returns:
-    ///     The integer symbol ID, or None if not found
     fn lookup(&self, symbol: &str, instrument_type: &str) -> PyResult<Option<SymbolId>> {
         let itype = match instrument_type.to_lowercase().as_str() {
             "spot" => InstrumentType::Spot,
@@ -73,14 +91,7 @@ impl PySymbolRegistry {
     }
 
     /// Get the canonical symbol name from an integer ID.
-    ///
-    /// Args:
-    ///     symbol_id: The integer symbol ID
-    ///
-    /// Returns:
-    ///     The canonical symbol string (e.g., "SPOT-BTC-USDT"), or None if not found
     fn get_symbol(&self, symbol_id: SymbolId) -> PyResult<Option<String>> {
-        // Check bounds to avoid panic
         if symbol_id >= crate::symbol_registry::MAX_SYMBOLS {
             return Ok(None);
         }
@@ -104,38 +115,32 @@ impl PyMarketData {
 
     fn get_bid(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
-        let lock = collection.lock().unwrap();
-        Ok(lock.get(&symbol_id).and_then(|md| md.bid))
+        Ok(collection.latest(&symbol_id).and_then(|md| md.bid))
     }
 
     fn get_ask(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
-        let lock = collection.lock().unwrap();
-        Ok(lock.get(&symbol_id).and_then(|md| md.ask))
+        Ok(collection.latest(&symbol_id).and_then(|md| md.ask))
     }
 
     fn get_bid_qty(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
-        let lock = collection.lock().unwrap();
-        Ok(lock.get(&symbol_id).and_then(|md| md.bid_qty))
+        Ok(collection.latest(&symbol_id).and_then(|md| md.bid_qty))
     }
 
     fn get_ask_qty(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
-        let lock = collection.lock().unwrap();
-        Ok(lock.get(&symbol_id).and_then(|md| md.ask_qty))
+        Ok(collection.latest(&symbol_id).and_then(|md| md.ask_qty))
     }
 
     fn get_midquote(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
-        let lock = collection.lock().unwrap();
-        Ok(lock.get_midquote(&symbol_id))
+        Ok(collection.get_midquote(&symbol_id))
     }
 
     fn get_spread(&self, exchange: &str, symbol_id: SymbolId) -> PyResult<Option<f64>> {
         let collection = self.get_collection(exchange)?;
-        let lock = collection.lock().unwrap();
-        if let Some(md) = lock.get(&symbol_id) {
+        if let Some(md) = collection.latest(&symbol_id) {
             if let (Some(bid), Some(ask)) = (md.bid, md.ask) {
                 return Ok(Some(ask - bid));
             }
@@ -154,7 +159,7 @@ impl PyMarketData {
         let quotes: Vec<Option<(f64, Option<DateTime<Utc>>, Option<DateTime<Utc>>)>> = self
             .all_data
             .iter()
-            .map(|(_, data)| data.lock().unwrap().get_midquote_w_timestamps(&symbol_id))
+            .map(|(_, data)| data.get_midquote_w_timestamps(&symbol_id))
             .collect();
 
         let (sum, count) = quotes
@@ -202,9 +207,8 @@ impl PyMarketData {
         py: Python,
     ) -> PyResult<Option<PyObject>> {
         let collection = self.get_collection(exchange)?;
-        let lock = collection.lock().unwrap();
 
-        if let Some(md) = lock.get(&symbol_id) {
+        if let Some(md) = collection.latest(&symbol_id) {
             let dict = PyDict::new_bound(py);
             dict.set_item("bid", md.bid)?;
             dict.set_item("ask", md.ask)?;
@@ -229,23 +233,152 @@ impl PyMarketData {
     fn get_collection(
         &self,
         exchange: &str,
-    ) -> PyResult<&Arc<std::sync::Mutex<crate::market_data::MarketDataCollection>>> {
-        match exchange.to_lowercase().as_str() {
-            "binance" => Ok(&self.all_data.binance),
-            "coinbase" => Ok(&self.all_data.coinbase),
-            "bybit" => Ok(&self.all_data.bybit),
-            "kraken" => Ok(&self.all_data.kraken),
-            "lighter" => Ok(&self.all_data.lighter),
-            "mexc" => Ok(&self.all_data.mexc),
-            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Unknown exchange: {}",
-                exchange
-            ))),
-        }
+    ) -> PyResult<&Arc<MarketDataCollection>> {
+        let ex = parse_exchange(exchange)?;
+        Ok(self.all_data.get_collection(&ex))
     }
 
     fn get_arc(&self) -> Arc<AllMarketData> {
         Arc::clone(&self.all_data)
+    }
+}
+
+#[pyclass]
+pub struct PyAnalytics {
+    analytics: Arc<Analytics>,
+}
+
+#[pymethods]
+impl PyAnalytics {
+    fn midquote_twap(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        n: usize,
+    ) -> PyResult<Option<f64>> {
+        let ex = parse_exchange(exchange)?;
+        Ok(self.analytics.midquote_twap(&ex, symbol_id, n))
+    }
+
+    fn mean_spread(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        n: usize,
+    ) -> PyResult<Option<f64>> {
+        let ex = parse_exchange(exchange)?;
+        Ok(self.analytics.mean_spread(&ex, symbol_id, n))
+    }
+
+    fn midquote_stdev(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        n: usize,
+    ) -> PyResult<Option<f64>> {
+        let ex = parse_exchange(exchange)?;
+        Ok(self.analytics.midquote_stdev(&ex, symbol_id, n))
+    }
+
+    fn realized_vol(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        n: usize,
+    ) -> PyResult<Option<f64>> {
+        let ex = parse_exchange(exchange)?;
+        Ok(self.analytics.realized_vol(&ex, symbol_id, n))
+    }
+
+    fn log_returns(
+        &self,
+        py: Python,
+        exchange: &str,
+        symbol_id: SymbolId,
+        n: usize,
+    ) -> PyResult<PyObject> {
+        let ex = parse_exchange(exchange)?;
+        let returns = self.analytics.log_returns(&ex, symbol_id, n);
+        Ok(PyList::new_bound(py, &returns).into())
+    }
+
+    fn snap_mean(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        field: &str,
+        n: usize,
+    ) -> PyResult<Option<f64>> {
+        let ex = parse_exchange(exchange)?;
+        let f = parse_field(field)?;
+        Ok(self.analytics.snap_mean(&ex, symbol_id, f, n))
+    }
+
+    fn snap_stdev(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        field: &str,
+        n: usize,
+    ) -> PyResult<Option<f64>> {
+        let ex = parse_exchange(exchange)?;
+        let f = parse_field(field)?;
+        Ok(self.analytics.snap_stdev(&ex, symbol_id, f, n))
+    }
+
+    fn snap_median(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        field: &str,
+        n: usize,
+    ) -> PyResult<Option<f64>> {
+        let ex = parse_exchange(exchange)?;
+        let f = parse_field(field)?;
+        Ok(self.analytics.snap_median(&ex, symbol_id, f, n))
+    }
+
+    fn tick_midquote_mean(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        n: usize,
+    ) -> PyResult<Option<f64>> {
+        let ex = parse_exchange(exchange)?;
+        Ok(self.analytics.tick_midquote_mean(&ex, symbol_id, n))
+    }
+
+    fn get_latest_snapshot(
+        &self,
+        exchange: &str,
+        symbol_id: SymbolId,
+        py: Python,
+    ) -> PyResult<Option<PyObject>> {
+        let ex = parse_exchange(exchange)?;
+        match self.analytics.get_latest_snapshot(&ex, symbol_id) {
+            Some(s) => {
+                let dict = PyDict::new_bound(py);
+                dict.set_item("bid", s.bid)?;
+                dict.set_item("ask", s.ask)?;
+                dict.set_item("bid_qty", s.bid_qty)?;
+                dict.set_item("ask_qty", s.ask_qty)?;
+                dict.set_item("midquote", s.midquote)?;
+                dict.set_item("spread", s.spread)?;
+                dict.set_item(
+                    "log_return",
+                    if s.log_return.is_nan() {
+                        None
+                    } else {
+                        Some(s.log_return)
+                    },
+                )?;
+                dict.set_item("exchange_ts_ns", s.exchange_ts_ns)?;
+                dict.set_item("received_ts_ns", s.received_ts_ns)?;
+                dict.set_item("snap_ts_ns", s.snap_ts_ns)?;
+                Ok(Some(dict.into()))
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -266,8 +399,10 @@ impl PyAppConfig {
 
     #[staticmethod]
     fn from_dict(py: Python, dict: &Bound<PyDict>) -> PyResult<Self> {
-        let mut spot: HashMap<String, Vec<String>> = HashMap::new();
-        let mut perp: HashMap<String, Vec<String>> = HashMap::new();
+        let mut spot: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut perp: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
 
         if let Ok(Some(spot_dict)) = dict.get_item("spot") {
             let spot_dict: &Bound<PyDict> = spot_dict.downcast()?;
@@ -318,6 +453,8 @@ pub struct PyFeedManager {
     shutdown: Arc<Notify>,
     perp_handles: Vec<JoinHandle<()>>,
     spot_handles: Vec<JoinHandle<()>>,
+    analytics: Option<Py<PyAnalytics>>,
+    snapshot_handle: Option<JoinHandle<()>>,
 }
 
 #[pymethods]
@@ -337,6 +474,8 @@ impl PyFeedManager {
             shutdown,
             perp_handles: Vec::new(),
             spot_handles: Vec::new(),
+            analytics: None,
+            snapshot_handle: None,
         })
     }
 
@@ -381,6 +520,49 @@ impl PyFeedManager {
         Ok(())
     }
 
+    #[pyo3(signature = (interval_ms=100, buffer_capacity=8192))]
+    fn start_snapshots(
+        &mut self,
+        py: Python,
+        interval_ms: u64,
+        buffer_capacity: usize,
+    ) -> PyResult<()> {
+        if self.snapshot_handle.is_some() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Snapshots already started",
+            ));
+        }
+
+        let market_data_ref = self.market_data.borrow(py);
+        let tick_data = market_data_ref.get_arc();
+
+        let snap_data = Arc::new(AllSnapshotData::new(buffer_capacity));
+        let analytics = Arc::new(Analytics::new(
+            Arc::clone(&tick_data),
+            Arc::clone(&snap_data),
+        ));
+
+        let config = SnapshotConfig {
+            interval_ms,
+            buffer_capacity,
+        };
+
+        let shutdown = Arc::clone(&self.shutdown);
+        let snap_clone = Arc::clone(&snap_data);
+        let handle = self
+            .runtime
+            .spawn(run_snapshot_task(tick_data, snap_clone, config, shutdown));
+
+        self.snapshot_handle = Some(handle);
+        self.analytics = Some(Py::new(py, PyAnalytics { analytics })?);
+
+        Ok(())
+    }
+
+    fn get_analytics(&self, py: Python) -> PyResult<Option<Py<PyAnalytics>>> {
+        Ok(self.analytics.as_ref().map(|a| a.clone_ref(py)))
+    }
+
     fn get_market_data(&self, py: Python) -> PyResult<Py<PyMarketData>> {
         Ok(self.market_data.clone_ref(py))
     }
@@ -397,5 +579,6 @@ fn crypto_feeds(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMarketData>()?;
     m.add_class::<PyAppConfig>()?;
     m.add_class::<PyFeedManager>()?;
+    m.add_class::<PyAnalytics>()?;
     Ok(())
 }
