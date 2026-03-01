@@ -16,7 +16,7 @@ const CLEAR_BELOW: &str = "\x1B[J";
 const CURSOR_HIDE: &str = "\x1B[?25l";
 const CURSOR_SHOW: &str = "\x1B[?25h";
 const ERASE_EOL: &str = "\x1B[K";
-const NUM_EXCHANGES: usize = 7;
+const NUM_EXCHANGES: usize = 8;
 const MAX_LOG_LINES: usize = 20;
 
 // --------------- in-memory log capture ---------------
@@ -52,18 +52,24 @@ pub fn init_display_logger(level: log::LevelFilter) {
     log::set_max_level(level);
 }
 
-fn write_log_section(buf: &mut String) {
+fn write_log_section(buf: &mut String, max_lines: usize) {
+    if max_lines == 0 {
+        return;
+    }
     if let Ok(logs) = LOG_BUF.lock() {
         if !logs.is_empty() {
             let _ = writeln!(buf, "\n--- Log ---");
-            for line in logs.iter() {
+            // -1 for the header line above
+            let avail = max_lines.saturating_sub(2);
+            let skip = logs.len().saturating_sub(avail);
+            for line in logs.iter().skip(skip) {
                 let _ = writeln!(buf, "  {}", line);
             }
         }
     }
 }
 
-fn term_width() -> usize {
+fn term_size() -> (usize, usize) {
     #[cfg(unix)]
     {
         use std::mem::MaybeUninit;
@@ -71,24 +77,28 @@ fn term_width() -> usize {
             let mut ws = MaybeUninit::<libc::winsize>::zeroed();
             if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, ws.as_mut_ptr()) == 0 {
                 let ws = ws.assume_init();
-                if ws.ws_col > 0 {
-                    return ws.ws_col as usize;
-                }
+                let cols = if ws.ws_col > 0 { ws.ws_col as usize } else { 120 };
+                let rows = if ws.ws_row > 0 { ws.ws_row as usize } else { 50 };
+                return (cols, rows);
             }
         }
     }
-    // Fallback: check COLUMNS env var, or default to 120
-    std::env::var("COLUMNS")
+    let cols = std::env::var("COLUMNS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(120)
+        .unwrap_or(120);
+    let rows = std::env::var("LINES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(50);
+    (cols, rows)
 }
 
 /// Truncate each line to terminal width and append erase-to-EOL so that
 /// wrapped lines and stale characters from previous frames don't corrupt
 /// the display. This is critical for tmux / SSH where terminals are narrow.
 fn prepare_frame(raw: &str) -> String {
-    let cols = term_width();
+    let (cols, _) = term_size();
     let mut out = String::with_capacity(raw.len() + raw.lines().count() * 6);
     for line in raw.lines() {
         // Truncate to terminal width (byte-safe: only ASCII content)
@@ -139,7 +149,11 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                 write_market_collection(&mut buf, "MEXC    ", &market_data.mexc, None, None, &mut seen[4]);
                 write_market_collection(&mut buf, "Lighter ", &market_data.lighter, None, None, &mut seen[5]);
                 write_market_collection(&mut buf, "Extended", &market_data.extended, None, None, &mut seen[6]);
-                write_log_section(&mut buf);
+                write_market_collection(&mut buf, "Nado    ", &market_data.nado, None, None, &mut seen[7]);
+                let (_, rows) = term_size();
+                let used = buf.lines().count();
+                let remaining = rows.saturating_sub(used);
+                write_log_section(&mut buf, remaining);
                 let frame = prepare_frame(&buf);
                 flush_str(&format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW))?;
             }
@@ -184,7 +198,11 @@ pub async fn print_bbo_with_analytics(
                 write_market_collection(&mut buf, "MEXC    ", &market_data.mexc, Some(a), Some(&Exchange::Mexc), &mut seen[4]);
                 write_market_collection(&mut buf, "Lighter ", &market_data.lighter, Some(a), Some(&Exchange::Lighter), &mut seen[5]);
                 write_market_collection(&mut buf, "Extended", &market_data.extended, Some(a), Some(&Exchange::Extended), &mut seen[6]);
-                write_log_section(&mut buf);
+                write_market_collection(&mut buf, "Nado    ", &market_data.nado, Some(a), Some(&Exchange::Nado), &mut seen[7]);
+                let (_, rows) = term_size();
+                let used = buf.lines().count();
+                let remaining = rows.saturating_sub(used);
+                write_log_section(&mut buf, remaining);
                 let frame = prepare_frame(&buf);
                 flush_str(&format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW))?;
             }

@@ -60,6 +60,7 @@ pub struct AllMarketData {
     pub lighter: Arc<MarketDataCollection>,
     pub mexc: Arc<MarketDataCollection>,
     pub extended: Arc<MarketDataCollection>,
+    pub nado: Arc<MarketDataCollection>,
 }
 
 // Debug impl
@@ -77,6 +78,7 @@ pub enum Exchange {
     Lighter,
     Mexc,
     Extended,
+    Nado,
 }
 
 impl AllMarketData {
@@ -90,6 +92,7 @@ impl AllMarketData {
             (Lighter, &self.lighter),
             (Mexc, &self.mexc),
             (Extended, &self.extended),
+            (Nado, &self.nado),
         ]
         .into_iter()
     }
@@ -103,6 +106,7 @@ impl AllMarketData {
             Exchange::Lighter => &self.lighter,
             Exchange::Mexc => &self.mexc,
             Exchange::Extended => &self.extended,
+            Exchange::Nado => &self.nado,
         }
     }
 }
@@ -118,6 +122,7 @@ impl AllMarketData {
             lighter: new_coll(),
             mexc: new_coll(),
             extended: new_coll(),
+            nado: new_coll(),
         }
     }
 }

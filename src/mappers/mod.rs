@@ -6,6 +6,7 @@ mod bybit;
 mod kraken;
 mod lighter;
 mod extended;
+mod nado;
 
 // Re-export the trait
 pub use symbol_mapper::{SymbolMapper, parse_normalized};
@@ -18,6 +19,7 @@ pub use bybit::BybitMapper;
 pub use kraken::KrakenMapper;
 pub use lighter::LighterMapper;
 pub use extended::ExtendedMapper;
+pub use nado::NadoMapper;
 
 use anyhow::Result;
 
@@ -31,6 +33,7 @@ pub fn get_mapper(exchange: &str) -> Result<Box<dyn SymbolMapper>> {
         "kraken" => Ok(Box::new(KrakenMapper)),
         "lighter" => Ok(Box::new(LighterMapper)),
         "extended" => Ok(Box::new(ExtendedMapper)),
+        "nado" => Ok(Box::new(NadoMapper)),
         _ => anyhow::bail!("Unsupported exchange: {}", exchange),
     }
 }

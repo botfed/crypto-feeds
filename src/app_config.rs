@@ -172,5 +172,15 @@ pub fn load_perp(
             }
         }));
     }
+    if let Some(syms) = perp_syms("nado") {
+        let data = Arc::clone(&market_data.nado);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = nado::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("Nado perp listener exited with error {:?}", e);
+            }
+        }));
+    }
     Ok(())
 }

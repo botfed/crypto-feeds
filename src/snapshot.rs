@@ -89,6 +89,7 @@ pub struct AllSnapshotData {
     pub lighter: Arc<SnapshotCollection>,
     pub mexc: Arc<SnapshotCollection>,
     pub extended: Arc<SnapshotCollection>,
+    pub nado: Arc<SnapshotCollection>,
 }
 
 impl std::fmt::Debug for AllSnapshotData {
@@ -108,6 +109,7 @@ impl AllSnapshotData {
             lighter: new_coll(),
             mexc: new_coll(),
             extended: new_coll(),
+            nado: new_coll(),
         }
     }
 
@@ -120,6 +122,7 @@ impl AllSnapshotData {
             Exchange::Lighter => &self.lighter,
             Exchange::Mexc => &self.mexc,
             Exchange::Extended => &self.extended,
+            Exchange::Nado => &self.nado,
         }
     }
 
@@ -133,12 +136,13 @@ impl AllSnapshotData {
             (Lighter, &self.lighter),
             (Mexc, &self.mexc),
             (Extended, &self.extended),
+            (Nado, &self.nado),
         ]
         .into_iter()
     }
 }
 
-const NUM_EXCHANGES: usize = 7;
+const NUM_EXCHANGES: usize = 8;
 
 fn exchange_index(exchange: &Exchange) -> usize {
     match exchange {
@@ -149,6 +153,7 @@ fn exchange_index(exchange: &Exchange) -> usize {
         Exchange::Lighter => 4,
         Exchange::Mexc => 5,
         Exchange::Extended => 6,
+        Exchange::Nado => 7,
     }
 }
 
