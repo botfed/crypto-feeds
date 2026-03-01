@@ -59,6 +59,7 @@ pub struct AllMarketData {
     pub kraken: Arc<MarketDataCollection>,
     pub lighter: Arc<MarketDataCollection>,
     pub mexc: Arc<MarketDataCollection>,
+    pub extended: Arc<MarketDataCollection>,
 }
 
 // Debug impl
@@ -75,6 +76,7 @@ pub enum Exchange {
     Kraken,
     Lighter,
     Mexc,
+    Extended,
 }
 
 impl AllMarketData {
@@ -87,6 +89,7 @@ impl AllMarketData {
             (Kraken, &self.kraken),
             (Lighter, &self.lighter),
             (Mexc, &self.mexc),
+            (Extended, &self.extended),
         ]
         .into_iter()
     }
@@ -99,6 +102,7 @@ impl AllMarketData {
             Exchange::Kraken => &self.kraken,
             Exchange::Lighter => &self.lighter,
             Exchange::Mexc => &self.mexc,
+            Exchange::Extended => &self.extended,
         }
     }
 }
@@ -113,6 +117,7 @@ impl AllMarketData {
             kraken: new_coll(),
             lighter: new_coll(),
             mexc: new_coll(),
+            extended: new_coll(),
         }
     }
 }

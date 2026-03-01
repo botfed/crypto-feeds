@@ -22,6 +22,7 @@ fn parse_exchange(exchange: &str) -> PyResult<Exchange> {
         "kraken" => Ok(Exchange::Kraken),
         "lighter" => Ok(Exchange::Lighter),
         "mexc" => Ok(Exchange::Mexc),
+        "extended" => Ok(Exchange::Extended),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Unknown exchange: {}",
             exchange

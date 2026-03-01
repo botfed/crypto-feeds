@@ -5,6 +5,7 @@ mod coinbase;
 mod bybit;
 mod kraken;
 mod lighter;
+mod extended;
 
 // Re-export the trait
 pub use symbol_mapper::{SymbolMapper, parse_normalized};
@@ -16,6 +17,7 @@ pub use coinbase::CoinbaseMapper;
 pub use bybit::BybitMapper;
 pub use kraken::KrakenMapper;
 pub use lighter::LighterMapper;
+pub use extended::ExtendedMapper;
 
 use anyhow::Result;
 
@@ -28,6 +30,7 @@ pub fn get_mapper(exchange: &str) -> Result<Box<dyn SymbolMapper>> {
         "bybit" => Ok(Box::new(BybitMapper)),
         "kraken" => Ok(Box::new(KrakenMapper)),
         "lighter" => Ok(Box::new(LighterMapper)),
+        "extended" => Ok(Box::new(ExtendedMapper)),
         _ => anyhow::bail!("Unsupported exchange: {}", exchange),
     }
 }

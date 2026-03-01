@@ -4,4 +4,5 @@ pub mod coinbase;
 pub mod bybit;
 pub mod kraken;
 pub mod lighter;
+pub mod extended;
 pub mod connection;

@@ -88,6 +88,7 @@ pub struct AllSnapshotData {
     pub kraken: Arc<SnapshotCollection>,
     pub lighter: Arc<SnapshotCollection>,
     pub mexc: Arc<SnapshotCollection>,
+    pub extended: Arc<SnapshotCollection>,
 }
 
 impl std::fmt::Debug for AllSnapshotData {
@@ -106,6 +107,7 @@ impl AllSnapshotData {
             kraken: new_coll(),
             lighter: new_coll(),
             mexc: new_coll(),
+            extended: new_coll(),
         }
     }
 
@@ -117,6 +119,7 @@ impl AllSnapshotData {
             Exchange::Kraken => &self.kraken,
             Exchange::Lighter => &self.lighter,
             Exchange::Mexc => &self.mexc,
+            Exchange::Extended => &self.extended,
         }
     }
 
@@ -129,12 +132,13 @@ impl AllSnapshotData {
             (Kraken, &self.kraken),
             (Lighter, &self.lighter),
             (Mexc, &self.mexc),
+            (Extended, &self.extended),
         ]
         .into_iter()
     }
 }
 
-const NUM_EXCHANGES: usize = 6;
+const NUM_EXCHANGES: usize = 7;
 
 fn exchange_index(exchange: &Exchange) -> usize {
     match exchange {
@@ -144,6 +148,7 @@ fn exchange_index(exchange: &Exchange) -> usize {
         Exchange::Kraken => 3,
         Exchange::Lighter => 4,
         Exchange::Mexc => 5,
+        Exchange::Extended => 6,
     }
 }
 

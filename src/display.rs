@@ -16,7 +16,7 @@ const CLEAR_BELOW: &str = "\x1B[J";
 const CURSOR_HIDE: &str = "\x1B[?25l";
 const CURSOR_SHOW: &str = "\x1B[?25h";
 const ERASE_EOL: &str = "\x1B[K";
-const NUM_EXCHANGES: usize = 6;
+const NUM_EXCHANGES: usize = 7;
 const MAX_LOG_LINES: usize = 20;
 
 // --------------- in-memory log capture ---------------
@@ -138,6 +138,7 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                 write_market_collection(&mut buf, "Kraken  ", &market_data.kraken, None, None, &mut seen[3]);
                 write_market_collection(&mut buf, "MEXC    ", &market_data.mexc, None, None, &mut seen[4]);
                 write_market_collection(&mut buf, "Lighter ", &market_data.lighter, None, None, &mut seen[5]);
+                write_market_collection(&mut buf, "Extended", &market_data.extended, None, None, &mut seen[6]);
                 write_log_section(&mut buf);
                 let frame = prepare_frame(&buf);
                 flush_str(&format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW))?;
@@ -182,6 +183,7 @@ pub async fn print_bbo_with_analytics(
                 write_market_collection(&mut buf, "Kraken  ", &market_data.kraken, Some(a), Some(&Exchange::Kraken), &mut seen[3]);
                 write_market_collection(&mut buf, "MEXC    ", &market_data.mexc, Some(a), Some(&Exchange::Mexc), &mut seen[4]);
                 write_market_collection(&mut buf, "Lighter ", &market_data.lighter, Some(a), Some(&Exchange::Lighter), &mut seen[5]);
+                write_market_collection(&mut buf, "Extended", &market_data.extended, Some(a), Some(&Exchange::Extended), &mut seen[6]);
                 write_log_section(&mut buf);
                 let frame = prepare_frame(&buf);
                 flush_str(&format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW))?;
