@@ -8,9 +8,8 @@ use reqwest::header::{ACCEPT, USER_AGENT};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::net::TcpStream;
-// Note: Mutex is still used here for OrderBook (per-symbol order books), not for MarketDataCollection.
 
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
@@ -20,13 +19,13 @@ use crate::exchanges::connection::{
 };
 use crate::mappers::{LighterMapper, SymbolMapper};
 use crate::market_data::{InstrumentType, MarketData, MarketDataCollection};
-use crate::orderbook::OrderBook;
+use crate::orderbook::SyncBook;
 
 pub fn get_fees() -> ExchangeFees {
     ExchangeFees::new(FeeSchedule::new(0.0, 0.0), FeeSchedule::new(0.0, 0.0))
 }
 
-type Book = Arc<Mutex<OrderBook>>;
+type Book = SyncBook;
 
 #[derive(Debug, Clone, Deserialize)]
 struct MarketIndexRow {
@@ -56,9 +55,8 @@ async fn fetch_market_indices(client: &Client) -> Result<Vec<MarketIndexRow>> {
     Ok(rows)
 }
 
-#[derive(Clone)]
 struct LighterFeed {
-    /// Per-symbol orderbooks; values are locked individually.
+    /// Per-symbol orderbooks (single-writer: one WS task).
     books: HashMap<String, Book>,
     /// Requested symbol -> market_index (symbols are API symbols like "ETH", "BTC", etc.)
     sym_to_index: HashMap<String, u32>,
@@ -110,7 +108,7 @@ impl LighterFeed {
 
         let books = config_symbols
             .iter()
-            .map(|s| (s.to_string(), Arc::new(Mutex::new(OrderBook::new()))))
+            .map(|s| (s.to_string(), SyncBook::new()))
             .collect();
 
         Ok(Self {
@@ -263,12 +261,13 @@ impl ExchangeFeed for LighterFeed {
             }
         };
 
-        let Some(book_arc) = self.books.get(symbol) else {
+        let Some(book_cell) = self.books.get(symbol) else {
             // Shouldn't happen if mappings/books were built from the same symbol list.
             return Ok(None);
         };
 
-        let mut book = book_arc.lock().unwrap();
+        // SAFETY: single writer — one WS task per feed.
+        let book = unsafe { book_cell.get_mut() };
 
         if !ob.order_book.bids.is_empty() {
             book.update_bids(

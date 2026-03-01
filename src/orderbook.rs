@@ -1,4 +1,31 @@
+use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
+
+/// `UnsafeCell<OrderBook>` wrapper that is `Send + Sync`.
+///
+/// SAFETY: The caller must guarantee single-writer access. In this codebase
+/// each order book is owned by exactly one WebSocket feed task — the same
+/// guarantee that [`crate::ring_buffer::RingBuffer`] relies on.
+pub struct SyncBook(UnsafeCell<OrderBook>);
+
+// SAFETY: Single writer per book (one WS task per exchange-symbol).
+unsafe impl Send for SyncBook {}
+unsafe impl Sync for SyncBook {}
+
+impl SyncBook {
+    pub fn new() -> Self {
+        Self(UnsafeCell::new(OrderBook::new()))
+    }
+
+    /// Get a mutable reference to the inner order book.
+    ///
+    /// # Safety
+    /// Must only be called from a single writer task.
+    #[inline]
+    pub unsafe fn get_mut(&self) -> &mut OrderBook {
+        unsafe { &mut *self.0.get() }
+    }
+}
 
 pub struct OrderBook {
     pub bids: BTreeMap<ordered_float::OrderedFloat<f64>, f64>, // price -> size

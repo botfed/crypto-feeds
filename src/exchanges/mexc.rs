@@ -6,7 +6,7 @@ use prost::Message as ProstMessage;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
@@ -15,9 +15,7 @@ use crate::exchanges::connection::{
 };
 use crate::mappers::{MexcMapper, SymbolMapper};
 use crate::market_data::{InstrumentType, MarketData, MarketDataCollection};
-use crate::orderbook::OrderBook;
-
-// Note: Mutex is still used here for OrderBook (per-symbol order books), not for MarketDataCollection.
+use crate::orderbook::SyncBook;
 
 use crate::exchange_fees::{ExchangeFees, FeeSchedule};
 
@@ -87,9 +85,8 @@ fn depth_levels_to_updates(levels: &[[f64; 3]]) -> Vec<(String, f64)> {
         .collect()
 }
 
-type Book = Arc<Mutex<OrderBook>>;
+type Book = SyncBook;
 
-#[derive(Clone)]
 struct MexcFeed {
     // Used for perps depth -> BBO derivation
     books: HashMap<String, Book>,
@@ -106,7 +103,7 @@ impl MexcFeed {
         for normalized in symbols {
             // Denormalize to get native symbol for book key
             if let Ok(native) = mapper.denormalize(normalized, itype) {
-                books.insert(native, Arc::new(Mutex::new(OrderBook::new())));
+                books.insert(native, SyncBook::new());
             }
         }
 
@@ -124,7 +121,7 @@ impl MexcFeed {
         for normalized in symbols {
             // Denormalize to get native symbol for book key
             if let Ok(native) = mapper.denormalize(normalized, itype) {
-                books.insert(native, Arc::new(Mutex::new(OrderBook::new())));
+                books.insert(native, SyncBook::new());
             }
         }
 
@@ -278,12 +275,13 @@ impl ExchangeFeed for MexcFeed {
                 };
 
                 // Update order book for this symbol
-                let book = match self.books.get(&depth.symbol) {
-                    Some(book) => Arc::clone(book),
-                    None => return Ok(None), // or insert, depending on your design
+                let book_cell = match self.books.get(&depth.symbol) {
+                    Some(book) => book,
+                    None => return Ok(None),
                 };
 
-                let mut book = book.lock().unwrap();
+                // SAFETY: single writer — one WS task per feed.
+                let book = unsafe { book_cell.get_mut() };
 
                 book.update_bids(depth_levels_to_updates(&depth.data.bids));
                 book.update_asks(depth_levels_to_updates(&depth.data.asks));
