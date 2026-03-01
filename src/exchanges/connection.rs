@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::interval;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message, tungstenite::client::IntoClientRequest, tungstenite::http};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite::Message, tungstenite::client::IntoClientRequest, tungstenite::http};
 
 use crate::market_data::InstrumentType;
 use crate::symbol_registry::REGISTRY;
@@ -75,6 +75,11 @@ pub trait ExchangeFeed {
     /// Optional extra HTTP headers added to the WebSocket upgrade request.
     fn extra_headers(&self) -> Vec<(&str, &str)> {
         vec![]
+    }
+
+    /// Optional WebSocket config (e.g. to enable permessage-deflate).
+    fn ws_config(&self) -> Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig> {
+        None
     }
 
     fn build_url(&self, symbols: &[&str]) -> Result<String>;
@@ -176,9 +181,16 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
         );
     }
 
+    let ws_config = feed.ws_config();
+    let connect_fut = if let Some(ws_cfg) = ws_config {
+        connect_async_with_config(request, Some(ws_cfg), false)
+    } else {
+        connect_async_with_config(request, None, false)
+    };
+
     let ws_stream = match tokio::time::timeout(
         Duration::from_secs(config.message_timeout.as_secs()),
-        connect_async(request),
+        connect_fut,
     )
     .await
     {
