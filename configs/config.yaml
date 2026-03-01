@@ -1,16 +1,15 @@
 spot:
-  binance:  ["BTC_USDT", "AIXBT_USDT", "VIRTUAL_USDT", "USDT_USDC"]
-  coinbase: ["BTC_USD", "ETH_USD", "VIRTUAL_USD", "USDT_USD"]
+  binance:  ["BTC_USDT", "UNI_USDT"]
+  coinbase: ["BTC_USD", "ETH_USD", "UNI_USD"]
   kraken:   ["BTC_USD", "ETH_USD", "AIXBT_USD"]
   mexc:    ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
   bybit:   ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
 
 perp:
-  binance:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'CAKE_USDT']
+  binance:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'UNI_USDT']
   coinbase: ['BTC_USD', 'ETH_USD']
   kraken:   ['BTC_USD', 'ETH_USD']
-  bybit:    ['BTC_USDT', "AIXBT_USDT", "VIRTUAL_USDT", "AERO_USDT"]
-  mexc:     ['BTC_USDT', 'AERO_USDT', 'AIXBT_USDT']
-  lighter:  ['BTC_USDC', "AERO_USDC"]
-  extended: ['BTC_USD', 'ETH_USD', 'SOL_USD', "CAKE_USD"]
-  nado:     ['BTC_USDT', 'ETH_USDT', 'SOL_USDT']
+  bybit:    ['BTC_USDT', "UNI_USDT"]
+  lighter:  ['BTC_USDC', "UNI_USDC"]
+  extended: ['BTC_USD', 'ETH_USD', 'UNI_USD']
+  nado:     ['BTC_USDT', 'ETH_USDT', 'UNI_USDT']
