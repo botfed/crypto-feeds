@@ -192,7 +192,8 @@ pub async fn print_bbo_with_analytics(
         [Vec<SymbolId>; NUM_EXCHANGES],
         AnalyticsScratch,
         HashMap<(usize, SymbolId), DisplayAnalytics>,
-    )> = Some((std::array::from_fn(|_| Vec::new()), AnalyticsScratch::new(), HashMap::new()));
+        String,
+    )> = Some((std::array::from_fn(|_| Vec::new()), AnalyticsScratch::new(), HashMap::new(), String::new()));
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
@@ -201,12 +202,12 @@ pub async fn print_bbo_with_analytics(
                 break Ok(());
             }
             _ = interval.tick() => {
-                let (mut s, mut scratch, mut acache) = state.take().unwrap();
+                let (mut s, mut scratch, mut acache, mut perf_line) = state.take().unwrap();
                 let recompute = tick_count % 10 == 0;
                 tick_count += 1;
                 let md = Arc::clone(&market_data);
                 let a = if recompute { Some(Arc::clone(&analytics)) } else { None };
-                let (frame, s, scratch, acache) = tokio::task::spawn_blocking(move || {
+                let (frame, s, scratch, acache, perf_line) = tokio::task::spawn_blocking(move || {
                     let t0 = std::time::Instant::now();
                     let elapsed = start.elapsed().as_secs();
                     let h = elapsed / 3600;
@@ -215,36 +216,46 @@ pub async fn print_bbo_with_analytics(
                     let mut buf = String::with_capacity(16384);
                     let _ = writeln!(buf, "========== Market Data + Analytics ==========  uptime: {:02}:{:02}:{:02}", h, m, sec);
 
-                    let t_analytics = std::time::Instant::now();
                     write_header(&mut buf, true);
-                    let ap = a.as_deref().map(|a| (a, &Exchange::Binance));
-                    write_market_collection(&mut buf, "Binance ", &md.binance, ap, 0, true, &mut s[0], &mut scratch, &mut acache);
-                    let ap = a.as_deref().map(|a| (a, &Exchange::Coinbase));
-                    write_market_collection(&mut buf, "Coinbase", &md.coinbase, ap, 1, true, &mut s[1], &mut scratch, &mut acache);
-                    let ap = a.as_deref().map(|a| (a, &Exchange::Bybit));
-                    write_market_collection(&mut buf, "Bybit   ", &md.bybit, ap, 2, true, &mut s[2], &mut scratch, &mut acache);
-                    let ap = a.as_deref().map(|a| (a, &Exchange::Kraken));
-                    write_market_collection(&mut buf, "Kraken  ", &md.kraken, ap, 3, true, &mut s[3], &mut scratch, &mut acache);
-                    let ap = a.as_deref().map(|a| (a, &Exchange::Mexc));
-                    write_market_collection(&mut buf, "MEXC    ", &md.mexc, ap, 4, true, &mut s[4], &mut scratch, &mut acache);
-                    let ap = a.as_deref().map(|a| (a, &Exchange::Lighter));
-                    write_market_collection(&mut buf, "Lighter ", &md.lighter, ap, 5, true, &mut s[5], &mut scratch, &mut acache);
-                    let ap = a.as_deref().map(|a| (a, &Exchange::Extended));
-                    write_market_collection(&mut buf, "Extended", &md.extended, ap, 6, true, &mut s[6], &mut scratch, &mut acache);
-                    let ap = a.as_deref().map(|a| (a, &Exchange::Nado));
-                    write_market_collection(&mut buf, "Nado    ", &md.nado, ap, 7, true, &mut s[7], &mut scratch, &mut acache);
-                    let analytics_ms = t_analytics.elapsed().as_secs_f64() * 1000.0;
+                    let mut ex_times = [0.0f64; NUM_EXCHANGES];
+                    let ex_names = ["bin", "cb", "byb", "krk", "mxc", "ltr", "ext", "ndo"];
+                    macro_rules! timed_write {
+                        ($i:expr, $name:expr, $coll:expr, $ex:expr) => {{
+                            let t = std::time::Instant::now();
+                            let ap = a.as_deref().map(|a| (a, &$ex));
+                            write_market_collection(&mut buf, $name, &$coll, ap, $i, true, &mut s[$i], &mut scratch, &mut acache);
+                            ex_times[$i] = t.elapsed().as_secs_f64() * 1000.0;
+                        }};
+                    }
+                    timed_write!(0, "Binance ", md.binance, Exchange::Binance);
+                    timed_write!(1, "Coinbase", md.coinbase, Exchange::Coinbase);
+                    timed_write!(2, "Bybit   ", md.bybit, Exchange::Bybit);
+                    timed_write!(3, "Kraken  ", md.kraken, Exchange::Kraken);
+                    timed_write!(4, "MEXC    ", md.mexc, Exchange::Mexc);
+                    timed_write!(5, "Lighter ", md.lighter, Exchange::Lighter);
+                    timed_write!(6, "Extended", md.extended, Exchange::Extended);
+                    timed_write!(7, "Nado    ", md.nado, Exchange::Nado);
+                    let analytics_ms: f64 = ex_times.iter().sum();
 
-                    let _ = writeln!(buf, "  render: {:.1}ms (analytics: {:.1}ms){}", t0.elapsed().as_secs_f64() * 1000.0, analytics_ms, if a.is_some() { " [recompute]" } else { "" });
+                    if a.is_some() {
+                        perf_line.clear();
+                        let _ = write!(perf_line, "  render: {:.1}ms (analytics: {:.1}ms) [recompute]", t0.elapsed().as_secs_f64() * 1000.0, analytics_ms);
+                        for (i, &t) in ex_times.iter().enumerate() {
+                            if t > 0.1 {
+                                let _ = write!(perf_line, " {}:{:.1}", ex_names[i], t);
+                            }
+                        }
+                    }
+                    let _ = writeln!(buf, "{}", perf_line);
 
                     let (_, rows) = term_size();
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
                     write_log_section(&mut buf, remaining);
                     let frame = prepare_frame(&buf);
-                    (format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW), s, scratch, acache)
+                    (format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW), s, scratch, acache, perf_line)
                 }).await?;
-                state = Some((s, scratch, acache));
+                state = Some((s, scratch, acache, perf_line));
                 flush_str(frame).await?;
             }
         }
