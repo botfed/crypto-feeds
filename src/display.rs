@@ -323,7 +323,7 @@ pub fn write_market_collection(
 
         let age = md
             .and_then(|m| m.received_ts)
-            .map(|t| format!("{}", (now - t).num_milliseconds()))
+            .map(|t| format!("{}", (now - t).num_milliseconds().max(0)))
             .unwrap_or_else(|| "-".into());
 
         let sprd_bps = match (bid, ask, mid) {
