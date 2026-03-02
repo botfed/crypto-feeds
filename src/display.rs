@@ -148,14 +148,15 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                     let mut buf = String::with_capacity(8192);
                     let _ = writeln!(buf, "========== Market Data Snapshot ==========  uptime: {:02}:{:02}:{:02}", h, m, sec);
                     write_header(&mut buf, false);
-                    write_market_collection(&mut buf, "Binance ", &md.binance, None, None, &mut s[0]);
-                    write_market_collection(&mut buf, "Coinbase", &md.coinbase, None, None, &mut s[1]);
-                    write_market_collection(&mut buf, "Bybit   ", &md.bybit, None, None, &mut s[2]);
-                    write_market_collection(&mut buf, "Kraken  ", &md.kraken, None, None, &mut s[3]);
-                    write_market_collection(&mut buf, "MEXC    ", &md.mexc, None, None, &mut s[4]);
-                    write_market_collection(&mut buf, "Lighter ", &md.lighter, None, None, &mut s[5]);
-                    write_market_collection(&mut buf, "Extended", &md.extended, None, None, &mut s[6]);
-                    write_market_collection(&mut buf, "Nado    ", &md.nado, None, None, &mut s[7]);
+                    let mut scratch = Vec::new();
+                    write_market_collection(&mut buf, "Binance ", &md.binance, None, None, &mut s[0], &mut scratch);
+                    write_market_collection(&mut buf, "Coinbase", &md.coinbase, None, None, &mut s[1], &mut scratch);
+                    write_market_collection(&mut buf, "Bybit   ", &md.bybit, None, None, &mut s[2], &mut scratch);
+                    write_market_collection(&mut buf, "Kraken  ", &md.kraken, None, None, &mut s[3], &mut scratch);
+                    write_market_collection(&mut buf, "MEXC    ", &md.mexc, None, None, &mut s[4], &mut scratch);
+                    write_market_collection(&mut buf, "Lighter ", &md.lighter, None, None, &mut s[5], &mut scratch);
+                    write_market_collection(&mut buf, "Extended", &md.extended, None, None, &mut s[6], &mut scratch);
+                    write_market_collection(&mut buf, "Nado    ", &md.nado, None, None, &mut s[7], &mut scratch);
                     let (_, rows) = term_size();
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
@@ -203,14 +204,15 @@ pub async fn print_bbo_with_analytics(
                     let mut buf = String::with_capacity(16384);
                     let _ = writeln!(buf, "========== Market Data + Analytics ==========  uptime: {:02}:{:02}:{:02}", h, m, sec);
                     write_header(&mut buf, true);
-                    write_market_collection(&mut buf, "Binance ", &md.binance, Some(&a), Some(&Exchange::Binance), &mut s[0]);
-                    write_market_collection(&mut buf, "Coinbase", &md.coinbase, Some(&a), Some(&Exchange::Coinbase), &mut s[1]);
-                    write_market_collection(&mut buf, "Bybit   ", &md.bybit, Some(&a), Some(&Exchange::Bybit), &mut s[2]);
-                    write_market_collection(&mut buf, "Kraken  ", &md.kraken, Some(&a), Some(&Exchange::Kraken), &mut s[3]);
-                    write_market_collection(&mut buf, "MEXC    ", &md.mexc, Some(&a), Some(&Exchange::Mexc), &mut s[4]);
-                    write_market_collection(&mut buf, "Lighter ", &md.lighter, Some(&a), Some(&Exchange::Lighter), &mut s[5]);
-                    write_market_collection(&mut buf, "Extended", &md.extended, Some(&a), Some(&Exchange::Extended), &mut s[6]);
-                    write_market_collection(&mut buf, "Nado    ", &md.nado, Some(&a), Some(&Exchange::Nado), &mut s[7]);
+                    let mut scratch = Vec::new();
+                    write_market_collection(&mut buf, "Binance ", &md.binance, Some(&a), Some(&Exchange::Binance), &mut s[0], &mut scratch);
+                    write_market_collection(&mut buf, "Coinbase", &md.coinbase, Some(&a), Some(&Exchange::Coinbase), &mut s[1], &mut scratch);
+                    write_market_collection(&mut buf, "Bybit   ", &md.bybit, Some(&a), Some(&Exchange::Bybit), &mut s[2], &mut scratch);
+                    write_market_collection(&mut buf, "Kraken  ", &md.kraken, Some(&a), Some(&Exchange::Kraken), &mut s[3], &mut scratch);
+                    write_market_collection(&mut buf, "MEXC    ", &md.mexc, Some(&a), Some(&Exchange::Mexc), &mut s[4], &mut scratch);
+                    write_market_collection(&mut buf, "Lighter ", &md.lighter, Some(&a), Some(&Exchange::Lighter), &mut s[5], &mut scratch);
+                    write_market_collection(&mut buf, "Extended", &md.extended, Some(&a), Some(&Exchange::Extended), &mut s[6], &mut scratch);
+                    write_market_collection(&mut buf, "Nado    ", &md.nado, Some(&a), Some(&Exchange::Nado), &mut s[7], &mut scratch);
                     let (_, rows) = term_size();
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
@@ -288,6 +290,7 @@ pub fn write_market_collection(
     analytics: Option<&Analytics>,
     exchange: Option<&Exchange>,
     seen: &mut Vec<SymbolId>,
+    scratch: &mut Vec<crate::snapshot::SnapshotData>,
 ) -> bool {
     let now = Utc::now();
     let has_analytics = analytics.is_some();
@@ -342,7 +345,7 @@ pub fn write_market_collection(
             ) = match (analytics, exchange) {
                 (Some(a), Some(ex)) => {
                     const BUCKET_1S: usize = 10;
-                    match a.compute_display_analytics(ex, id, ONE_HOUR, 100, 600, BUCKET_1S) {
+                    match a.compute_display_analytics(ex, id, ONE_HOUR, 100, 600, BUCKET_1S, scratch) {
                         Some(da) => {
                             let mdn_sprd = da.mdn_spread
                                 .and_then(|s| mid.map(|m| s / m * 10_000.0));

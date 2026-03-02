@@ -459,8 +459,8 @@ impl Analytics {
 
     /// Compute all display analytics for one symbol from a single snapshot read.
     ///
-    /// This avoids the N separate `read_snap_field`/`read_snaps` calls that each
-    /// allocate a 36K-element Vec, replacing them with one read + slice-based math.
+    /// `scratch` is a reusable buffer to avoid per-call allocations. It will be
+    /// resized to `lookback` on the first call and reused thereafter.
     pub fn compute_display_analytics(
         &self,
         exchange: &Exchange,
@@ -469,8 +469,21 @@ impl Analytics {
         twap_n: usize,
         vol_n: usize,
         bucket_size: usize,
+        scratch: &mut Vec<SnapshotData>,
     ) -> Option<DisplayAnalytics> {
-        let snaps = self.read_snaps(exchange, symbol_id, lookback)?;
+        // Ensure scratch is large enough, reuse across calls
+        if scratch.len() < lookback {
+            scratch.resize(lookback, SnapshotData::default());
+        }
+        let coll = self.snap_data.get_collection(exchange);
+        let buf = coll.get_buffer(&symbol_id)?;
+        let count = buf.read_last_n(lookback, &mut scratch[..lookback]);
+        if count < 2 {
+            return None;
+        }
+        // read_last_n returns most-recent first; reverse to chronological
+        let snaps = &mut scratch[..count];
+        snaps.reverse();
         let n = snaps.len();
 
         // TWAP: mean of last twap_n midquotes
