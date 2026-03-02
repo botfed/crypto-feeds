@@ -578,6 +578,7 @@ impl Analytics {
 }
 
 /// Pre-computed analytics for one exchange-symbol, from a single snapshot read.
+#[derive(Clone)]
 pub struct DisplayAnalytics {
     pub twap: Option<f64>,
     pub mdn_spread: Option<f64>,

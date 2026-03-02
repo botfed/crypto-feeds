@@ -1,9 +1,9 @@
-use crate::analytics::Analytics;
+use crate::analytics::{Analytics, DisplayAnalytics};
 use crate::market_data::{AllMarketData, Exchange, MarketDataCollection};
 use crate::symbol_registry::{MAX_SYMBOLS, SymbolId, REGISTRY};
 use anyhow::Result;
 use chrono::Utc;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as FmtWrite;
 use std::io::{Write, stdout};
 use std::sync::{Arc, Mutex};
@@ -147,16 +147,17 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                     let m = (elapsed % 3600) / 60;
                     let sec = elapsed % 60;
                     let mut buf = String::with_capacity(8192);
+                    let mut no_cache = HashMap::new();
                     let _ = writeln!(buf, "========== Market Data Snapshot ==========  uptime: {:02}:{:02}:{:02}", h, m, sec);
                     write_header(&mut buf, false);
-                    write_market_collection(&mut buf, "Binance ", &md.binance, None, None, &mut s[0], &mut scratch);
-                    write_market_collection(&mut buf, "Coinbase", &md.coinbase, None, None, &mut s[1], &mut scratch);
-                    write_market_collection(&mut buf, "Bybit   ", &md.bybit, None, None, &mut s[2], &mut scratch);
-                    write_market_collection(&mut buf, "Kraken  ", &md.kraken, None, None, &mut s[3], &mut scratch);
-                    write_market_collection(&mut buf, "MEXC    ", &md.mexc, None, None, &mut s[4], &mut scratch);
-                    write_market_collection(&mut buf, "Lighter ", &md.lighter, None, None, &mut s[5], &mut scratch);
-                    write_market_collection(&mut buf, "Extended", &md.extended, None, None, &mut s[6], &mut scratch);
-                    write_market_collection(&mut buf, "Nado    ", &md.nado, None, None, &mut s[7], &mut scratch);
+                    write_market_collection(&mut buf, "Binance ", &md.binance, None, 0, false, &mut s[0], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "Coinbase", &md.coinbase, None, 1, false, &mut s[1], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "Bybit   ", &md.bybit, None, 2, false, &mut s[2], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "Kraken  ", &md.kraken, None, 3, false, &mut s[3], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "MEXC    ", &md.mexc, None, 4, false, &mut s[4], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "Lighter ", &md.lighter, None, 5, false, &mut s[5], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "Extended", &md.extended, None, 6, false, &mut s[6], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "Nado    ", &md.nado, None, 7, false, &mut s[7], &mut scratch, &mut no_cache);
                     let (_, rows) = term_size();
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
@@ -185,8 +186,12 @@ pub async fn print_bbo_with_analytics(
     flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
-    let mut state: Option<([Vec<SymbolId>; NUM_EXCHANGES], Vec<crate::snapshot::SnapshotData>)> =
-        Some((std::array::from_fn(|_| Vec::new()), Vec::new()));
+    let mut tick_count: u64 = 0;
+    let mut state: Option<(
+        [Vec<SymbolId>; NUM_EXCHANGES],
+        Vec<crate::snapshot::SnapshotData>,
+        HashMap<(usize, SymbolId), DisplayAnalytics>,
+    )> = Some((std::array::from_fn(|_| Vec::new()), Vec::new(), HashMap::new()));
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let result = loop {
         tokio::select! {
@@ -194,10 +199,12 @@ pub async fn print_bbo_with_analytics(
                 break Ok(());
             }
             _ = interval.tick() => {
-                let (mut s, mut scratch) = state.take().unwrap();
+                let (mut s, mut scratch, mut acache) = state.take().unwrap();
+                let recompute = tick_count % 10 == 0;
+                tick_count += 1;
                 let md = Arc::clone(&market_data);
-                let a = Arc::clone(&analytics);
-                let (frame, s, scratch) = tokio::task::spawn_blocking(move || {
+                let a = if recompute { Some(Arc::clone(&analytics)) } else { None };
+                let (frame, s, scratch, acache) = tokio::task::spawn_blocking(move || {
                     let elapsed = start.elapsed().as_secs();
                     let h = elapsed / 3600;
                     let m = (elapsed % 3600) / 60;
@@ -205,22 +212,30 @@ pub async fn print_bbo_with_analytics(
                     let mut buf = String::with_capacity(16384);
                     let _ = writeln!(buf, "========== Market Data + Analytics ==========  uptime: {:02}:{:02}:{:02}", h, m, sec);
                     write_header(&mut buf, true);
-                    write_market_collection(&mut buf, "Binance ", &md.binance, Some(&a), Some(&Exchange::Binance), &mut s[0], &mut scratch);
-                    write_market_collection(&mut buf, "Coinbase", &md.coinbase, Some(&a), Some(&Exchange::Coinbase), &mut s[1], &mut scratch);
-                    write_market_collection(&mut buf, "Bybit   ", &md.bybit, Some(&a), Some(&Exchange::Bybit), &mut s[2], &mut scratch);
-                    write_market_collection(&mut buf, "Kraken  ", &md.kraken, Some(&a), Some(&Exchange::Kraken), &mut s[3], &mut scratch);
-                    write_market_collection(&mut buf, "MEXC    ", &md.mexc, Some(&a), Some(&Exchange::Mexc), &mut s[4], &mut scratch);
-                    write_market_collection(&mut buf, "Lighter ", &md.lighter, Some(&a), Some(&Exchange::Lighter), &mut s[5], &mut scratch);
-                    write_market_collection(&mut buf, "Extended", &md.extended, Some(&a), Some(&Exchange::Extended), &mut s[6], &mut scratch);
-                    write_market_collection(&mut buf, "Nado    ", &md.nado, Some(&a), Some(&Exchange::Nado), &mut s[7], &mut scratch);
+                    let ap = a.as_deref().map(|a| (a, &Exchange::Binance));
+                    write_market_collection(&mut buf, "Binance ", &md.binance, ap, 0, true, &mut s[0], &mut scratch, &mut acache);
+                    let ap = a.as_deref().map(|a| (a, &Exchange::Coinbase));
+                    write_market_collection(&mut buf, "Coinbase", &md.coinbase, ap, 1, true, &mut s[1], &mut scratch, &mut acache);
+                    let ap = a.as_deref().map(|a| (a, &Exchange::Bybit));
+                    write_market_collection(&mut buf, "Bybit   ", &md.bybit, ap, 2, true, &mut s[2], &mut scratch, &mut acache);
+                    let ap = a.as_deref().map(|a| (a, &Exchange::Kraken));
+                    write_market_collection(&mut buf, "Kraken  ", &md.kraken, ap, 3, true, &mut s[3], &mut scratch, &mut acache);
+                    let ap = a.as_deref().map(|a| (a, &Exchange::Mexc));
+                    write_market_collection(&mut buf, "MEXC    ", &md.mexc, ap, 4, true, &mut s[4], &mut scratch, &mut acache);
+                    let ap = a.as_deref().map(|a| (a, &Exchange::Lighter));
+                    write_market_collection(&mut buf, "Lighter ", &md.lighter, ap, 5, true, &mut s[5], &mut scratch, &mut acache);
+                    let ap = a.as_deref().map(|a| (a, &Exchange::Extended));
+                    write_market_collection(&mut buf, "Extended", &md.extended, ap, 6, true, &mut s[6], &mut scratch, &mut acache);
+                    let ap = a.as_deref().map(|a| (a, &Exchange::Nado));
+                    write_market_collection(&mut buf, "Nado    ", &md.nado, ap, 7, true, &mut s[7], &mut scratch, &mut acache);
                     let (_, rows) = term_size();
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
                     write_log_section(&mut buf, remaining);
                     let frame = prepare_frame(&buf);
-                    (format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW), s, scratch)
+                    (format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW), s, scratch, acache)
                 }).await?;
-                state = Some((s, scratch));
+                state = Some((s, scratch, acache));
                 flush_str(frame).await?;
             }
         }
@@ -287,13 +302,15 @@ pub fn write_market_collection(
     buf: &mut String,
     exchange_name: &str,
     collection: &MarketDataCollection,
-    analytics: Option<&Analytics>,
-    exchange: Option<&Exchange>,
+    analytics: Option<(&Analytics, &Exchange)>,
+    exchange_idx: usize,
+    show_analytics: bool,
     seen: &mut Vec<SymbolId>,
     scratch: &mut Vec<crate::snapshot::SnapshotData>,
+    cache: &mut HashMap<(usize, SymbolId), DisplayAnalytics>,
 ) -> bool {
     let now = Utc::now();
-    let has_analytics = analytics.is_some();
+    let has_analytics = show_analytics;
 
     let prev_len = seen.len();
     for id in 0..MAX_SYMBOLS {
@@ -337,46 +354,51 @@ pub fn write_market_collection(
         const ONE_HOUR: usize = 36_000;
 
         if has_analytics {
+            let da = if let Some((a, ex)) = analytics {
+                const BUCKET_1S: usize = 10;
+                let da = a.compute_display_analytics(ex, id, ONE_HOUR, 100, 600, BUCKET_1S, scratch);
+                if let Some(ref d) = da {
+                    cache.insert((exchange_idx, id), d.clone());
+                }
+                da
+            } else {
+                cache.get(&(exchange_idx, id)).cloned()
+            };
+
             let (twap, mdn_sprd_bps, vol_bps_s, max_jump_bps,
                  el_p50, el_p9999, rl_p50, rl_p9999,
                  mdn_rng_bps, p99_rng_bps,
                  bid_fills_hr, bid_n_fills, bid_mkout,
                  ask_fills_hr, ask_n_fills, ask_mkout,
-            ) = match (analytics, exchange) {
-                (Some(a), Some(ex)) => {
-                    const BUCKET_1S: usize = 10;
-                    match a.compute_display_analytics(ex, id, ONE_HOUR, 100, 600, BUCKET_1S, scratch) {
-                        Some(da) => {
-                            let mdn_sprd = da.mdn_spread
-                                .and_then(|s| mid.map(|m| s / m * 10_000.0));
-                            let vol = da.vol
-                                .map(|v| v * 10.0_f64.sqrt() * 10_000.0);
-                            let max_jump = da.max_jump
-                                .map(|v| v * 10_000.0);
+            ) = match da {
+                Some(da) => {
+                    let mdn_sprd = da.mdn_spread
+                        .and_then(|s| mid.map(|m| s / m * 10_000.0));
+                    let vol = da.vol
+                        .map(|v| v * 10.0_f64.sqrt() * 10_000.0);
+                    let max_jump = da.max_jump
+                        .map(|v| v * 10_000.0);
 
-                            let fill_to_fph = |r: &crate::analytics::QuoteFillResult| {
-                                let denom = r.elapsed_secs.min(3600.0);
-                                if denom > 0.0 { r.n_fills as f64 * 3600.0 / denom } else { 0.0 }
-                            };
+                    let fill_to_fph = |r: &crate::analytics::QuoteFillResult| {
+                        let denom = r.elapsed_secs.min(3600.0);
+                        if denom > 0.0 { r.n_fills as f64 * 3600.0 / denom } else { 0.0 }
+                    };
 
-                            let (bf, bn, bm) = match &da.bid_fill {
-                                Some(r) => (Some(fill_to_fph(r)), Some(r.n_fills as f64), Some(r.mean_markout_bps)),
-                                None => (None, None, None),
-                            };
-                            let (af, an, am) = match &da.ask_fill {
-                                Some(r) => (Some(fill_to_fph(r)), Some(r.n_fills as f64), Some(r.mean_markout_bps)),
-                                None => (None, None, None),
-                            };
+                    let (bf, bn, bm) = match &da.bid_fill {
+                        Some(r) => (Some(fill_to_fph(r)), Some(r.n_fills as f64), Some(r.mean_markout_bps)),
+                        None => (None, None, None),
+                    };
+                    let (af, an, am) = match &da.ask_fill {
+                        Some(r) => (Some(fill_to_fph(r)), Some(r.n_fills as f64), Some(r.mean_markout_bps)),
+                        None => (None, None, None),
+                    };
 
-                            (da.twap, mdn_sprd, vol, max_jump,
-                             da.el_p50, da.el_p9999, da.rl_p50, da.rl_p9999,
-                             da.mdn_rng, da.p99_rng,
-                             bf, bn, bm, af, an, am)
-                        }
-                        None => (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
-                    }
+                    (da.twap, mdn_sprd, vol, max_jump,
+                     da.el_p50, da.el_p9999, da.rl_p50, da.rl_p9999,
+                     da.mdn_rng, da.p99_rng,
+                     bf, bn, bm, af, an, am)
                 }
-                _ => (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
+                None => (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
             };
 
             let _ = writeln!(
