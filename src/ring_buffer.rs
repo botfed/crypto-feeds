@@ -3,13 +3,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const DEFAULT_CAPACITY: usize = 65_536; // 2^16, power of 2 for bitmask indexing
 
-/// A single slot in the ring buffer, aligned to a cache line boundary
-/// to prevent false sharing between adjacent slots.
+/// A single slot in the ring buffer.
 ///
 /// The `seq` field implements a seqlock:
 /// - Odd  → write in progress
 /// - Even → write complete; the low bits encode the generation
-#[repr(C, align(128))]
+#[repr(C)]
 struct Slot<T> {
     seq: AtomicU64,
     data: UnsafeCell<T>,
