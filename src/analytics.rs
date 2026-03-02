@@ -515,8 +515,17 @@ impl Analytics {
         let vol_start = all_log_rets.len().saturating_sub(vol_n);
         let vol = stdev(&all_log_rets[vol_start..]);
 
-        // Latency: sort once per field, read two quantiles each
-        let mut el_vals = extract(SnapshotField::ExchangeLatMs, snaps);
+        // Latency: skip first 5s of observations (warmup), sort once per field
+        const WARMUP_NS: i64 = 5_000_000_000;
+        let first_ts = snaps[0].snap_ts_ns;
+        let lat_start = if first_ts > 0 {
+            snaps.iter().position(|s| s.snap_ts_ns >= first_ts + WARMUP_NS).unwrap_or(0)
+        } else {
+            0
+        };
+        let lat_snaps = &snaps[lat_start..];
+
+        let mut el_vals = extract(SnapshotField::ExchangeLatMs, lat_snaps);
         let (el_p50, el_p9999) = if el_vals.is_empty() {
             (None, None)
         } else {
@@ -524,7 +533,7 @@ impl Analytics {
             (Some(qs[0]), Some(qs[1]))
         };
 
-        let mut rl_vals = extract(SnapshotField::ReceiveLatMs, snaps);
+        let mut rl_vals = extract(SnapshotField::ReceiveLatMs, lat_snaps);
         let (rl_p50, rl_p9999) = if rl_vals.is_empty() {
             (None, None)
         } else {
