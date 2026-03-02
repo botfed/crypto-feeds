@@ -376,19 +376,11 @@ pub fn write_market_collection(
         if has_analytics {
             let da = if let Some((a, ex)) = analytics {
                 const BUCKET_1S: usize = 10;
-                let result = a.compute_display_analytics(ex, id, ONE_HOUR, 100, 600, BUCKET_1S, scratch);
-                if let Some((ref d, ref timing)) = result {
+                let da = a.compute_display_analytics(ex, id, ONE_HOUR, 100, 600, BUCKET_1S, scratch);
+                if let Some(ref d) = da {
                     cache.insert((exchange_idx, id), d.clone());
-                    let sym_name = REGISTRY.get_symbol(id).unwrap_or("?");
-                    log::info!(
-                        "[perf] {}:{} n={} scan={:.0} spread={:.0} vol={:.0} lat={:.0} range={:.0} fills={:.0} total={:.0}μs",
-                        exchange_name.trim(), sym_name, timing.n_snaps,
-                        timing.scan_us, timing.spread_us, timing.vol_us,
-                        timing.latency_us, timing.range_us, timing.fills_us,
-                        timing.scan_us + timing.spread_us + timing.vol_us + timing.latency_us + timing.range_us + timing.fills_us,
-                    );
                 }
-                result.map(|(d, _)| d)
+                da
             } else {
                 cache.get(&(exchange_idx, id)).cloned()
             };

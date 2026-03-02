@@ -445,7 +445,7 @@ impl Analytics {
         vol_n: usize,
         bucket_size: usize,
         scratch: &mut AnalyticsScratch,
-    ) -> Option<(DisplayAnalytics, AnalyticsTiming)> {
+    ) -> Option<DisplayAnalytics> {
         let coll = self.snap_data.get_collection(exchange);
         let buf = coll.get_buffer(&symbol_id)?;
 
@@ -473,7 +473,6 @@ impl Analytics {
         let mut max_jump = 0.0f64;
 
         // Single pass over ring buffer (newest first)
-        let t = std::time::Instant::now();
         buf.scan_last_n(lookback, |snap| {
             // TWAP: accumulate for first twap_n entries (most recent)
             if midquotes.len() < twap_n && !snap.midquote.is_nan() && snap.midquote > 0.0 {
@@ -502,7 +501,6 @@ impl Analytics {
             ask_lows.push(snap.ask_low);
             snap_ts.push(snap.snap_ts_ns);
         });
-        let scan_us = t.elapsed().as_nanos() as f64 / 1000.0;
 
         let count = midquotes.len();
         if count < 2 {
@@ -513,25 +511,20 @@ impl Analytics {
         let twap = if twap_count > 0 { Some(twap_sum / twap_count as f64) } else { None };
 
         // Median spread — O(N) selection instead of O(N log N) sort
-        let t = std::time::Instant::now();
         let mdn_spread = if spreads.is_empty() {
             None
         } else {
             Some(quantile_mut(spreads, 0.5))
         };
-        let spread_us = t.elapsed().as_nanos() as f64 / 1000.0;
 
         // Max jump (already computed streaming)
         let max_jump = if log_returns.is_empty() { None } else { Some(max_jump) };
 
         // Vol: stdev of most recent vol_n log returns (newest are at front)
-        let t = std::time::Instant::now();
         let vol_end = log_returns.len().min(vol_n);
         let vol = stdev(&log_returns[..vol_end]);
-        let vol_us = t.elapsed().as_nanos() as f64 / 1000.0;
 
         // Latency: skip first 5s of observations (warmup = oldest entries at tail)
-        let t = std::time::Instant::now();
         const WARMUP_NS: i64 = 5_000_000_000;
         let first_ts = snap_ts.last().copied().unwrap_or(0);
         let lat_end = if first_ts > 0 {
@@ -564,10 +557,8 @@ impl Analytics {
             let p9999 = quantile_mut(vals, 0.9999);
             (Some(p50), Some(p9999))
         };
-        let latency_us = t.elapsed().as_nanos() as f64 / 1000.0;
 
         // Mid-range bps buckets (need chronological order)
-        let t = std::time::Instant::now();
         mid_highs.reverse();
         mid_lows.reverse();
         vals.clear();
@@ -593,10 +584,8 @@ impl Analytics {
             let p99 = quantile_mut(vals, 0.99);
             (Some(p50), Some(p99))
         };
-        let range_us = t.elapsed().as_nanos() as f64 / 1000.0;
 
         // Fill analysis (need chronological order)
-        let t = std::time::Instant::now();
         midquotes.reverse();
         bid_highs.reverse();
         ask_lows.reverse();
@@ -610,19 +599,8 @@ impl Analytics {
             ),
             _ => (None, None),
         };
-        let fills_us = t.elapsed().as_nanos() as f64 / 1000.0;
 
-        let timing = AnalyticsTiming {
-            scan_us,
-            spread_us,
-            vol_us,
-            latency_us,
-            range_us,
-            fills_us,
-            n_snaps: count,
-        };
-
-        Some((DisplayAnalytics {
+        Some(DisplayAnalytics {
             twap,
             mdn_spread,
             vol,
@@ -635,20 +613,8 @@ impl Analytics {
             p99_rng,
             bid_fill,
             ask_fill,
-        }, timing))
+        })
     }
-}
-
-/// Per-phase timing breakdown for one `compute_display_analytics` call.
-#[derive(Clone)]
-pub struct AnalyticsTiming {
-    pub scan_us: f64,
-    pub spread_us: f64,
-    pub vol_us: f64,
-    pub latency_us: f64,
-    pub range_us: f64,
-    pub fills_us: f64,
-    pub n_snaps: usize,
 }
 
 /// Pre-computed analytics for one exchange-symbol, from a single snapshot read.
