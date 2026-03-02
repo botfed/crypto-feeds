@@ -1,6 +1,8 @@
 use crate::market_data::{AllMarketData, Exchange};
 use crate::snapshot::{AllSnapshotData, SnapshotData};
 use crate::symbol_registry::SymbolId;
+use rayon::prelude::*;
+use std::cell::RefCell;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
@@ -614,6 +616,36 @@ impl Analytics {
             bid_fill,
             ask_fill,
         })
+    }
+
+    /// Parallel batch computation of display analytics across symbols.
+    ///
+    /// Each rayon thread gets its own `AnalyticsScratch` via thread-local storage,
+    /// so buffer capacity is retained across calls on the same thread.
+    pub fn compute_display_analytics_batch(
+        &self,
+        exchange: &Exchange,
+        symbols: &[SymbolId],
+        lookback: usize,
+        twap_n: usize,
+        vol_n: usize,
+        bucket_size: usize,
+    ) -> Vec<(SymbolId, DisplayAnalytics)> {
+        thread_local! {
+            static SCRATCH: RefCell<AnalyticsScratch> = RefCell::new(AnalyticsScratch::new());
+        }
+        symbols
+            .par_iter()
+            .filter_map(|&sym_id| {
+                SCRATCH.with(|cell| {
+                    let mut scratch = cell.borrow_mut();
+                    self.compute_display_analytics(
+                        exchange, sym_id, lookback, twap_n, vol_n, bucket_size, &mut scratch,
+                    )
+                    .map(|da| (sym_id, da))
+                })
+            })
+            .collect()
     }
 }
 
