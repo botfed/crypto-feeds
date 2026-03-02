@@ -675,7 +675,7 @@ impl PyFeedManager {
         Ok(())
     }
 
-    #[pyo3(signature = (interval_ms=100, buffer_capacity=8192))]
+    #[pyo3(signature = (interval_ms=100, buffer_capacity=65536))]
     fn start_snapshots(
         &mut self,
         py: Python,

@@ -507,17 +507,14 @@ impl Analytics {
             return None;
         }
 
-        let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
-
         // TWAP (already computed streaming)
         let twap = if twap_count > 0 { Some(twap_sum / twap_count as f64) } else { None };
 
-        // Median spread
+        // Median spread — O(N) selection instead of O(N log N) sort
         let mdn_spread = if spreads.is_empty() {
             None
         } else {
-            spreads.sort_unstable_by(cmp);
-            Some(quantile_sorted(spreads, 0.5))
+            Some(quantile_mut(spreads, 0.5))
         };
 
         // Max jump (already computed streaming)
@@ -545,8 +542,10 @@ impl Analytics {
         let (el_p50, el_p9999) = if vals.is_empty() {
             (None, None)
         } else {
-            vals.sort_unstable_by(cmp);
-            (Some(quantile_sorted(vals, 0.5)), Some(quantile_sorted(vals, 0.9999)))
+            // Compute lower quantile first; selection partitions help the second call
+            let p50 = quantile_mut(vals, 0.5);
+            let p9999 = quantile_mut(vals, 0.9999);
+            (Some(p50), Some(p9999))
         };
 
         vals.clear();
@@ -554,8 +553,9 @@ impl Analytics {
         let (rl_p50, rl_p9999) = if vals.is_empty() {
             (None, None)
         } else {
-            vals.sort_unstable_by(cmp);
-            (Some(quantile_sorted(vals, 0.5)), Some(quantile_sorted(vals, 0.9999)))
+            let p50 = quantile_mut(vals, 0.5);
+            let p9999 = quantile_mut(vals, 0.9999);
+            (Some(p50), Some(p9999))
         };
 
         // Mid-range bps buckets (need chronological order)
@@ -580,8 +580,9 @@ impl Analytics {
         let (mdn_rng, p99_rng) = if vals.is_empty() {
             (None, None)
         } else {
-            vals.sort_unstable_by(cmp);
-            (Some(quantile_sorted(vals, 0.5)), Some(quantile_sorted(vals, 0.99)))
+            let p50 = quantile_mut(vals, 0.5);
+            let p99 = quantile_mut(vals, 0.99);
+            (Some(p50), Some(p99))
         };
 
         // Fill analysis (need chronological order)
@@ -733,31 +734,38 @@ fn median(vals: &[f64]) -> f64 {
 }
 
 /// Linear-interpolation quantile (same as numpy default).
-/// Clones and sorts internally — use `quantile_sorted` when you need multiple
-/// quantiles from the same data.
+/// Clones internally, then uses O(N) selection.
 fn quantile(vals: &[f64], q: f64) -> f64 {
-    let mut sorted = vals.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    quantile_sorted(&sorted, q)
+    let mut buf = vals.to_vec();
+    quantile_mut(&mut buf, q)
 }
 
-/// Read a quantile from an already-sorted slice.
-fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
-    let n = sorted.len();
+/// In-place O(N) quantile using `select_nth_unstable`.
+///
+/// Partially reorders the slice. Call lower quantiles first to benefit from
+/// the partition left by previous calls.
+fn quantile_mut(vals: &mut [f64], q: f64) -> f64 {
+    let n = vals.len();
     if n == 0 {
         return f64::NAN;
     }
     if n == 1 {
-        return sorted[0];
+        return vals[0];
     }
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
     let pos = q * (n - 1) as f64;
     let lo = pos.floor() as usize;
     let hi = pos.ceil() as usize;
+    vals.select_nth_unstable_by(lo, cmp);
     if lo == hi {
-        sorted[lo]
+        vals[lo]
     } else {
+        let lo_val = vals[lo];
+        // After select_nth(lo), vals[lo+1..] are all >= vals[lo].
+        // The hi-th element is the minimum of that partition.
+        let hi_val = vals[lo + 1..].iter().copied().reduce(f64::min).unwrap_or(lo_val);
         let frac = pos - lo as f64;
-        sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+        lo_val * (1.0 - frac) + hi_val * frac
     }
 }
 

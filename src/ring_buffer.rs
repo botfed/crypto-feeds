@@ -165,6 +165,9 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
     ///
     /// Unlike `read_last_n` this requires no pre-allocated output buffer —
     /// the caller extracts only the fields it needs inside the closure.
+    ///
+    /// Inlines the seqlock protocol to avoid per-element `write_pos` reloads
+    /// and bounds checks that `read_at` performs.
     pub fn scan_last_n<F>(&self, n: usize, mut f: F) -> usize
     where
         F: FnMut(&T),
@@ -175,11 +178,29 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
         }
         let available = current.min(self.capacity as u64) as usize;
         let to_read = n.min(available);
+        let mask = self.capacity - 1;
         let mut count = 0;
         for i in 0..to_read {
-            if let Some(item) = self.read_at(current - 1 - i as u64) {
-                f(&item);
-                count += 1;
+            let pos = current - 1 - i as u64;
+            let idx = (pos as usize) & mask;
+            let slot = &self.buf[idx];
+            let expected_seq = (pos * 2) + 2;
+
+            for _ in 0..4 {
+                let seq1 = slot.seq.load(Ordering::Acquire);
+                if seq1 & 1 != 0 || seq1 != expected_seq {
+                    std::hint::spin_loop();
+                    continue;
+                }
+                // SAFETY: seq is even and matches expected, so no concurrent write.
+                let data = unsafe { *slot.data.get() };
+                let seq2 = slot.seq.load(Ordering::Acquire);
+                if seq1 == seq2 {
+                    f(&data);
+                    count += 1;
+                    break;
+                }
+                std::hint::spin_loop();
             }
         }
         count

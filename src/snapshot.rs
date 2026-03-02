@@ -36,7 +36,7 @@ impl Default for SnapshotConfig {
     fn default() -> Self {
         Self {
             interval_ms: 100,
-            buffer_capacity: 8192,
+            buffer_capacity: 65536,
         }
     }
 }
