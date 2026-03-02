@@ -160,6 +160,31 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
         count
     }
 
+    /// Walk the most-recent N entries, calling `f` for each successfully read
+    /// element (newest first). Returns the number of entries delivered.
+    ///
+    /// Unlike `read_last_n` this requires no pre-allocated output buffer —
+    /// the caller extracts only the fields it needs inside the closure.
+    pub fn scan_last_n<F>(&self, n: usize, mut f: F) -> usize
+    where
+        F: FnMut(&T),
+    {
+        let current = self.write_pos.load(Ordering::Acquire);
+        if current == 0 {
+            return 0;
+        }
+        let available = current.min(self.capacity as u64) as usize;
+        let to_read = n.min(available);
+        let mut count = 0;
+        for i in 0..to_read {
+            if let Some(item) = self.read_at(current - 1 - i as u64) {
+                f(&item);
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Current write position (number of entries written so far).
     pub fn write_pos(&self) -> u64 {
         self.write_pos.load(Ordering::Acquire)

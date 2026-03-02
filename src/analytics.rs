@@ -1,4 +1,4 @@
-use crate::market_data::{AllMarketData, Exchange, MarketData};
+use crate::market_data::{AllMarketData, Exchange};
 use crate::snapshot::{AllSnapshotData, SnapshotData};
 use crate::symbol_registry::SymbolId;
 use std::sync::Arc;
@@ -164,21 +164,14 @@ impl Analytics {
     ) -> Option<Vec<f64>> {
         let coll = self.snap_data.get_collection(exchange);
         let buf = coll.get_buffer(&symbol_id)?;
-        let mut raw = vec![SnapshotData::default(); n];
-        let count = buf.read_last_n(n, &mut raw);
-        if count == 0 {
-            return None;
-        }
-        let values: Vec<f64> = raw[..count]
-            .iter()
-            .map(|s| field.extract(s))
-            .filter(|v| !v.is_nan())
-            .collect();
-        if values.is_empty() {
-            None
-        } else {
-            Some(values)
-        }
+        let mut values = Vec::new();
+        buf.scan_last_n(n, |snap| {
+            let v = field.extract(snap);
+            if !v.is_nan() {
+                values.push(v);
+            }
+        });
+        if values.is_empty() { None } else { Some(values) }
     }
 
     // -- snapshot-based analytics --
@@ -296,42 +289,18 @@ impl Analytics {
     ) -> Option<f64> {
         let coll = self.tick_data.get_collection(exchange);
         let buf = coll.get_buffer(&symbol_id)?;
-        let mut raw = vec![MarketData::default(); n];
-        let count = buf.read_last_n(n, &mut raw);
-        if count == 0 {
-            return None;
-        }
-        let mids: Vec<f64> = raw[..count]
-            .iter()
-            .filter_map(|md| md.midquote())
-            .collect();
-        if mids.is_empty() {
-            None
-        } else {
-            Some(mean(&mids))
-        }
+        let mut sum = 0.0f64;
+        let mut count = 0usize;
+        buf.scan_last_n(n, |md| {
+            if let Some(mid) = md.midquote() {
+                sum += mid;
+                count += 1;
+            }
+        });
+        if count == 0 { None } else { Some(sum / count as f64) }
     }
 
     // -- fill analysis --
-
-    fn read_snaps(
-        &self,
-        exchange: &Exchange,
-        symbol_id: SymbolId,
-        n: usize,
-    ) -> Option<Vec<SnapshotData>> {
-        let coll = self.snap_data.get_collection(exchange);
-        let buf = coll.get_buffer(&symbol_id)?;
-        let mut raw = vec![SnapshotData::default(); n];
-        let count = buf.read_last_n(n, &mut raw);
-        if count < 2 {
-            return None;
-        }
-        // read_last_n returns most-recent first; reverse to chronological
-        let mut snaps = raw[..count].to_vec();
-        snaps.reverse();
-        Some(snaps)
-    }
 
     /// Simulate quoting at a fixed spread from mid and compute fill rate + markout.
     ///
@@ -350,79 +319,33 @@ impl Analytics {
         spread_bps: f64,
         lookback_snaps: usize,
     ) -> Option<QuoteFillResult> {
-        let snaps = self.read_snaps(exchange, symbol_id, lookback_snaps)?;
-        let n = snaps.len();
-        if n < 2 {
+        let coll = self.snap_data.get_collection(exchange);
+        let buf = coll.get_buffer(&symbol_id)?;
+
+        let mut mids = Vec::new();
+        let mut bid_highs = Vec::new();
+        let mut ask_lows = Vec::new();
+        let mut snap_ts = Vec::new();
+
+        buf.scan_last_n(lookback_snaps, |snap| {
+            mids.push(snap.midquote);
+            bid_highs.push(snap.bid_high);
+            ask_lows.push(snap.ask_low);
+            snap_ts.push(snap.snap_ts_ns);
+        });
+
+        if mids.len() < 2 {
             return None;
         }
 
-        // Compute actual elapsed time from snapshot timestamps
-        let first_ts = snaps.first().unwrap().snap_ts_ns;
-        let last_ts = snaps.last().unwrap().snap_ts_ns;
-        let elapsed_secs = if first_ts > 0 && last_ts > first_ts {
-            (last_ts - first_ts) as f64 / 1_000_000_000.0
-        } else {
-            // Fallback: estimate from snapshot count at 100ms intervals
-            (n - 1) as f64 * 0.1
-        };
+        // Reverse to chronological order
+        mids.reverse();
+        bid_highs.reverse();
+        ask_lows.reverse();
+        snap_ts.reverse();
 
-        let spread_mult = spread_bps / 10_000.0;
         let mut markouts = Vec::new();
-        // We can evaluate fills for snaps[0..n-1] (need snaps[t+1] for markout)
-        let n_total = n - 1;
-
-        for t in 0..n_total {
-            let snap = &snaps[t];
-            let mid = snap.midquote;
-            if mid <= 0.0 || mid.is_nan() {
-                continue;
-            }
-
-            let (quote_price, filled) = match side {
-                QuoteSide::Ask => {
-                    let qp = mid * (1.0 + spread_mult);
-                    (qp, snap.bid_high >= qp)
-                }
-                QuoteSide::Bid => {
-                    let qp = mid * (1.0 - spread_mult);
-                    (qp, snap.ask_low <= qp)
-                }
-            };
-
-            if filled {
-                let next_mid = snaps[t + 1].midquote;
-                if next_mid <= 0.0 || next_mid.is_nan() {
-                    continue;
-                }
-                let markout = match side {
-                    QuoteSide::Ask => (quote_price - next_mid) / mid * 10_000.0,
-                    QuoteSide::Bid => (next_mid - quote_price) / mid * 10_000.0,
-                };
-                markouts.push(markout);
-            }
-        }
-
-        let n_fills = markouts.len();
-        if n_fills == 0 {
-            return Some(QuoteFillResult {
-                n_fills: 0,
-                n_total,
-                elapsed_secs,
-                mean_markout_bps: 0.0,
-                stdev_markout_bps: 0.0,
-            });
-        }
-
-        let mean_mo = mean(&markouts);
-        let stdev_mo = stdev(&markouts).unwrap_or(0.0);
-
-        Some(QuoteFillResult {
-            n_fills,
-            n_total,
-            elapsed_secs,
-            mean_markout_bps: mean_mo,
-            stdev_markout_bps: stdev_mo,
-        })
+        compute_fills(&mids, &bid_highs, &ask_lows, &snap_ts, side, spread_bps, &mut markouts)
     }
 
     /// Resample mid-quote range into time buckets, returning range in bps per bucket.
@@ -442,18 +365,32 @@ impl Analytics {
         if bucket_size == 0 {
             return None;
         }
-        let snaps = self.read_snaps(exchange, symbol_id, window_snaps)?;
-        let mut ranges = Vec::with_capacity(snaps.len() / bucket_size + 1);
-        for chunk in snaps.chunks(bucket_size) {
+        let coll = self.snap_data.get_collection(exchange);
+        let buf = coll.get_buffer(&symbol_id)?;
+
+        let mut mid_highs = Vec::new();
+        let mut mid_lows = Vec::new();
+
+        buf.scan_last_n(window_snaps, |snap| {
+            mid_highs.push(snap.mid_high);
+            mid_lows.push(snap.mid_low);
+        });
+
+        if mid_highs.is_empty() {
+            return None;
+        }
+
+        // Reverse to chronological
+        mid_highs.reverse();
+        mid_lows.reverse();
+
+        let mut ranges = Vec::with_capacity(mid_highs.len() / bucket_size + 1);
+        for (hi_chunk, lo_chunk) in mid_highs.chunks(bucket_size).zip(mid_lows.chunks(bucket_size)) {
             let mut hi = f64::NEG_INFINITY;
             let mut lo = f64::INFINITY;
-            for s in chunk {
-                if s.mid_high > hi {
-                    hi = s.mid_high;
-                }
-                if s.mid_low < lo {
-                    lo = s.mid_low;
-                }
+            for (&h, &l) in hi_chunk.iter().zip(lo_chunk.iter()) {
+                if h > hi { hi = h; }
+                if l < lo { lo = l; }
             }
             if hi > lo && lo > 0.0 {
                 let mid = (hi + lo) / 2.0;
@@ -512,13 +449,6 @@ impl Analytics {
         let coll = self.snap_data.get_collection(exchange);
         let buf = coll.get_buffer(&symbol_id)?;
 
-        let current = buf.write_pos();
-        let available = (current as usize).min(buf.capacity());
-        let to_read = lookback.min(available);
-        if to_read < 2 {
-            return None;
-        }
-
         // Clear scratch buffers
         let AnalyticsScratch {
             midquotes, spreads, log_returns, exchange_lats, receive_lats,
@@ -543,12 +473,7 @@ impl Analytics {
         let mut max_jump = 0.0f64;
 
         // Single pass over ring buffer (newest first)
-        for i in 0..to_read {
-            let snap = match buf.read_at(current - 1 - i as u64) {
-                Some(s) => s,
-                None => continue, // torn read, skip
-            };
-
+        buf.scan_last_n(lookback, |snap| {
             // TWAP: accumulate for first twap_n entries (most recent)
             if midquotes.len() < twap_n && !snap.midquote.is_nan() && snap.midquote > 0.0 {
                 twap_sum += snap.midquote;
@@ -575,7 +500,7 @@ impl Analytics {
             bid_highs.push(snap.bid_high);
             ask_lows.push(snap.ask_low);
             snap_ts.push(snap.snap_ts_ns);
-        }
+        });
 
         let count = midquotes.len();
         if count < 2 {
