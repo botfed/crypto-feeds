@@ -1,4 +1,4 @@
-use crate::analytics::{Analytics, DisplayAnalytics};
+use crate::analytics::{Analytics, AnalyticsScratch, DisplayAnalytics};
 use crate::market_data::{AllMarketData, Exchange, MarketDataCollection};
 use crate::symbol_registry::{MAX_SYMBOLS, SymbolId, REGISTRY};
 use anyhow::Result;
@@ -130,8 +130,8 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
     flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
-    let mut state: Option<([Vec<SymbolId>; NUM_EXCHANGES], Vec<crate::snapshot::SnapshotData>)> =
-        Some((std::array::from_fn(|_| Vec::new()), Vec::new()));
+    let mut state: Option<([Vec<SymbolId>; NUM_EXCHANGES], AnalyticsScratch)> =
+        Some((std::array::from_fn(|_| Vec::new()), AnalyticsScratch::new()));
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
@@ -190,9 +190,9 @@ pub async fn print_bbo_with_analytics(
     let mut tick_count: u64 = 0;
     let mut state: Option<(
         [Vec<SymbolId>; NUM_EXCHANGES],
-        Vec<crate::snapshot::SnapshotData>,
+        AnalyticsScratch,
         HashMap<(usize, SymbolId), DisplayAnalytics>,
-    )> = Some((std::array::from_fn(|_| Vec::new()), Vec::new(), HashMap::new()));
+    )> = Some((std::array::from_fn(|_| Vec::new()), AnalyticsScratch::new(), HashMap::new()));
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
@@ -308,7 +308,7 @@ pub fn write_market_collection(
     exchange_idx: usize,
     show_analytics: bool,
     seen: &mut Vec<SymbolId>,
-    scratch: &mut Vec<crate::snapshot::SnapshotData>,
+    scratch: &mut AnalyticsScratch,
     cache: &mut HashMap<(usize, SymbolId), DisplayAnalytics>,
 ) -> bool {
     let now = Utc::now();

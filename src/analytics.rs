@@ -102,6 +102,23 @@ pub struct QuoteFillResult {
     pub stdev_markout_bps: f64,
 }
 
+/// Reusable scratch buffers for analytics computation (zero per-call allocations).
+pub struct AnalyticsScratch {
+    pub snaps: Vec<SnapshotData>,
+    pub vals: Vec<f64>,
+    pub markouts: Vec<f64>,
+}
+
+impl AnalyticsScratch {
+    pub fn new() -> Self {
+        Self {
+            snaps: Vec::new(),
+            vals: Vec::new(),
+            markouts: Vec::new(),
+        }
+    }
+}
+
 pub struct Analytics {
     tick_data: Arc<AllMarketData>,
     snap_data: Arc<AllSnapshotData>,
@@ -459,8 +476,7 @@ impl Analytics {
 
     /// Compute all display analytics for one symbol from a single snapshot read.
     ///
-    /// `scratch` is a reusable buffer to avoid per-call allocations. It will be
-    /// resized to `lookback` on the first call and reused thereafter.
+    /// Uses `scratch` for all intermediate storage — zero heap allocations per call.
     pub fn compute_display_analytics(
         &self,
         exchange: &Exchange,
@@ -469,53 +485,49 @@ impl Analytics {
         twap_n: usize,
         vol_n: usize,
         bucket_size: usize,
-        scratch: &mut Vec<SnapshotData>,
+        scratch: &mut AnalyticsScratch,
     ) -> Option<DisplayAnalytics> {
-        // Ensure scratch is large enough, reuse across calls
-        if scratch.len() < lookback {
-            scratch.resize(lookback, SnapshotData::default());
+        // Split borrows so we can mutate vals while reading snaps
+        let AnalyticsScratch { snaps: snaps_buf, vals, markouts } = scratch;
+
+        if snaps_buf.len() < lookback {
+            snaps_buf.resize(lookback, SnapshotData::default());
         }
         let coll = self.snap_data.get_collection(exchange);
         let buf = coll.get_buffer(&symbol_id)?;
-        let count = buf.read_last_n(lookback, &mut scratch[..lookback]);
+        let count = buf.read_last_n(lookback, &mut snaps_buf[..lookback]);
         if count < 2 {
             return None;
         }
         // read_last_n returns most-recent first; reverse to chronological
-        let snaps = &mut scratch[..count];
+        let snaps = &mut snaps_buf[..count];
         snaps.reverse();
         let n = snaps.len();
 
-        // Helper: extract a field from a slice, filter NaN
-        let extract = |field: SnapshotField, from: &[SnapshotData]| -> Vec<f64> {
-            from.iter().map(|s| field.extract(s)).filter(|v| !v.is_nan()).collect()
-        };
+        let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
 
         // TWAP: mean of last twap_n midquotes
         let twap_start = n.saturating_sub(twap_n);
-        let twap_mids: Vec<f64> = snaps[twap_start..]
-            .iter()
-            .map(|s| s.midquote)
-            .filter(|v| !v.is_nan() && *v > 0.0)
-            .collect();
-        let twap = if twap_mids.is_empty() { None } else { Some(mean(&twap_mids)) };
+        vals.clear();
+        vals.extend(snaps[twap_start..].iter().map(|s| s.midquote).filter(|v| !v.is_nan() && *v > 0.0));
+        let twap = if vals.is_empty() { None } else { Some(mean(vals)) };
 
-        // Spread: sort once, read median
-        let mut spreads = extract(SnapshotField::Spread, snaps);
-        let mdn_spread = if spreads.is_empty() {
+        // Spread: sort, read median
+        extract_into(vals, SnapshotField::Spread, snaps);
+        let mdn_spread = if vals.is_empty() {
             None
         } else {
-            spreads.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            Some(quantile_sorted(&spreads, 0.5))
+            vals.sort_unstable_by(cmp);
+            Some(quantile_sorted(vals, 0.5))
         };
 
-        // Log returns: extract once over full window for max_jump, take tail for vol
-        let all_log_rets = extract(SnapshotField::LogReturn, snaps);
-        let max_jump = all_log_rets.iter().map(|v| v.abs()).reduce(f64::max);
-        let vol_start = all_log_rets.len().saturating_sub(vol_n);
-        let vol = stdev(&all_log_rets[vol_start..]);
+        // Log returns: extract once for max_jump + vol, then reuse
+        extract_into(vals, SnapshotField::LogReturn, snaps);
+        let max_jump = vals.iter().map(|v| v.abs()).reduce(f64::max);
+        let vol_start = vals.len().saturating_sub(vol_n);
+        let vol = stdev(&vals[vol_start..]);
 
-        // Latency: skip first 5s of observations (warmup), sort once per field
+        // Latency: skip first 5s of observations (warmup)
         const WARMUP_NS: i64 = 5_000_000_000;
         let first_ts = snaps[0].snap_ts_ns;
         let lat_start = if first_ts > 0 {
@@ -525,37 +537,37 @@ impl Analytics {
         };
         let lat_snaps = &snaps[lat_start..];
 
-        let mut el_vals = extract(SnapshotField::ExchangeLatMs, lat_snaps);
-        let (el_p50, el_p9999) = if el_vals.is_empty() {
+        extract_into(vals, SnapshotField::ExchangeLatMs, lat_snaps);
+        let (el_p50, el_p9999) = if vals.is_empty() {
             (None, None)
         } else {
-            let qs = sort_and_quantiles(&mut el_vals, &[0.5, 0.9999]);
-            (Some(qs[0]), Some(qs[1]))
+            vals.sort_unstable_by(cmp);
+            (Some(quantile_sorted(vals, 0.5)), Some(quantile_sorted(vals, 0.9999)))
         };
 
-        let mut rl_vals = extract(SnapshotField::ReceiveLatMs, lat_snaps);
-        let (rl_p50, rl_p9999) = if rl_vals.is_empty() {
+        extract_into(vals, SnapshotField::ReceiveLatMs, lat_snaps);
+        let (rl_p50, rl_p9999) = if vals.is_empty() {
             (None, None)
         } else {
-            let qs = sort_and_quantiles(&mut rl_vals, &[0.5, 0.9999]);
-            (Some(qs[0]), Some(qs[1]))
+            vals.sort_unstable_by(cmp);
+            (Some(quantile_sorted(vals, 0.5)), Some(quantile_sorted(vals, 0.9999)))
         };
 
-        // Mid-range bps buckets: sort once, read median + p99
-        let mut ranges = compute_range_buckets(snaps, bucket_size);
-        let (mdn_rng, p99_rng) = if ranges.is_empty() {
+        // Mid-range bps buckets
+        compute_range_buckets_into(vals, snaps, bucket_size);
+        let (mdn_rng, p99_rng) = if vals.is_empty() {
             (None, None)
         } else {
-            let qs = sort_and_quantiles(&mut ranges, &[0.5, 0.99]);
-            (Some(qs[0]), Some(qs[1]))
+            vals.sort_unstable_by(cmp);
+            (Some(quantile_sorted(vals, 0.5)), Some(quantile_sorted(vals, 0.99)))
         };
 
         // Fill analysis
         let half_spread = p99_rng.map(|r| r / 2.0);
         let (bid_fill, ask_fill) = match half_spread {
             Some(hs) if hs > 0.0 => (
-                compute_fills(&snaps, QuoteSide::Bid, hs),
-                compute_fills(&snaps, QuoteSide::Ask, hs),
+                compute_fills(snaps, QuoteSide::Bid, hs, markouts),
+                compute_fills(snaps, QuoteSide::Ask, hs, markouts),
             ),
             _ => (None, None),
         };
@@ -594,12 +606,18 @@ pub struct DisplayAnalytics {
     pub ask_fill: Option<QuoteFillResult>,
 }
 
-/// Compute mid-range bps per bucket from a chronological slice of snapshots.
-fn compute_range_buckets(snaps: &[SnapshotData], bucket_size: usize) -> Vec<f64> {
+/// Extract a single field from snapshots into a reusable buffer, filtering NaN.
+fn extract_into(out: &mut Vec<f64>, field: SnapshotField, from: &[SnapshotData]) {
+    out.clear();
+    out.extend(from.iter().map(|s| field.extract(s)).filter(|v| !v.is_nan()));
+}
+
+/// Compute mid-range bps per bucket into a reusable buffer.
+fn compute_range_buckets_into(out: &mut Vec<f64>, snaps: &[SnapshotData], bucket_size: usize) {
+    out.clear();
     if bucket_size == 0 {
-        return Vec::new();
+        return;
     }
-    let mut ranges = Vec::with_capacity(snaps.len() / bucket_size + 1);
     for chunk in snaps.chunks(bucket_size) {
         let mut hi = f64::NEG_INFINITY;
         let mut lo = f64::INFINITY;
@@ -609,14 +627,13 @@ fn compute_range_buckets(snaps: &[SnapshotData], bucket_size: usize) -> Vec<f64>
         }
         if hi > lo && lo > 0.0 {
             let mid = (hi + lo) / 2.0;
-            ranges.push((hi - lo) / mid * 10_000.0);
+            out.push((hi - lo) / mid * 10_000.0);
         }
     }
-    ranges
 }
 
 /// Compute fill analysis from a chronological slice of snapshots.
-fn compute_fills(snaps: &[SnapshotData], side: QuoteSide, spread_bps: f64) -> Option<QuoteFillResult> {
+fn compute_fills(snaps: &[SnapshotData], side: QuoteSide, spread_bps: f64, markouts: &mut Vec<f64>) -> Option<QuoteFillResult> {
     let n = snaps.len();
     if n < 2 {
         return None;
@@ -631,7 +648,7 @@ fn compute_fills(snaps: &[SnapshotData], side: QuoteSide, spread_bps: f64) -> Op
     };
 
     let spread_mult = spread_bps / 10_000.0;
-    let mut markouts = Vec::new();
+    markouts.clear();
     let n_total = n - 1;
 
     for t in 0..n_total {
@@ -734,12 +751,6 @@ fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
         let frac = pos - lo as f64;
         sorted[lo] * (1.0 - frac) + sorted[hi] * frac
     }
-}
-
-/// Sort a vec in-place and return multiple quantiles from it.
-fn sort_and_quantiles(vals: &mut Vec<f64>, qs: &[f64]) -> Vec<f64> {
-    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    qs.iter().map(|&q| quantile_sorted(vals, q)).collect()
 }
 
 #[cfg(test)]
