@@ -127,7 +127,7 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
     let shutdown_fut = shutdown.notified();
     tokio::pin!(shutdown_fut);
 
-    flush_str(&format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE))?;
+    flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
     let mut seen: [Vec<SymbolId>; NUM_EXCHANGES] = std::array::from_fn(|_| Vec::new());
@@ -158,12 +158,12 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                 let remaining = rows.saturating_sub(used);
                 write_log_section(&mut buf, remaining);
                 let frame = prepare_frame(&buf);
-                flush_str(&format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW))?;
+                flush_str(format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW)).await?;
             }
         }
     };
 
-    flush_str(&format!("{}{}", CURSOR_SHOW, ALT_SCREEN_OFF))?;
+    flush_str(format!("{}{}", CURSOR_SHOW, ALT_SCREEN_OFF)).await?;
     result
 }
 
@@ -175,7 +175,7 @@ pub async fn print_bbo_with_analytics(
     let shutdown_fut = shutdown.notified();
     tokio::pin!(shutdown_fut);
 
-    flush_str(&format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE))?;
+    flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
     let mut seen: [Vec<SymbolId>; NUM_EXCHANGES] = std::array::from_fn(|_| Vec::new());
@@ -207,12 +207,12 @@ pub async fn print_bbo_with_analytics(
                 let remaining = rows.saturating_sub(used);
                 write_log_section(&mut buf, remaining);
                 let frame = prepare_frame(&buf);
-                flush_str(&format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW))?;
+                flush_str(format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW)).await?;
             }
         }
     };
 
-    flush_str(&format!("{}{}", CURSOR_SHOW, ALT_SCREEN_OFF))?;
+    flush_str(format!("{}{}", CURSOR_SHOW, ALT_SCREEN_OFF)).await?;
     result
 }
 
