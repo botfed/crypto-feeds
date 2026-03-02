@@ -1,0 +1,10 @@
+[package]
+name = "nado-ws"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["net"] }
+tokio-tungstenite = { version = "0.27.0", features = ["rustls-tls-webpki-roots"] }
+tungstenite = { git = "https://github.com/signalapp/tungstenite-rs", features = ["deflate"] }

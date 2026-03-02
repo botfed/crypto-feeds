@@ -271,6 +271,7 @@ dependencies = [
  "futures-util",
  "libc",
  "log",
+ "nado-ws",
  "once_cell",
  "ordered-float",
  "prost",
@@ -283,8 +284,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tokio",
- "tokio-tungstenite",
- "tungstenite",
+ "tokio-tungstenite 0.28.0",
 ]
 
 [[package]]
@@ -1039,6 +1039,16 @@ name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
+
+[[package]]
+name = "nado-ws"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+ "tungstenite 0.27.0",
+]
 
 [[package]]
 name = "native-tls"
@@ -1964,8 +1974,22 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite",
+ "tungstenite 0.27.0",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
+dependencies = [
+ "futures-util",
+ "log",
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
+ "tungstenite 0.28.0",
 ]
 
 [[package]]
@@ -2071,6 +2095,24 @@ dependencies = [
  "rand",
  "rustls",
  "rustls-pki-types",
+ "sha1",
+ "thiserror",
+ "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "native-tls",
+ "rand",
  "sha1",
  "thiserror",
  "utf-8",

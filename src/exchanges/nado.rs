@@ -1,28 +1,27 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use futures_util::SinkExt;
-use futures_util::stream::SplitSink;
-use log::debug;
+use futures_util::{SinkExt, StreamExt};
+use log::{debug, error, info, warn};
+use nado_ws::Message;
 use reqwest::Client;
 use reqwest::header::ACCEPT_ENCODING;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::net::TcpStream;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
+use std::time::Duration;
 
 use crate::exchange_fees::{ExchangeFees, FeeSchedule};
-use crate::exchanges::connection::{
-    ConnectionConfig, ExchangeFeed, WireMessage, listen_with_reconnect,
-};
+use crate::exchanges::connection::{ConnectionConfig, calculate_backoff};
 use crate::mappers::{NadoMapper, SymbolMapper};
 use crate::market_data::{InstrumentType, MarketData, MarketDataCollection};
+use crate::symbol_registry::REGISTRY;
 
 const X18: f64 = 1e18;
+const FEED_NAME: &str = "nado_perp";
+const WS_URL: &str = "wss://gateway.prod.nado.xyz/v1/subscribe";
 
 pub fn get_fees() -> ExchangeFees {
-    // Nado: 2.5 bps taker, 0 bps maker (standard perp-dex fees)
     ExchangeFees::new(FeeSchedule::new(0.0, 0.0), FeeSchedule::new(2.5, 0.0))
 }
 
@@ -53,9 +52,7 @@ async fn fetch_pairs(client: &Client) -> Result<Vec<PairRow>> {
 }
 
 struct NadoFeed {
-    /// product_id -> config symbol (e.g. "BTC_USDT")
     id_to_config: HashMap<u32, String>,
-    /// config symbol -> product_id
     config_to_id: HashMap<String, u32>,
     itype: InstrumentType,
 }
@@ -67,7 +64,6 @@ impl NadoFeed {
         let itype = InstrumentType::Perp;
         let mapper = NadoMapper;
 
-        // base (e.g. "BTC-PERP") -> product_id
         let api_map: HashMap<String, u32> = rows
             .into_iter()
             .map(|r| (r.base, r.product_id))
@@ -115,114 +111,144 @@ fn parse_x18(s: &str) -> Option<f64> {
     s.parse::<f64>().ok().map(|v| v / X18)
 }
 
-#[async_trait::async_trait]
-impl ExchangeFeed for NadoFeed {
-    fn get_itype(&self) -> Result<&InstrumentType> {
-        Ok(&self.itype)
+fn parse_bbo(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>) -> Option<(String, MarketData)> {
+    if !text.contains("best_bid_offer") {
+        return None;
     }
 
-    fn build_url(&self, _symbols: &[&str]) -> Result<String> {
-        Ok("wss://gateway.prod.nado.xyz/v1/subscribe".to_string())
+    let evt: BboEvent = serde_json::from_str(text).ok()?;
+
+    if evt.r#type.as_deref() != Some("best_bid_offer") {
+        return None;
     }
 
-    fn heartbeat_message(&self) -> Option<Message> {
-        Some(Message::Ping(vec![].into()))
+    let pid = evt.product_id?;
+    let config_sym = feed.id_to_config.get(&pid)?;
+
+    let bid = evt.bid_price.as_deref().and_then(parse_x18);
+    let ask = evt.ask_price.as_deref().and_then(parse_x18);
+    let bid_qty = evt.bid_qty.as_deref().and_then(parse_x18);
+    let ask_qty = evt.ask_qty.as_deref().and_then(parse_x18);
+
+    let (b, a) = (bid?, ask?);
+    if b <= 0.0 || a <= 0.0 || b >= a {
+        return None;
     }
 
-    fn ws_config(&self) -> Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig> {
-        use tokio_tungstenite::tungstenite::extensions::compression::deflate::DeflateConfig;
+    let exchange_ts = evt.timestamp.as_deref()
+        .and_then(|s| s.parse::<i64>().ok())
+        .and_then(|ns| DateTime::from_timestamp(ns / 1_000_000_000, (ns % 1_000_000_000) as u32));
 
-        let mut config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
-        config.extensions.permessage_deflate = Some(DeflateConfig::default());
-        Some(config)
-    }
+    let md = MarketData {
+        bid,
+        ask,
+        bid_qty,
+        ask_qty,
+        exchange_ts,
+        received_ts: Some(received_ts),
+    };
 
-    async fn send_subscription(
-        &self,
-        write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
-        symbols: &[&str],
-    ) -> Result<()> {
-        for (i, sym) in symbols.iter().enumerate() {
-            let pid = self.config_to_id.get(*sym)
-                .ok_or_else(|| anyhow!("No product_id for {}", sym))?;
+    Some((config_sym.to_string(), md))
+}
 
-            let msg = json!({
-                "method": "subscribe",
-                "stream": {
-                    "type": "best_bid_offer",
-                    "product_id": pid,
-                },
-                "id": i + 1,
-            });
-            debug!("Nado sub: {}", msg);
-            write
-                .send(Message::Text(msg.to_string().into()))
-                .await
-                .with_context(|| format!("failed to subscribe to Nado product {}", pid))?;
+async fn connect_and_stream(
+    data: &Arc<MarketDataCollection>,
+    feed: &NadoFeed,
+    symbols: &[&str],
+    config: &ConnectionConfig,
+) -> Result<bool> {
+    let ws_stream = match tokio::time::timeout(
+        config.message_timeout,
+        nado_ws::connect(WS_URL),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            error!("Failed to connect to {}: {}", FEED_NAME, e);
+            return Ok(false);
         }
-        Ok(())
+        Err(_) => {
+            error!("Connect timed out for {}", FEED_NAME);
+            return Ok(false);
+        }
+    };
+
+    info!("Connected to {}", FEED_NAME);
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // Send subscriptions
+    for (i, sym) in symbols.iter().enumerate() {
+        let pid = feed.config_to_id.get(*sym)
+            .ok_or_else(|| anyhow!("No product_id for {}", sym))?;
+
+        let msg = json!({
+            "method": "subscribe",
+            "stream": {
+                "type": "best_bid_offer",
+                "product_id": pid,
+            },
+            "id": i + 1,
+        });
+        debug!("Nado sub: {}", msg);
+        write
+            .send(Message::Text(msg.to_string().into()))
+            .await
+            .with_context(|| format!("failed to subscribe to Nado product {}", pid))?;
     }
 
-    fn parse_message(
-        &self,
-        msg: WireMessage<'_>,
-        received_ts: DateTime<Utc>,
-    ) -> Result<Option<(String, MarketData)>> {
-        let WireMessage::Text(text) = msg else {
-            return Ok(None);
-        };
+    let mut heartbeat = tokio::time::interval(config.heartbeat_interval);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_message_time = Utc::now();
 
-        // Skip subscription acks and non-BBO messages
-        if !text.contains("best_bid_offer") {
-            return Ok(None);
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                let elapsed = Utc::now() - last_message_time;
+                if elapsed > chrono::Duration::from_std(config.message_timeout)? {
+                    warn!("No messages for {:?} on {}, reconnecting", config.message_timeout, FEED_NAME);
+                    return Ok(false);
+                }
+                if let Err(e) = write.send(Message::Ping(vec![].into())).await {
+                    error!("Failed heartbeat on {}: {}", FEED_NAME, e);
+                    return Ok(false);
+                }
+            }
+
+            msg = read.next() => {
+                let received_ts = Utc::now();
+                last_message_time = received_ts;
+
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Some((sym, md)) = parse_bbo(feed, text.as_str(), received_ts) {
+                            if let Some(&id) = REGISTRY.lookup(&sym, &feed.itype) {
+                                data.push(&id, md);
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Binary(_))) => {}
+                    Some(Ok(Message::Ping(payload))) => {
+                        let _ = write.send(Message::Pong(payload)).await;
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) => {
+                        warn!("{} socket closed.", FEED_NAME);
+                        return Ok(false);
+                    }
+                    Some(Err(e)) => {
+                        error!("{} socket error: {}", FEED_NAME, e);
+                        return Ok(false);
+                    }
+                    None => {
+                        warn!("{} stream ended.", FEED_NAME);
+                        return Ok(false);
+                    }
+                    _ => {}
+                }
+            }
         }
-
-        let evt: BboEvent = match serde_json::from_str(text) {
-            Ok(v) => v,
-            Err(_) => return Ok(None),
-        };
-
-        if evt.r#type.as_deref() != Some("best_bid_offer") {
-            return Ok(None);
-        }
-
-        let pid = match evt.product_id {
-            Some(id) => id,
-            None => return Ok(None),
-        };
-
-        let config_sym = match self.id_to_config.get(&pid) {
-            Some(s) => s.as_str(),
-            None => return Ok(None),
-        };
-
-        let bid = evt.bid_price.as_deref().and_then(parse_x18);
-        let ask = evt.ask_price.as_deref().and_then(parse_x18);
-        let bid_qty = evt.bid_qty.as_deref().and_then(parse_x18);
-        let ask_qty = evt.ask_qty.as_deref().and_then(parse_x18);
-
-        let (Some(b), Some(a)) = (bid, ask) else {
-            return Ok(None);
-        };
-
-        if b <= 0.0 || a <= 0.0 || b >= a {
-            return Ok(None);
-        }
-
-        let exchange_ts = evt.timestamp.as_deref()
-            .and_then(|s| s.parse::<i64>().ok())
-            .and_then(|ns| DateTime::from_timestamp(ns / 1_000_000_000, (ns % 1_000_000_000) as u32));
-
-        let md = MarketData {
-            bid,
-            ask,
-            bid_qty,
-            ask_qty,
-            exchange_ts,
-            received_ts: Some(received_ts),
-        };
-
-        Ok(Some((config_sym.to_string(), md)))
     }
 }
 
@@ -231,11 +257,71 @@ pub async fn listen_perp_bbo(
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    let feed = Arc::new(NadoFeed::new_perp(symbols).await?);
+    let feed = NadoFeed::new_perp(symbols).await?;
 
     let mut config = ConnectionConfig::default();
-    // Nado requires ping every 30s
-    config.heartbeat_interval = std::time::Duration::from_secs(15);
+    config.heartbeat_interval = Duration::from_secs(15);
 
-    listen_with_reconnect(data, symbols, feed, "nado_perp", config, shutdown).await
+    let mut retry_count: u32 = 0;
+    let last_success = Utc::now();
+
+    loop {
+        debug!("Connecting feed {} attempt {}", FEED_NAME, retry_count + 1);
+
+        tokio::select! {
+            _ = shutdown.notified() => {
+                info!("Shutdown received for feed {}", FEED_NAME);
+                break;
+            }
+
+            res = connect_and_stream(&data, &feed, symbols, &config) => match res {
+                Ok(true) => break,
+                Ok(false) => {
+                    retry_count += 1;
+                    let backoff = calculate_backoff(
+                        retry_count,
+                        config.initial_backoff,
+                        config.max_retry_delay,
+                    );
+                    error!("{} disconnected. Reconnecting in {:?}", FEED_NAME, backoff);
+
+                    if Utc::now() - last_success > chrono::Duration::seconds(300) {
+                        retry_count = 0;
+                    }
+
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => {}
+                        _ = shutdown.notified() => {
+                            info!("Shutdown during backoff for {}", FEED_NAME);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    retry_count += 1;
+                    let backoff = calculate_backoff(
+                        retry_count,
+                        config.initial_backoff,
+                        config.max_retry_delay,
+                    );
+                    error!("{} error: {}. Reconnecting in {:?}", FEED_NAME, e, backoff);
+
+                    if Utc::now() - last_success > chrono::Duration::seconds(300) {
+                        retry_count = 0;
+                    }
+
+                    tokio::select! {
+                        _ = tokio::time::sleep(backoff) => {}
+                        _ = shutdown.notified() => {
+                            info!("Shutdown during backoff for {}", FEED_NAME);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    info!("Stopped {}", FEED_NAME);
+    Ok(())
 }
