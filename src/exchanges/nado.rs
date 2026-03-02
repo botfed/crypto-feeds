@@ -260,16 +260,16 @@ async fn connect_and_stream(
 }
 
 async fn close_nado(
-    mut write: futures_util::stream::SplitSink<nado_ws::WsStream, Message>,
+    write: futures_util::stream::SplitSink<nado_ws::WsStream, Message>,
     read: futures_util::stream::SplitStream<nado_ws::WsStream>,
 ) {
-    let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        write.send(Message::Close(None)),
-    )
+    // Move the drop into spawn_blocking so TLS shutdown on a dead socket
+    // cannot block async worker threads (same rationale as close_stream).
+    let _ = tokio::task::spawn_blocking(move || {
+        drop(read);
+        drop(write);
+    })
     .await;
-    drop(read);
-    drop(write);
 }
 
 pub async fn listen_perp_bbo(

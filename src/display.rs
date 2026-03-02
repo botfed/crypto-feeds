@@ -113,11 +113,14 @@ fn prepare_frame(raw: &str) -> String {
     out
 }
 
-fn flush_str(s: &str) -> Result<()> {
-    let mut out = stdout().lock();
-    write!(out, "{}", s)?;
-    out.flush()?;
-    Ok(())
+async fn flush_str(s: String) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let mut out = stdout().lock();
+        write!(out, "{}", s)?;
+        out.flush()?;
+        Ok(())
+    })
+    .await?
 }
 
 pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notify>) -> Result<()> {

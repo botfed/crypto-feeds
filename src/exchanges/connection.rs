@@ -341,24 +341,26 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
     Ok(result)
 }
 
-/// Send a WebSocket close frame and cleanly shut down the connection.
+/// Shut down the WebSocket connection without blocking async worker threads.
+///
+/// Dropping a TLS WebSocket stream calls `SSLClose()` (native-tls / SecureTransport
+/// on macOS) which attempts a TLS shutdown handshake.  On a dead socket this blocks
+/// until the OS timeout fires — starving the tokio thread pool if multiple feeds
+/// disconnect at once.  We move the entire drop sequence into `spawn_blocking` so
+/// it can never block async tasks.
 async fn close_stream(
-    mut write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+    write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
     read: futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     feed_name: &str,
 ) {
-    // Send close frame; don't block forever if the peer is unresponsive.
-    let close = tokio::time::timeout(
-        Duration::from_secs(5),
-        write.send(Message::Close(None)),
-    )
+    let name = feed_name.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        // Skip sending a Close frame — the connection is already dead or
+        // about to be replaced. Just drop both halves; the TLS/TCP cleanup
+        // happens here, off the async runtime.
+        drop(read);
+        drop(write);
+        debug!("Dropped stream for {}", name);
+    })
     .await;
-
-    if let Err(_) | Ok(Err(_)) = close {
-        debug!("Could not send close frame for {}", feed_name);
-    }
-
-    // Reunite and drop to ensure the underlying TCP socket is shut down.
-    drop(read);
-    drop(write);
 }
