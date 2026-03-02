@@ -283,10 +283,10 @@ pub async fn listen_perp_bbo(
     config.heartbeat_interval = Duration::from_secs(15);
 
     let mut retry_count: u32 = 0;
-    let last_success = Utc::now();
 
     loop {
         debug!("Connecting feed {} attempt {}", FEED_NAME, retry_count + 1);
+        let attempt_start = std::time::Instant::now();
 
         tokio::select! {
             _ = shutdown.notified() => {
@@ -294,47 +294,54 @@ pub async fn listen_perp_bbo(
                 break;
             }
 
-            res = connect_and_stream(&data, &feed, symbols, &config) => match res {
-                Ok(true) => break,
-                Ok(false) => {
-                    retry_count += 1;
-                    let backoff = calculate_backoff(
-                        retry_count,
-                        config.initial_backoff,
-                        config.max_retry_delay,
-                    );
-                    error!("{} disconnected. Reconnecting in {:?}", FEED_NAME, backoff);
+            res = connect_and_stream(&data, &feed, symbols, &config) => {
+                // Reset backoff only if the connection was stable for >60s
+                let was_long_lived = attempt_start.elapsed() > Duration::from_secs(60);
 
-                    if Utc::now() - last_success > chrono::Duration::seconds(300) {
-                        retry_count = 0;
-                    }
+                match res {
+                    Ok(true) => break,
+                    Ok(false) => {
+                        if was_long_lived {
+                            retry_count = 0;
+                        } else {
+                            retry_count += 1;
+                        }
 
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
-                        _ = shutdown.notified() => {
-                            info!("Shutdown during backoff for {}", FEED_NAME);
-                            break;
+                        let backoff = calculate_backoff(
+                            retry_count,
+                            config.initial_backoff,
+                            config.max_retry_delay,
+                        );
+                        error!("{} disconnected. Reconnecting in {:?}", FEED_NAME, backoff);
+
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = shutdown.notified() => {
+                                info!("Shutdown during backoff for {}", FEED_NAME);
+                                break;
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    retry_count += 1;
-                    let backoff = calculate_backoff(
-                        retry_count,
-                        config.initial_backoff,
-                        config.max_retry_delay,
-                    );
-                    error!("{} error: {}. Reconnecting in {:?}", FEED_NAME, e, backoff);
+                    Err(e) => {
+                        if was_long_lived {
+                            retry_count = 0;
+                        } else {
+                            retry_count += 1;
+                        }
 
-                    if Utc::now() - last_success > chrono::Duration::seconds(300) {
-                        retry_count = 0;
-                    }
+                        let backoff = calculate_backoff(
+                            retry_count,
+                            config.initial_backoff,
+                            config.max_retry_delay,
+                        );
+                        error!("{} error: {}. Reconnecting in {:?}", FEED_NAME, e, backoff);
 
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
-                        _ = shutdown.notified() => {
-                            info!("Shutdown during backoff for {}", FEED_NAME);
-                            break;
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = shutdown.notified() => {
+                                info!("Shutdown during backoff for {}", FEED_NAME);
+                                break;
+                            }
                         }
                     }
                 }

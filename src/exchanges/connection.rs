@@ -104,10 +104,10 @@ pub async fn listen_with_reconnect<F: ExchangeFeed + Send + Sync>(
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
     let mut retry_count: u32 = 0;
-    let mut last_success = Utc::now();
 
     loop {
         debug!("Connecting feed {} attempt {}", feed_name, retry_count + 1);
+        let attempt_start = std::time::Instant::now();
 
         tokio::select! {
             _ = shutdown.notified() => {
@@ -115,37 +115,58 @@ pub async fn listen_with_reconnect<F: ExchangeFeed + Send + Sync>(
                 break;
             }
 
-            res = connect_and_stream(&data, &feed, feed_name, symbols, &config) => match res {
-                Ok(ConnectionResult::Shutdown | ConnectionResult::InvalidConfig) => break,
+            res = connect_and_stream(&data, &feed, feed_name, symbols, &config) => {
+                // Reset backoff only if the connection was stable for >60s
+                let was_long_lived = attempt_start.elapsed() > Duration::from_secs(60);
 
-                Ok(ConnectionResult::Reconnect) => {
-                    // Successful run that ended in a reconnect condition:
-                    retry_count = 0;
-                    last_success = Utc::now();
-                }
+                match res {
+                    Ok(ConnectionResult::Shutdown | ConnectionResult::InvalidConfig) => break,
 
-                Err(e) => {
-                    retry_count += 1;
+                    Ok(ConnectionResult::Reconnect) => {
+                        if was_long_lived {
+                            retry_count = 0;
+                        } else {
+                            retry_count += 1;
+                        }
 
-                    let backoff = calculate_backoff(
-                        retry_count,
-                        config.initial_backoff,
-                        config.max_retry_delay
-                    );
+                        let backoff = calculate_backoff(
+                            retry_count,
+                            config.initial_backoff,
+                            config.max_retry_delay
+                        );
 
-                    error!("{} error: {}. Reconnecting in {:?}", feed_name, e, backoff);
+                        warn!("{} disconnected. Reconnecting in {:?}", feed_name, backoff);
 
-                    // Reset retry count after a successful long run
-                    if Utc::now() - last_success > chrono::Duration::seconds(300) {
-                        retry_count = 0;
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = shutdown.notified() => {
+                                info!("Shutdown during backoff for {}", feed_name);
+                                break;
+                            }
+                        }
                     }
 
-                    // Sleep with ability to interrupt on shutdown
-                    tokio::select! {
-                        _ = tokio::time::sleep(backoff) => {}
-                        _ = shutdown.notified() => {
-                            info!("Shutdown during backoff for {}", feed_name);
-                            break;
+                    Err(e) => {
+                        if was_long_lived {
+                            retry_count = 0;
+                        } else {
+                            retry_count += 1;
+                        }
+
+                        let backoff = calculate_backoff(
+                            retry_count,
+                            config.initial_backoff,
+                            config.max_retry_delay
+                        );
+
+                        error!("{} error: {}. Reconnecting in {:?}", feed_name, e, backoff);
+
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = shutdown.notified() => {
+                                info!("Shutdown during backoff for {}", feed_name);
+                                break;
+                            }
                         }
                     }
                 }
