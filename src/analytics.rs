@@ -486,6 +486,11 @@ impl Analytics {
         snaps.reverse();
         let n = snaps.len();
 
+        // Helper: extract a field from a slice, filter NaN
+        let extract = |field: SnapshotField, from: &[SnapshotData]| -> Vec<f64> {
+            from.iter().map(|s| field.extract(s)).filter(|v| !v.is_nan()).collect()
+        };
+
         // TWAP: mean of last twap_n midquotes
         let twap_start = n.saturating_sub(twap_n);
         let twap_mids: Vec<f64> = snaps[twap_start..]
@@ -495,36 +500,46 @@ impl Analytics {
             .collect();
         let twap = if twap_mids.is_empty() { None } else { Some(mean(&twap_mids)) };
 
-        // Helper: extract a field, filter NaN
-        let extract = |field: SnapshotField, from: &[SnapshotData]| -> Vec<f64> {
-            from.iter().map(|s| field.extract(s)).filter(|v| !v.is_nan()).collect()
+        // Spread: sort once, read median
+        let mut spreads = extract(SnapshotField::Spread, snaps);
+        let mdn_spread = if spreads.is_empty() {
+            None
+        } else {
+            spreads.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            Some(quantile_sorted(&spreads, 0.5))
         };
 
-        // Median spread
-        let spreads = extract(SnapshotField::Spread, &snaps);
-        let mdn_spread = if spreads.is_empty() { None } else { Some(median(&spreads)) };
-
-        // Realized vol over last vol_n snaps
-        let vol_start = n.saturating_sub(vol_n);
-        let log_rets = extract(SnapshotField::LogReturn, &snaps[vol_start..]);
-        let vol = stdev(&log_rets);
-
-        // Max abs log return
-        let all_log_rets = extract(SnapshotField::LogReturn, &snaps);
+        // Log returns: extract once over full window for max_jump, take tail for vol
+        let all_log_rets = extract(SnapshotField::LogReturn, snaps);
         let max_jump = all_log_rets.iter().map(|v| v.abs()).reduce(f64::max);
+        let vol_start = all_log_rets.len().saturating_sub(vol_n);
+        let vol = stdev(&all_log_rets[vol_start..]);
 
-        // Latency quantiles
-        let el_vals = extract(SnapshotField::ExchangeLatMs, &snaps);
-        let rl_vals = extract(SnapshotField::ReceiveLatMs, &snaps);
-        let el_p50 = if el_vals.is_empty() { None } else { Some(quantile(&el_vals, 0.5)) };
-        let el_p9999 = if el_vals.is_empty() { None } else { Some(quantile(&el_vals, 0.9999)) };
-        let rl_p50 = if rl_vals.is_empty() { None } else { Some(quantile(&rl_vals, 0.5)) };
-        let rl_p9999 = if rl_vals.is_empty() { None } else { Some(quantile(&rl_vals, 0.9999)) };
+        // Latency: sort once per field, read two quantiles each
+        let mut el_vals = extract(SnapshotField::ExchangeLatMs, snaps);
+        let (el_p50, el_p9999) = if el_vals.is_empty() {
+            (None, None)
+        } else {
+            let qs = sort_and_quantiles(&mut el_vals, &[0.5, 0.9999]);
+            (Some(qs[0]), Some(qs[1]))
+        };
 
-        // Mid-range bps buckets (from chronological snaps)
-        let ranges = compute_range_buckets(&snaps, bucket_size);
-        let mdn_rng = if ranges.is_empty() { None } else { Some(median(&ranges)) };
-        let p99_rng = if ranges.is_empty() { None } else { Some(quantile(&ranges, 0.99)) };
+        let mut rl_vals = extract(SnapshotField::ReceiveLatMs, snaps);
+        let (rl_p50, rl_p9999) = if rl_vals.is_empty() {
+            (None, None)
+        } else {
+            let qs = sort_and_quantiles(&mut rl_vals, &[0.5, 0.9999]);
+            (Some(qs[0]), Some(qs[1]))
+        };
+
+        // Mid-range bps buckets: sort once, read median + p99
+        let mut ranges = compute_range_buckets(snaps, bucket_size);
+        let (mdn_rng, p99_rng) = if ranges.is_empty() {
+            (None, None)
+        } else {
+            let qs = sort_and_quantiles(&mut ranges, &[0.5, 0.99]);
+            (Some(qs[0]), Some(qs[1]))
+        };
 
         // Fill analysis
         let half_spread = p99_rng.map(|r| r / 2.0);
@@ -683,10 +698,20 @@ fn median(vals: &[f64]) -> f64 {
 }
 
 /// Linear-interpolation quantile (same as numpy default).
+/// Clones and sorts internally — use `quantile_sorted` when you need multiple
+/// quantiles from the same data.
 fn quantile(vals: &[f64], q: f64) -> f64 {
     let mut sorted = vals.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    quantile_sorted(&sorted, q)
+}
+
+/// Read a quantile from an already-sorted slice.
+fn quantile_sorted(sorted: &[f64], q: f64) -> f64 {
     let n = sorted.len();
+    if n == 0 {
+        return f64::NAN;
+    }
     if n == 1 {
         return sorted[0];
     }
@@ -699,6 +724,12 @@ fn quantile(vals: &[f64], q: f64) -> f64 {
         let frac = pos - lo as f64;
         sorted[lo] * (1.0 - frac) + sorted[hi] * frac
     }
+}
+
+/// Sort a vec in-place and return multiple quantiles from it.
+fn sort_and_quantiles(vals: &mut Vec<f64>, qs: &[f64]) -> Vec<f64> {
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    qs.iter().map(|&q| quantile_sorted(vals, q)).collect()
 }
 
 #[cfg(test)]
