@@ -334,8 +334,6 @@ pub fn write_market_collection(
         const ONE_HOUR: usize = 36_000;
 
         if has_analytics {
-            use crate::analytics::SnapshotField;
-
             let (twap, mdn_sprd_bps, vol_bps_s, max_jump_bps,
                  el_p50, el_p9999, rl_p50, rl_p9999,
                  mdn_rng_bps, p99_rng_bps,
@@ -343,52 +341,37 @@ pub fn write_market_collection(
                  ask_fills_hr, ask_n_fills, ask_mkout,
             ) = match (analytics, exchange) {
                 (Some(a), Some(ex)) => {
-                    use crate::analytics::{QuoteSide, RangeStat};
-                    const BUCKET_1S: usize = 10; // 10 snaps @ 100ms = 1s
-                    let twap = a.midquote_twap(ex, id, 100);
-                    let mdn_sprd = a.snap_median(ex, id, SnapshotField::Spread, ONE_HOUR)
-                        .and_then(|s| mid.map(|m| s / m * 10_000.0));
-                    let vol = a
-                        .realized_vol(ex, id, 600)
-                        .map(|v| v * 10.0_f64.sqrt() * 10_000.0);
-                    let max_jump = a
-                        .max_abs_log_return(ex, id, ONE_HOUR)
-                        .map(|v| v * 10_000.0);
-                    let el_p50 = a.snap_quantile(ex, id, SnapshotField::ExchangeLatMs, ONE_HOUR, 0.5);
-                    let el_p9999 = a.snap_quantile(ex, id, SnapshotField::ExchangeLatMs, ONE_HOUR, 0.9999);
-                    let rl_p50 = a.snap_quantile(ex, id, SnapshotField::ReceiveLatMs, ONE_HOUR, 0.5);
-                    let rl_p9999 = a.snap_quantile(ex, id, SnapshotField::ReceiveLatMs, ONE_HOUR, 0.9999);
-                    let mdn_rng = a.mid_range_bps_stat(ex, id, ONE_HOUR, BUCKET_1S, RangeStat::Median);
-                    let p99_rng = a.mid_range_bps_stat(ex, id, ONE_HOUR, BUCKET_1S, RangeStat::Quantile(0.99));
+                    const BUCKET_1S: usize = 10;
+                    match a.compute_display_analytics(ex, id, ONE_HOUR, 100, 600, BUCKET_1S) {
+                        Some(da) => {
+                            let mdn_sprd = da.mdn_spread
+                                .and_then(|s| mid.map(|m| s / m * 10_000.0));
+                            let vol = da.vol
+                                .map(|v| v * 10.0_f64.sqrt() * 10_000.0);
+                            let max_jump = da.max_jump
+                                .map(|v| v * 10_000.0);
 
-                    // Fill sim at half the p99 range as half-spread
-                    let half_spread = p99_rng.map(|r| r / 2.0);
-                    let (bf, bn, bm, af, an, am) = match half_spread {
-                        Some(hs) if hs > 0.0 => {
-                            let bid_sim = a.quote_fill_analysis(ex, id, QuoteSide::Bid, hs, ONE_HOUR);
-                            let ask_sim = a.quote_fill_analysis(ex, id, QuoteSide::Ask, hs, ONE_HOUR);
-                            // Normalize fills to per-hour rate: n_fills * 3600 / min(elapsed, 3600)
-                            let bid_fph = bid_sim.as_ref().map(|r| {
+                            let fill_to_fph = |r: &crate::analytics::QuoteFillResult| {
                                 let denom = r.elapsed_secs.min(3600.0);
                                 if denom > 0.0 { r.n_fills as f64 * 3600.0 / denom } else { 0.0 }
-                            });
-                            let ask_fph = ask_sim.as_ref().map(|r| {
-                                let denom = r.elapsed_secs.min(3600.0);
-                                if denom > 0.0 { r.n_fills as f64 * 3600.0 / denom } else { 0.0 }
-                            });
-                            (
-                                bid_fph,
-                                bid_sim.as_ref().map(|r| r.n_fills as f64),
-                                bid_sim.as_ref().map(|r| r.mean_markout_bps),
-                                ask_fph,
-                                ask_sim.as_ref().map(|r| r.n_fills as f64),
-                                ask_sim.as_ref().map(|r| r.mean_markout_bps),
-                            )
+                            };
+
+                            let (bf, bn, bm) = match &da.bid_fill {
+                                Some(r) => (Some(fill_to_fph(r)), Some(r.n_fills as f64), Some(r.mean_markout_bps)),
+                                None => (None, None, None),
+                            };
+                            let (af, an, am) = match &da.ask_fill {
+                                Some(r) => (Some(fill_to_fph(r)), Some(r.n_fills as f64), Some(r.mean_markout_bps)),
+                                None => (None, None, None),
+                            };
+
+                            (da.twap, mdn_sprd, vol, max_jump,
+                             da.el_p50, da.el_p9999, da.rl_p50, da.rl_p9999,
+                             da.mdn_rng, da.p99_rng,
+                             bf, bn, bm, af, an, am)
                         }
-                        _ => (None, None, None, None, None, None),
-                    };
-
-                    (twap, mdn_sprd, vol, max_jump, el_p50, el_p9999, rl_p50, rl_p9999, mdn_rng, p99_rng, bf, bn, bm, af, an, am)
+                        None => (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
+                    }
                 }
                 _ => (None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None),
             };

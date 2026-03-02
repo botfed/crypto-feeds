@@ -456,6 +456,198 @@ impl Analytics {
     ) -> Option<SnapshotData> {
         self.snap_data.get_collection(exchange).latest(&symbol_id)
     }
+
+    /// Compute all display analytics for one symbol from a single snapshot read.
+    ///
+    /// This avoids the N separate `read_snap_field`/`read_snaps` calls that each
+    /// allocate a 36K-element Vec, replacing them with one read + slice-based math.
+    pub fn compute_display_analytics(
+        &self,
+        exchange: &Exchange,
+        symbol_id: SymbolId,
+        lookback: usize,
+        twap_n: usize,
+        vol_n: usize,
+        bucket_size: usize,
+    ) -> Option<DisplayAnalytics> {
+        let snaps = self.read_snaps(exchange, symbol_id, lookback)?;
+        let n = snaps.len();
+
+        // TWAP: mean of last twap_n midquotes
+        let twap_start = n.saturating_sub(twap_n);
+        let twap_mids: Vec<f64> = snaps[twap_start..]
+            .iter()
+            .map(|s| s.midquote)
+            .filter(|v| !v.is_nan() && *v > 0.0)
+            .collect();
+        let twap = if twap_mids.is_empty() { None } else { Some(mean(&twap_mids)) };
+
+        // Helper: extract a field, filter NaN
+        let extract = |field: SnapshotField, from: &[SnapshotData]| -> Vec<f64> {
+            from.iter().map(|s| field.extract(s)).filter(|v| !v.is_nan()).collect()
+        };
+
+        // Median spread
+        let spreads = extract(SnapshotField::Spread, &snaps);
+        let mdn_spread = if spreads.is_empty() { None } else { Some(median(&spreads)) };
+
+        // Realized vol over last vol_n snaps
+        let vol_start = n.saturating_sub(vol_n);
+        let log_rets = extract(SnapshotField::LogReturn, &snaps[vol_start..]);
+        let vol = stdev(&log_rets);
+
+        // Max abs log return
+        let all_log_rets = extract(SnapshotField::LogReturn, &snaps);
+        let max_jump = all_log_rets.iter().map(|v| v.abs()).reduce(f64::max);
+
+        // Latency quantiles
+        let el_vals = extract(SnapshotField::ExchangeLatMs, &snaps);
+        let rl_vals = extract(SnapshotField::ReceiveLatMs, &snaps);
+        let el_p50 = if el_vals.is_empty() { None } else { Some(quantile(&el_vals, 0.5)) };
+        let el_p9999 = if el_vals.is_empty() { None } else { Some(quantile(&el_vals, 0.9999)) };
+        let rl_p50 = if rl_vals.is_empty() { None } else { Some(quantile(&rl_vals, 0.5)) };
+        let rl_p9999 = if rl_vals.is_empty() { None } else { Some(quantile(&rl_vals, 0.9999)) };
+
+        // Mid-range bps buckets (from chronological snaps)
+        let ranges = compute_range_buckets(&snaps, bucket_size);
+        let mdn_rng = if ranges.is_empty() { None } else { Some(median(&ranges)) };
+        let p99_rng = if ranges.is_empty() { None } else { Some(quantile(&ranges, 0.99)) };
+
+        // Fill analysis
+        let half_spread = p99_rng.map(|r| r / 2.0);
+        let (bid_fill, ask_fill) = match half_spread {
+            Some(hs) if hs > 0.0 => (
+                compute_fills(&snaps, QuoteSide::Bid, hs),
+                compute_fills(&snaps, QuoteSide::Ask, hs),
+            ),
+            _ => (None, None),
+        };
+
+        Some(DisplayAnalytics {
+            twap,
+            mdn_spread,
+            vol,
+            max_jump,
+            el_p50,
+            el_p9999,
+            rl_p50,
+            rl_p9999,
+            mdn_rng,
+            p99_rng,
+            bid_fill,
+            ask_fill,
+        })
+    }
+}
+
+/// Pre-computed analytics for one exchange-symbol, from a single snapshot read.
+pub struct DisplayAnalytics {
+    pub twap: Option<f64>,
+    pub mdn_spread: Option<f64>,
+    pub vol: Option<f64>,
+    pub max_jump: Option<f64>,
+    pub el_p50: Option<f64>,
+    pub el_p9999: Option<f64>,
+    pub rl_p50: Option<f64>,
+    pub rl_p9999: Option<f64>,
+    pub mdn_rng: Option<f64>,
+    pub p99_rng: Option<f64>,
+    pub bid_fill: Option<QuoteFillResult>,
+    pub ask_fill: Option<QuoteFillResult>,
+}
+
+/// Compute mid-range bps per bucket from a chronological slice of snapshots.
+fn compute_range_buckets(snaps: &[SnapshotData], bucket_size: usize) -> Vec<f64> {
+    if bucket_size == 0 {
+        return Vec::new();
+    }
+    let mut ranges = Vec::with_capacity(snaps.len() / bucket_size + 1);
+    for chunk in snaps.chunks(bucket_size) {
+        let mut hi = f64::NEG_INFINITY;
+        let mut lo = f64::INFINITY;
+        for s in chunk {
+            if s.mid_high > hi { hi = s.mid_high; }
+            if s.mid_low < lo { lo = s.mid_low; }
+        }
+        if hi > lo && lo > 0.0 {
+            let mid = (hi + lo) / 2.0;
+            ranges.push((hi - lo) / mid * 10_000.0);
+        }
+    }
+    ranges
+}
+
+/// Compute fill analysis from a chronological slice of snapshots.
+fn compute_fills(snaps: &[SnapshotData], side: QuoteSide, spread_bps: f64) -> Option<QuoteFillResult> {
+    let n = snaps.len();
+    if n < 2 {
+        return None;
+    }
+
+    let first_ts = snaps.first().unwrap().snap_ts_ns;
+    let last_ts = snaps.last().unwrap().snap_ts_ns;
+    let elapsed_secs = if first_ts > 0 && last_ts > first_ts {
+        (last_ts - first_ts) as f64 / 1_000_000_000.0
+    } else {
+        (n - 1) as f64 * 0.1
+    };
+
+    let spread_mult = spread_bps / 10_000.0;
+    let mut markouts = Vec::new();
+    let n_total = n - 1;
+
+    for t in 0..n_total {
+        let snap = &snaps[t];
+        let mid = snap.midquote;
+        if mid <= 0.0 || mid.is_nan() {
+            continue;
+        }
+
+        let (quote_price, filled) = match side {
+            QuoteSide::Ask => {
+                let qp = mid * (1.0 + spread_mult);
+                (qp, snap.bid_high >= qp)
+            }
+            QuoteSide::Bid => {
+                let qp = mid * (1.0 - spread_mult);
+                (qp, snap.ask_low <= qp)
+            }
+        };
+
+        if filled {
+            let next_mid = snaps[t + 1].midquote;
+            if next_mid <= 0.0 || next_mid.is_nan() {
+                continue;
+            }
+            let markout = match side {
+                QuoteSide::Ask => (quote_price - next_mid) / mid * 10_000.0,
+                QuoteSide::Bid => (next_mid - quote_price) / mid * 10_000.0,
+            };
+            markouts.push(markout);
+        }
+    }
+
+    let n_fills = markouts.len();
+    if n_fills == 0 {
+        return Some(QuoteFillResult {
+            n_fills: 0,
+            n_total,
+            elapsed_secs,
+            mean_markout_bps: 0.0,
+            stdev_markout_bps: 0.0,
+        });
+    }
+
+    let mean_mo = mean(&markouts);
+    let stdev_mo = stdev(&markouts).unwrap_or(0.0);
+
+    Some(QuoteFillResult {
+        n_fills,
+        n_total,
+        elapsed_secs,
+        mean_markout_bps: mean_mo,
+        stdev_markout_bps: stdev_mo,
+    })
 }
 
 // -- stateless math helpers --
