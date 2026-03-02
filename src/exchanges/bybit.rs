@@ -49,8 +49,13 @@ impl ExchangeFeed for BybitFeed {
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
+    fn heartbeat_message(&self) -> Option<Message> {
+        // Bybit requires application-level {"op":"ping"} every 20s;
+        // raw WebSocket pings are ignored and the server disconnects.
+        Some(Message::Text(r#"{"op":"ping"}"#.into()))
+    }
+
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
-        // Coinbase uses a fixed URL; subscription carries symbols.
         Ok(self.url.to_string())
     }
     async fn send_subscription(
