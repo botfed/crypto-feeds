@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use log::warn;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::exchange_fees::{ExchangeFees, FeeSchedule};
@@ -40,13 +41,15 @@ struct BinanceBookTickerData {
 }
 
 /// Binance feed implemented using the generic connection abstraction.
-#[derive(Clone)]
 struct BinanceFeed {
     /// "wss://stream.binance.com:9443/stream" for spot
     /// "wss://fstream.binance.com/stream" for perp
     base_url: &'static str,
     itype: InstrumentType,
     mapper: BinanceMapper,
+    /// Dedup by update ID (spot has no event_time, so connection-loop
+    /// timestamp dedup is a no-op; we use the `u` field instead).
+    last_update_id: std::sync::Mutex<HashMap<String, u64>>,
 }
 
 impl BinanceFeed {
@@ -55,6 +58,7 @@ impl BinanceFeed {
             base_url: "wss://stream.binance.com:9443/stream",
             itype: InstrumentType::Spot,
             mapper: BinanceMapper,
+            last_update_id: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -63,6 +67,7 @@ impl BinanceFeed {
             base_url: "wss://fstream.binance.com/stream",
             itype: InstrumentType::Perp,
             mapper: BinanceMapper,
+            last_update_id: std::sync::Mutex::new(HashMap::new()),
         }
     }
 }
@@ -102,6 +107,17 @@ impl ExchangeFeed for BinanceFeed {
         match msg {
             WireMessage::Text(text) => {
                 let msg = serde_json::from_str::<BinanceBookTicker>(text)?;
+
+                // Dedup by update ID (monotonically increasing per symbol)
+                {
+                    let mut map = self.last_update_id.lock().unwrap();
+                    let last = map.entry(msg.data.symbol.clone()).or_insert(0);
+                    if msg.data.u <= *last {
+                        return Ok(None);
+                    }
+                    *last = msg.data.u;
+                }
+
                 let bid = msg.data.bid_price.parse::<f64>().ok();
                 let ask = msg.data.ask_price.parse::<f64>().ok();
                 let bid_qty = msg.data.bid_quantity.parse::<f64>().ok();

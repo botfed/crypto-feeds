@@ -164,6 +164,11 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
     pub fn write_pos(&self) -> u64 {
         self.write_pos.load(Ordering::Acquire)
     }
+
+    /// Buffer capacity.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
 }
 
 #[cfg(test)]

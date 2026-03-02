@@ -160,6 +160,11 @@ impl ExchangeFeed for LighterFeed {
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
+
+    fn timestamp_dedup(&self) -> bool {
+        false // incremental depth feed
+    }
+
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
         Ok("wss://mainnet.zklighter.elliot.ai/stream".to_string())
     }

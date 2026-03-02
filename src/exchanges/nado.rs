@@ -205,6 +205,7 @@ async fn connect_and_stream(
     let mut heartbeat = tokio::time::interval(config.heartbeat_interval);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_message_time = Utc::now();
+    let mut last_exchange_ts: HashMap<crate::symbol_registry::SymbolId, DateTime<Utc>> = HashMap::new();
 
     let result = loop {
         tokio::select! {
@@ -228,7 +229,15 @@ async fn connect_and_stream(
                     Some(Ok(Message::Text(text))) => {
                         if let Some((sym, md)) = parse_bbo(feed, text.as_str(), received_ts) {
                             if let Some(&id) = REGISTRY.lookup(&sym, &feed.itype) {
-                                data.push(&id, md);
+                                let stale = md.exchange_ts.map_or(false, |ts| {
+                                    last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
+                                });
+                                if !stale {
+                                    if let Some(ts) = md.exchange_ts {
+                                        last_exchange_ts.insert(id, ts);
+                                    }
+                                    data.push(&id, md);
+                                }
                             }
                         }
                     }

@@ -103,8 +103,20 @@ pub struct QuoteFillResult {
 }
 
 /// Reusable scratch buffers for analytics computation (zero per-call allocations).
+///
+/// Field-level `Vec<f64>` buffers (~8 bytes/element) instead of `Vec<SnapshotData>`
+/// (128 bytes/element) to minimize memory traffic during single-pass extraction.
 pub struct AnalyticsScratch {
-    pub snaps: Vec<SnapshotData>,
+    pub midquotes: Vec<f64>,
+    pub spreads: Vec<f64>,
+    pub log_returns: Vec<f64>,
+    pub exchange_lats: Vec<f64>,
+    pub receive_lats: Vec<f64>,
+    pub mid_highs: Vec<f64>,
+    pub mid_lows: Vec<f64>,
+    pub bid_highs: Vec<f64>,
+    pub ask_lows: Vec<f64>,
+    pub snap_ts: Vec<i64>,
     pub vals: Vec<f64>,
     pub markouts: Vec<f64>,
 }
@@ -112,7 +124,16 @@ pub struct AnalyticsScratch {
 impl AnalyticsScratch {
     pub fn new() -> Self {
         Self {
-            snaps: Vec::new(),
+            midquotes: Vec::new(),
+            spreads: Vec::new(),
+            log_returns: Vec::new(),
+            exchange_lats: Vec::new(),
+            receive_lats: Vec::new(),
+            mid_highs: Vec::new(),
+            mid_lows: Vec::new(),
+            bid_highs: Vec::new(),
+            ask_lows: Vec::new(),
+            snap_ts: Vec::new(),
             vals: Vec::new(),
             markouts: Vec::new(),
         }
@@ -474,7 +495,8 @@ impl Analytics {
         self.snap_data.get_collection(exchange).latest(&symbol_id)
     }
 
-    /// Compute all display analytics for one symbol from a single snapshot read.
+    /// Compute all display analytics for one symbol via a single pass over the
+    /// ring buffer, extracting only the needed `f64` fields into small vectors.
     ///
     /// Uses `scratch` for all intermediate storage — zero heap allocations per call.
     pub fn compute_display_analytics(
@@ -487,57 +509,114 @@ impl Analytics {
         bucket_size: usize,
         scratch: &mut AnalyticsScratch,
     ) -> Option<DisplayAnalytics> {
-        // Split borrows so we can mutate vals while reading snaps
-        let AnalyticsScratch { snaps: snaps_buf, vals, markouts } = scratch;
-
-        if snaps_buf.len() < lookback {
-            snaps_buf.resize(lookback, SnapshotData::default());
-        }
         let coll = self.snap_data.get_collection(exchange);
         let buf = coll.get_buffer(&symbol_id)?;
-        let count = buf.read_last_n(lookback, &mut snaps_buf[..lookback]);
+
+        let current = buf.write_pos();
+        let available = (current as usize).min(buf.capacity());
+        let to_read = lookback.min(available);
+        if to_read < 2 {
+            return None;
+        }
+
+        // Clear scratch buffers
+        let AnalyticsScratch {
+            midquotes, spreads, log_returns, exchange_lats, receive_lats,
+            mid_highs, mid_lows, bid_highs, ask_lows, snap_ts,
+            vals, markouts,
+        } = scratch;
+
+        midquotes.clear();
+        spreads.clear();
+        log_returns.clear();
+        exchange_lats.clear();
+        receive_lats.clear();
+        mid_highs.clear();
+        mid_lows.clear();
+        bid_highs.clear();
+        ask_lows.clear();
+        snap_ts.clear();
+
+        // Streaming accumulators
+        let mut twap_sum = 0.0f64;
+        let mut twap_count = 0usize;
+        let mut max_jump = 0.0f64;
+
+        // Single pass over ring buffer (newest first)
+        for i in 0..to_read {
+            let snap = match buf.read_at(current - 1 - i as u64) {
+                Some(s) => s,
+                None => continue, // torn read, skip
+            };
+
+            // TWAP: accumulate for first twap_n entries (most recent)
+            if midquotes.len() < twap_n && !snap.midquote.is_nan() && snap.midquote > 0.0 {
+                twap_sum += snap.midquote;
+                twap_count += 1;
+            }
+
+            midquotes.push(snap.midquote);
+
+            if !snap.spread.is_nan() {
+                spreads.push(snap.spread);
+            }
+            if !snap.log_return.is_nan() {
+                log_returns.push(snap.log_return);
+                let abs_lr = snap.log_return.abs();
+                if abs_lr > max_jump {
+                    max_jump = abs_lr;
+                }
+            }
+
+            exchange_lats.push(snap.exchange_lat_ms);
+            receive_lats.push(snap.receive_lat_ms);
+            mid_highs.push(snap.mid_high);
+            mid_lows.push(snap.mid_low);
+            bid_highs.push(snap.bid_high);
+            ask_lows.push(snap.ask_low);
+            snap_ts.push(snap.snap_ts_ns);
+        }
+
+        let count = midquotes.len();
         if count < 2 {
             return None;
         }
-        // read_last_n returns most-recent first; reverse to chronological
-        let snaps = &mut snaps_buf[..count];
-        snaps.reverse();
-        let n = snaps.len();
 
         let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
 
-        // TWAP: mean of last twap_n midquotes
-        let twap_start = n.saturating_sub(twap_n);
-        vals.clear();
-        vals.extend(snaps[twap_start..].iter().map(|s| s.midquote).filter(|v| !v.is_nan() && *v > 0.0));
-        let twap = if vals.is_empty() { None } else { Some(mean(vals)) };
+        // TWAP (already computed streaming)
+        let twap = if twap_count > 0 { Some(twap_sum / twap_count as f64) } else { None };
 
-        // Spread: sort, read median
-        extract_into(vals, SnapshotField::Spread, snaps);
-        let mdn_spread = if vals.is_empty() {
+        // Median spread
+        let mdn_spread = if spreads.is_empty() {
             None
         } else {
-            vals.sort_unstable_by(cmp);
-            Some(quantile_sorted(vals, 0.5))
+            spreads.sort_unstable_by(cmp);
+            Some(quantile_sorted(spreads, 0.5))
         };
 
-        // Log returns: extract once for max_jump + vol, then reuse
-        extract_into(vals, SnapshotField::LogReturn, snaps);
-        let max_jump = vals.iter().map(|v| v.abs()).reduce(f64::max);
-        let vol_start = vals.len().saturating_sub(vol_n);
-        let vol = stdev(&vals[vol_start..]);
+        // Max jump (already computed streaming)
+        let max_jump = if log_returns.is_empty() { None } else { Some(max_jump) };
 
-        // Latency: skip first 5s of observations (warmup)
+        // Vol: stdev of most recent vol_n log returns (newest are at front)
+        let vol_end = log_returns.len().min(vol_n);
+        let vol = stdev(&log_returns[..vol_end]);
+
+        // Latency: skip first 5s of observations (warmup = oldest entries at tail)
         const WARMUP_NS: i64 = 5_000_000_000;
-        let first_ts = snaps[0].snap_ts_ns;
-        let lat_start = if first_ts > 0 {
-            snaps.iter().position(|s| s.snap_ts_ns >= first_ts + WARMUP_NS).unwrap_or(0)
+        let first_ts = snap_ts.last().copied().unwrap_or(0);
+        let lat_end = if first_ts > 0 {
+            // snap_ts is newest-first; find rightmost entry still after warmup
+            snap_ts.iter()
+                .rposition(|&ts| ts >= first_ts + WARMUP_NS)
+                .map(|i| i + 1)
+                .unwrap_or(snap_ts.len())
         } else {
-            0
+            snap_ts.len()
         };
-        let lat_snaps = &snaps[lat_start..];
 
-        extract_into(vals, SnapshotField::ExchangeLatMs, lat_snaps);
+        vals.clear();
+        vals.extend(exchange_lats[..lat_end].iter().copied().filter(|v| !v.is_nan()));
         let (el_p50, el_p9999) = if vals.is_empty() {
             (None, None)
         } else {
@@ -545,7 +624,8 @@ impl Analytics {
             (Some(quantile_sorted(vals, 0.5)), Some(quantile_sorted(vals, 0.9999)))
         };
 
-        extract_into(vals, SnapshotField::ReceiveLatMs, lat_snaps);
+        vals.clear();
+        vals.extend(receive_lats[..lat_end].iter().copied().filter(|v| !v.is_nan()));
         let (rl_p50, rl_p9999) = if vals.is_empty() {
             (None, None)
         } else {
@@ -553,8 +633,25 @@ impl Analytics {
             (Some(quantile_sorted(vals, 0.5)), Some(quantile_sorted(vals, 0.9999)))
         };
 
-        // Mid-range bps buckets
-        compute_range_buckets_into(vals, snaps, bucket_size);
+        // Mid-range bps buckets (need chronological order)
+        mid_highs.reverse();
+        mid_lows.reverse();
+        vals.clear();
+        if bucket_size > 0 {
+            for chunk in mid_highs.chunks(bucket_size).zip(mid_lows.chunks(bucket_size)) {
+                let (hi_chunk, lo_chunk) = chunk;
+                let mut hi = f64::NEG_INFINITY;
+                let mut lo = f64::INFINITY;
+                for (&h, &l) in hi_chunk.iter().zip(lo_chunk.iter()) {
+                    if h > hi { hi = h; }
+                    if l < lo { lo = l; }
+                }
+                if hi > lo && lo > 0.0 {
+                    let mid = (hi + lo) / 2.0;
+                    vals.push((hi - lo) / mid * 10_000.0);
+                }
+            }
+        }
         let (mdn_rng, p99_rng) = if vals.is_empty() {
             (None, None)
         } else {
@@ -562,12 +659,17 @@ impl Analytics {
             (Some(quantile_sorted(vals, 0.5)), Some(quantile_sorted(vals, 0.99)))
         };
 
-        // Fill analysis
+        // Fill analysis (need chronological order)
+        midquotes.reverse();
+        bid_highs.reverse();
+        ask_lows.reverse();
+        snap_ts.reverse();
+
         let half_spread = p99_rng.map(|r| r / 2.0);
         let (bid_fill, ask_fill) = match half_spread {
             Some(hs) if hs > 0.0 => (
-                compute_fills(snaps, QuoteSide::Bid, hs, markouts),
-                compute_fills(snaps, QuoteSide::Ask, hs, markouts),
+                compute_fills(midquotes, bid_highs, ask_lows, snap_ts, QuoteSide::Bid, hs, markouts),
+                compute_fills(midquotes, bid_highs, ask_lows, snap_ts, QuoteSide::Ask, hs, markouts),
             ),
             _ => (None, None),
         };
@@ -606,41 +708,23 @@ pub struct DisplayAnalytics {
     pub ask_fill: Option<QuoteFillResult>,
 }
 
-/// Extract a single field from snapshots into a reusable buffer, filtering NaN.
-fn extract_into(out: &mut Vec<f64>, field: SnapshotField, from: &[SnapshotData]) {
-    out.clear();
-    out.extend(from.iter().map(|s| field.extract(s)).filter(|v| !v.is_nan()));
-}
-
-/// Compute mid-range bps per bucket into a reusable buffer.
-fn compute_range_buckets_into(out: &mut Vec<f64>, snaps: &[SnapshotData], bucket_size: usize) {
-    out.clear();
-    if bucket_size == 0 {
-        return;
-    }
-    for chunk in snaps.chunks(bucket_size) {
-        let mut hi = f64::NEG_INFINITY;
-        let mut lo = f64::INFINITY;
-        for s in chunk {
-            if s.mid_high > hi { hi = s.mid_high; }
-            if s.mid_low < lo { lo = s.mid_low; }
-        }
-        if hi > lo && lo > 0.0 {
-            let mid = (hi + lo) / 2.0;
-            out.push((hi - lo) / mid * 10_000.0);
-        }
-    }
-}
-
-/// Compute fill analysis from a chronological slice of snapshots.
-fn compute_fills(snaps: &[SnapshotData], side: QuoteSide, spread_bps: f64, markouts: &mut Vec<f64>) -> Option<QuoteFillResult> {
-    let n = snaps.len();
+/// Compute fill analysis from chronological parallel slices.
+fn compute_fills(
+    mids: &[f64],
+    bid_highs: &[f64],
+    ask_lows: &[f64],
+    snap_ts: &[i64],
+    side: QuoteSide,
+    spread_bps: f64,
+    markouts: &mut Vec<f64>,
+) -> Option<QuoteFillResult> {
+    let n = mids.len();
     if n < 2 {
         return None;
     }
 
-    let first_ts = snaps.first().unwrap().snap_ts_ns;
-    let last_ts = snaps.last().unwrap().snap_ts_ns;
+    let first_ts = snap_ts[0];
+    let last_ts = snap_ts[n - 1];
     let elapsed_secs = if first_ts > 0 && last_ts > first_ts {
         (last_ts - first_ts) as f64 / 1_000_000_000.0
     } else {
@@ -652,8 +736,7 @@ fn compute_fills(snaps: &[SnapshotData], side: QuoteSide, spread_bps: f64, marko
     let n_total = n - 1;
 
     for t in 0..n_total {
-        let snap = &snaps[t];
-        let mid = snap.midquote;
+        let mid = mids[t];
         if mid <= 0.0 || mid.is_nan() {
             continue;
         }
@@ -661,16 +744,16 @@ fn compute_fills(snaps: &[SnapshotData], side: QuoteSide, spread_bps: f64, marko
         let (quote_price, filled) = match side {
             QuoteSide::Ask => {
                 let qp = mid * (1.0 + spread_mult);
-                (qp, snap.bid_high >= qp)
+                (qp, bid_highs[t] >= qp)
             }
             QuoteSide::Bid => {
                 let qp = mid * (1.0 - spread_mult);
-                (qp, snap.ask_low <= qp)
+                (qp, ask_lows[t] <= qp)
             }
         };
 
         if filled {
-            let next_mid = snaps[t + 1].midquote;
+            let next_mid = mids[t + 1];
             if next_mid <= 0.0 || next_mid.is_nan() {
                 continue;
             }

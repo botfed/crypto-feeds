@@ -138,6 +138,13 @@ impl ExchangeFeed for MexcFeed {
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
+
+    fn timestamp_dedup(&self) -> bool {
+        // Perp uses incremental depth — must not skip messages.
+        // Spot has no exchange timestamp anyway.
+        false
+    }
+
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
         match self.itype {
             // Spot WS market streams

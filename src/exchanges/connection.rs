@@ -10,8 +10,9 @@ use tokio::time::interval;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite::Message, tungstenite::client::IntoClientRequest, tungstenite::http};
 
 use crate::market_data::InstrumentType;
-use crate::symbol_registry::REGISTRY;
+use crate::symbol_registry::{REGISTRY, SymbolId};
 use crate::{MarketDataCollection, market_data::MarketData};
+use std::collections::HashMap;
 
 #[derive(Clone)]
 pub struct ConnectionConfig {
@@ -70,6 +71,13 @@ pub trait ExchangeFeed {
 
     fn heartbeat_message(&self) -> Option<Message> {
         return None;
+    }
+
+    /// Whether the generic connection loop should drop messages with
+    /// exchange_ts < last seen exchange_ts for that symbol.
+    /// Override to `false` for incremental depth feeds.
+    fn timestamp_dedup(&self) -> bool {
+        true
     }
 
     /// Optional extra HTTP headers added to the WebSocket upgrade request.
@@ -240,6 +248,8 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut last_message_time = Utc::now();
+    let do_ts_dedup = feed.timestamp_dedup();
+    let mut last_exchange_ts: HashMap<SymbolId, chrono::DateTime<Utc>> = HashMap::new();
 
     let result = loop {
         tokio::select! {
@@ -274,7 +284,17 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                         match feed.parse_message(WireMessage::Text(text.as_str()), received_ts) {
                             Ok(Some((sym, md))) => {
                                 if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
-                                    data.push(&id, md);
+                                    let stale = do_ts_dedup && md.exchange_ts.map_or(false, |ts| {
+                                        last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
+                                    });
+                                    if !stale {
+                                        if do_ts_dedup {
+                                            if let Some(ts) = md.exchange_ts {
+                                                last_exchange_ts.insert(id, ts);
+                                            }
+                                        }
+                                        data.push(&id, md);
+                                    }
                                 }
                             }
                             Ok(None) => {
@@ -294,8 +314,18 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                     Some(Ok(Message::Binary(bytes))) => {
                         match feed.parse_message(WireMessage::Binary(&bytes), received_ts) {
                             Ok(Some((sym, md))) => {
-                                if let Some(id) = REGISTRY.lookup(&sym, &itype) {
-                                    data.push(id, md);
+                                if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
+                                    let stale = do_ts_dedup && md.exchange_ts.map_or(false, |ts| {
+                                        last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
+                                    });
+                                    if !stale {
+                                        if do_ts_dedup {
+                                            if let Some(ts) = md.exchange_ts {
+                                                last_exchange_ts.insert(id, ts);
+                                            }
+                                        }
+                                        data.push(&id, md);
+                                    }
                                 }
                             }
                             Ok(None) => {
