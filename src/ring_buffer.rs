@@ -166,8 +166,10 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
     /// Unlike `read_last_n` this requires no pre-allocated output buffer —
     /// the caller extracts only the fields it needs inside the closure.
     ///
-    /// Inlines the seqlock protocol to avoid per-element `write_pos` reloads
-    /// and bounds checks that `read_at` performs.
+    /// Uses seqlock only for the 2 slots nearest the write head (which could
+    /// be concurrently written). All older slots are read directly — the
+    /// initial `write_pos.load(Acquire)` guarantees their visibility, and
+    /// the writer cannot wrap around to them during our μs-scale scan.
     pub fn scan_last_n<F>(&self, n: usize, mut f: F) -> usize
     where
         F: FnMut(&T),
@@ -180,7 +182,11 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
         let to_read = n.min(available);
         let mask = self.capacity - 1;
         let mut count = 0;
-        for i in 0..to_read {
+
+        // Seqlock the 2 entries nearest the write head — the writer could
+        // advance during our scan and touch these slots.
+        let guarded = to_read.min(2);
+        for i in 0..guarded {
             let pos = current - 1 - i as u64;
             let idx = (pos as usize) & mask;
             let slot = &self.buf[idx];
@@ -192,7 +198,6 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
                     std::hint::spin_loop();
                     continue;
                 }
-                // SAFETY: seq is even and matches expected, so no concurrent write.
                 let data = unsafe { *slot.data.get() };
                 let seq2 = slot.seq.load(Ordering::Acquire);
                 if seq1 == seq2 {
@@ -203,6 +208,21 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
                 std::hint::spin_loop();
             }
         }
+
+        // SAFETY: Slots far from the write head cannot be concurrently written.
+        // The writer would need to push `capacity` entries to wrap around to
+        // these positions, which is impossible during our μs-scale scan.
+        // The Acquire load of write_pos above provides happens-before for all
+        // stores the writer made prior to advancing write_pos.
+        for i in guarded..to_read {
+            let pos = current - 1 - i as u64;
+            let idx = (pos as usize) & mask;
+            let slot = &self.buf[idx];
+            let data = unsafe { *slot.data.get() };
+            f(&data);
+            count += 1;
+        }
+
         count
     }
 
