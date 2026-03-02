@@ -133,6 +133,7 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
     let mut state: Option<([Vec<SymbolId>; NUM_EXCHANGES], Vec<crate::snapshot::SnapshotData>)> =
         Some((std::array::from_fn(|_| Vec::new()), Vec::new()));
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         tokio::select! {
             _ = &mut shutdown_fut => {
@@ -193,6 +194,7 @@ pub async fn print_bbo_with_analytics(
         HashMap<(usize, SymbolId), DisplayAnalytics>,
     )> = Some((std::array::from_fn(|_| Vec::new()), Vec::new(), HashMap::new()));
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = loop {
         tokio::select! {
             _ = &mut shutdown_fut => {
