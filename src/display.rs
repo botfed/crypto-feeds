@@ -130,7 +130,7 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
     flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
-    let mut seen: [Vec<SymbolId>; NUM_EXCHANGES] = std::array::from_fn(|_| Vec::new());
+    let mut seen: Option<[Vec<SymbolId>; NUM_EXCHANGES]> = Some(std::array::from_fn(|_| Vec::new()));
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let result = loop {
         tokio::select! {
@@ -138,27 +138,33 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                 break Ok(());
             }
             _ = interval.tick() => {
-                let elapsed = start.elapsed().as_secs();
-                let h = elapsed / 3600;
-                let m = (elapsed % 3600) / 60;
-                let s = elapsed % 60;
-                let mut buf = String::with_capacity(8192);
-                let _ = writeln!(buf, "========== Market Data Snapshot ==========  uptime: {:02}:{:02}:{:02}", h, m, s);
-                write_header(&mut buf, false);
-                write_market_collection(&mut buf, "Binance ", &market_data.binance, None, None, &mut seen[0]);
-                write_market_collection(&mut buf, "Coinbase", &market_data.coinbase, None, None, &mut seen[1]);
-                write_market_collection(&mut buf, "Bybit   ", &market_data.bybit, None, None, &mut seen[2]);
-                write_market_collection(&mut buf, "Kraken  ", &market_data.kraken, None, None, &mut seen[3]);
-                write_market_collection(&mut buf, "MEXC    ", &market_data.mexc, None, None, &mut seen[4]);
-                write_market_collection(&mut buf, "Lighter ", &market_data.lighter, None, None, &mut seen[5]);
-                write_market_collection(&mut buf, "Extended", &market_data.extended, None, None, &mut seen[6]);
-                write_market_collection(&mut buf, "Nado    ", &market_data.nado, None, None, &mut seen[7]);
-                let (_, rows) = term_size();
-                let used = buf.lines().count();
-                let remaining = rows.saturating_sub(used);
-                write_log_section(&mut buf, remaining);
-                let frame = prepare_frame(&buf);
-                flush_str(format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW)).await?;
+                let mut s = seen.take().unwrap();
+                let md = Arc::clone(&market_data);
+                let (frame, s) = tokio::task::spawn_blocking(move || {
+                    let elapsed = start.elapsed().as_secs();
+                    let h = elapsed / 3600;
+                    let m = (elapsed % 3600) / 60;
+                    let sec = elapsed % 60;
+                    let mut buf = String::with_capacity(8192);
+                    let _ = writeln!(buf, "========== Market Data Snapshot ==========  uptime: {:02}:{:02}:{:02}", h, m, sec);
+                    write_header(&mut buf, false);
+                    write_market_collection(&mut buf, "Binance ", &md.binance, None, None, &mut s[0]);
+                    write_market_collection(&mut buf, "Coinbase", &md.coinbase, None, None, &mut s[1]);
+                    write_market_collection(&mut buf, "Bybit   ", &md.bybit, None, None, &mut s[2]);
+                    write_market_collection(&mut buf, "Kraken  ", &md.kraken, None, None, &mut s[3]);
+                    write_market_collection(&mut buf, "MEXC    ", &md.mexc, None, None, &mut s[4]);
+                    write_market_collection(&mut buf, "Lighter ", &md.lighter, None, None, &mut s[5]);
+                    write_market_collection(&mut buf, "Extended", &md.extended, None, None, &mut s[6]);
+                    write_market_collection(&mut buf, "Nado    ", &md.nado, None, None, &mut s[7]);
+                    let (_, rows) = term_size();
+                    let used = buf.lines().count();
+                    let remaining = rows.saturating_sub(used);
+                    write_log_section(&mut buf, remaining);
+                    let frame = prepare_frame(&buf);
+                    (format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW), s)
+                }).await?;
+                seen = Some(s);
+                flush_str(frame).await?;
             }
         }
     };
