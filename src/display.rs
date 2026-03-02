@@ -130,7 +130,8 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
     flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
-    let mut seen: Option<[Vec<SymbolId>; NUM_EXCHANGES]> = Some(std::array::from_fn(|_| Vec::new()));
+    let mut state: Option<([Vec<SymbolId>; NUM_EXCHANGES], Vec<crate::snapshot::SnapshotData>)> =
+        Some((std::array::from_fn(|_| Vec::new()), Vec::new()));
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let result = loop {
         tokio::select! {
@@ -138,9 +139,9 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                 break Ok(());
             }
             _ = interval.tick() => {
-                let mut s = seen.take().unwrap();
+                let (mut s, mut scratch) = state.take().unwrap();
                 let md = Arc::clone(&market_data);
-                let (frame, s) = tokio::task::spawn_blocking(move || {
+                let (frame, s, scratch) = tokio::task::spawn_blocking(move || {
                     let elapsed = start.elapsed().as_secs();
                     let h = elapsed / 3600;
                     let m = (elapsed % 3600) / 60;
@@ -148,7 +149,6 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                     let mut buf = String::with_capacity(8192);
                     let _ = writeln!(buf, "========== Market Data Snapshot ==========  uptime: {:02}:{:02}:{:02}", h, m, sec);
                     write_header(&mut buf, false);
-                    let mut scratch = Vec::new();
                     write_market_collection(&mut buf, "Binance ", &md.binance, None, None, &mut s[0], &mut scratch);
                     write_market_collection(&mut buf, "Coinbase", &md.coinbase, None, None, &mut s[1], &mut scratch);
                     write_market_collection(&mut buf, "Bybit   ", &md.bybit, None, None, &mut s[2], &mut scratch);
@@ -162,9 +162,9 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                     let remaining = rows.saturating_sub(used);
                     write_log_section(&mut buf, remaining);
                     let frame = prepare_frame(&buf);
-                    (format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW), s)
+                    (format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW), s, scratch)
                 }).await?;
-                seen = Some(s);
+                state = Some((s, scratch));
                 flush_str(frame).await?;
             }
         }
@@ -185,7 +185,8 @@ pub async fn print_bbo_with_analytics(
     flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
-    let mut seen: Option<[Vec<SymbolId>; NUM_EXCHANGES]> = Some(std::array::from_fn(|_| Vec::new()));
+    let mut state: Option<([Vec<SymbolId>; NUM_EXCHANGES], Vec<crate::snapshot::SnapshotData>)> =
+        Some((std::array::from_fn(|_| Vec::new()), Vec::new()));
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     let result = loop {
         tokio::select! {
@@ -193,10 +194,10 @@ pub async fn print_bbo_with_analytics(
                 break Ok(());
             }
             _ = interval.tick() => {
-                let mut s = seen.take().unwrap();
+                let (mut s, mut scratch) = state.take().unwrap();
                 let md = Arc::clone(&market_data);
                 let a = Arc::clone(&analytics);
-                let (frame, s) = tokio::task::spawn_blocking(move || {
+                let (frame, s, scratch) = tokio::task::spawn_blocking(move || {
                     let elapsed = start.elapsed().as_secs();
                     let h = elapsed / 3600;
                     let m = (elapsed % 3600) / 60;
@@ -204,7 +205,6 @@ pub async fn print_bbo_with_analytics(
                     let mut buf = String::with_capacity(16384);
                     let _ = writeln!(buf, "========== Market Data + Analytics ==========  uptime: {:02}:{:02}:{:02}", h, m, sec);
                     write_header(&mut buf, true);
-                    let mut scratch = Vec::new();
                     write_market_collection(&mut buf, "Binance ", &md.binance, Some(&a), Some(&Exchange::Binance), &mut s[0], &mut scratch);
                     write_market_collection(&mut buf, "Coinbase", &md.coinbase, Some(&a), Some(&Exchange::Coinbase), &mut s[1], &mut scratch);
                     write_market_collection(&mut buf, "Bybit   ", &md.bybit, Some(&a), Some(&Exchange::Bybit), &mut s[2], &mut scratch);
@@ -218,9 +218,9 @@ pub async fn print_bbo_with_analytics(
                     let remaining = rows.saturating_sub(used);
                     write_log_section(&mut buf, remaining);
                     let frame = prepare_frame(&buf);
-                    (format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW), s)
+                    (format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW), s, scratch)
                 }).await?;
-                seen = Some(s);
+                state = Some((s, scratch));
                 flush_str(frame).await?;
             }
         }
