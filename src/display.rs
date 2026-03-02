@@ -207,12 +207,15 @@ pub async fn print_bbo_with_analytics(
                 let md = Arc::clone(&market_data);
                 let a = if recompute { Some(Arc::clone(&analytics)) } else { None };
                 let (frame, s, scratch, acache) = tokio::task::spawn_blocking(move || {
+                    let t0 = std::time::Instant::now();
                     let elapsed = start.elapsed().as_secs();
                     let h = elapsed / 3600;
                     let m = (elapsed % 3600) / 60;
                     let sec = elapsed % 60;
                     let mut buf = String::with_capacity(16384);
                     let _ = writeln!(buf, "========== Market Data + Analytics ==========  uptime: {:02}:{:02}:{:02}", h, m, sec);
+
+                    let t_analytics = std::time::Instant::now();
                     write_header(&mut buf, true);
                     let ap = a.as_deref().map(|a| (a, &Exchange::Binance));
                     write_market_collection(&mut buf, "Binance ", &md.binance, ap, 0, true, &mut s[0], &mut scratch, &mut acache);
@@ -230,6 +233,10 @@ pub async fn print_bbo_with_analytics(
                     write_market_collection(&mut buf, "Extended", &md.extended, ap, 6, true, &mut s[6], &mut scratch, &mut acache);
                     let ap = a.as_deref().map(|a| (a, &Exchange::Nado));
                     write_market_collection(&mut buf, "Nado    ", &md.nado, ap, 7, true, &mut s[7], &mut scratch, &mut acache);
+                    let analytics_ms = t_analytics.elapsed().as_secs_f64() * 1000.0;
+
+                    let _ = writeln!(buf, "  render: {:.1}ms (analytics: {:.1}ms){}", t0.elapsed().as_secs_f64() * 1000.0, analytics_ms, if a.is_some() { " [recompute]" } else { "" });
+
                     let (_, rows) = term_size();
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
