@@ -252,7 +252,7 @@ fn write_header(buf: &mut String, has_analytics: bool) {
             "", "(bps)", "(bps)", "(bps/s)", "(bps)",
             "(bps,1h)", "(bps,1h)",
             "@p99/2", "", "(bps)", "@p99/2", "", "(bps)",
-            "(s)",
+            "(ms)",
         );
     } else {
         let _ = writeln!(
@@ -263,7 +263,7 @@ fn write_header(buf: &mut String, has_analytics: bool) {
         let _ = writeln!(
             buf,
             "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>6} {:>6} {:>5}",
-            "", "", "", "", "", "", "(ms)", "(ms)", "(s)",
+            "", "", "", "", "", "", "(ms)", "(ms)", "(ms)",
         );
     }
 }
@@ -311,7 +311,7 @@ pub fn write_market_collection(
 
         let age = md
             .and_then(|m| m.received_ts)
-            .map(|t| format!("{:.0}", (now - t).num_milliseconds() as f64 / 1000.0))
+            .map(|t| format!("{}", (now - t).num_milliseconds()))
             .unwrap_or_else(|| "-".into());
 
         let sprd_bps = match (bid, ask, mid) {
