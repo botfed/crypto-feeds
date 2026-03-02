@@ -236,32 +236,34 @@ fn write_header(buf: &mut String, has_analytics: bool) {
     if has_analytics {
         let _ = writeln!(
             buf,
-            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10}",
+            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10} {:>5}",
             "Symbol", "Mid", "Bid", "BidQty", "Ask", "AskQty",
             "ELp50", "ELp9999", "RLp50", "RLp9999",
             "TWAP(10s)", "Sprd", "MdnSprd(1h)", "Vol(60s)", "MaxJmp(1h@100ms)",
             "MdnRng(1s)", "P99Rng(1s)",
             "BidFl/hr", "BidN", "BidMkout", "AskFl/hr", "AskN", "AskMkout",
+            "Age",
         );
         let _ = writeln!(
             buf,
-            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10}",
+            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10} {:>5}",
             "", "", "", "", "", "",
             "(ms,1h)", "(ms,1h)", "(ms,1h)", "(ms,1h)",
             "", "(bps)", "(bps)", "(bps/s)", "(bps)",
             "(bps,1h)", "(bps,1h)",
             "@p99/2", "", "(bps)", "@p99/2", "", "(bps)",
+            "(s)",
         );
     } else {
         let _ = writeln!(
             buf,
-            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>6} {:>6}",
-            "Symbol", "Mid", "Bid", "BidQty", "Ask", "AskQty", "ELat", "RLat",
+            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>6} {:>6} {:>5}",
+            "Symbol", "Mid", "Bid", "BidQty", "Ask", "AskQty", "ELat", "RLat", "Age",
         );
         let _ = writeln!(
             buf,
-            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>6} {:>6}",
-            "", "", "", "", "", "", "(ms)", "(ms)",
+            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>6} {:>6} {:>5}",
+            "", "", "", "", "", "", "(ms)", "(ms)", "(s)",
         );
     }
 }
@@ -306,6 +308,11 @@ pub fn write_market_collection(
             Some(md) => (md.bid, md.ask, md.bid_qty, md.ask_qty),
             None => (None, None, None, None),
         };
+
+        let age = md
+            .and_then(|m| m.received_ts)
+            .map(|t| format!("{:.0}", (now - t).num_milliseconds() as f64 / 1000.0))
+            .unwrap_or_else(|| "-".into());
 
         let sprd_bps = match (bid, ask, mid) {
             (Some(b), Some(a), Some(m)) => Some((a - b) / m * 10_000.0),
@@ -376,7 +383,7 @@ pub fn write_market_collection(
 
             let _ = writeln!(
                 buf,
-                "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10}",
+                "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10} {:>5}",
                 sym,
                 fmt_f6(mid),
                 fmt_f6(bid),
@@ -400,6 +407,7 @@ pub fn write_market_collection(
                 fmt_f2(ask_fills_hr),
                 fmt_f0(ask_n_fills),
                 fmt_f2(ask_mkout),
+                age,
             );
         } else {
             let (e_lat, r_lat) = match md {
@@ -416,7 +424,7 @@ pub fn write_market_collection(
             };
             let _ = writeln!(
                 buf,
-                "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>6} {:>6}",
+                "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>6} {:>6} {:>5}",
                 sym,
                 fmt_f6(mid),
                 fmt_f6(bid),
@@ -425,6 +433,7 @@ pub fn write_market_collection(
                 fmt_f2(ask_qty),
                 e_lat,
                 r_lat,
+                age,
             );
         }
     }
