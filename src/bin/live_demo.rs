@@ -25,11 +25,12 @@ async fn main() -> Result<()> {
     let _ = load_spot(&mut handles, &cfg, &market_data, &shutdown);
     let _ = load_perp(&mut handles, &cfg, &market_data, &shutdown);
 
-    // Start snapshot engine (100ms interval, 8192 buffer)
-    let snap_data = Arc::new(AllSnapshotData::new(8192));
+    // Start snapshot engine (100ms interval, 65536 buffer ≈ 109 min at 100ms)
+    // Must be >= 36_000 to support 1-hour analytics (fills/hr, median spread, etc.)
+    let snap_data = Arc::new(AllSnapshotData::new(65536));
     let snap_config = SnapshotConfig {
         interval_ms: 100,
-        buffer_capacity: 8192,
+        buffer_capacity: 65536,
     };
     {
         let tick = Arc::clone(&market_data);
