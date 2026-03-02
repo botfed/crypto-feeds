@@ -387,7 +387,7 @@ impl PyAnalytics {
     ///     spread_bps: Distance from mid in basis points
     ///     lookback_snaps: Number of snapshots to look back
     ///
-    /// Returns dict with n_fills, n_total, mean_markout_bps, stdev_markout_bps or None.
+    /// Returns dict with n_fills, n_total, elapsed_secs, mean_markout_bps, stdev_markout_bps or None.
     fn quote_fill_analysis(
         &self,
         exchange: &str,
@@ -417,6 +417,7 @@ impl PyAnalytics {
                 let dict = PyDict::new_bound(py);
                 dict.set_item("n_fills", r.n_fills)?;
                 dict.set_item("n_total", r.n_total)?;
+                dict.set_item("elapsed_secs", r.elapsed_secs)?;
                 dict.set_item("mean_markout_bps", r.mean_markout_bps)?;
                 dict.set_item("stdev_markout_bps", r.stdev_markout_bps)?;
                 Ok(Some(dict.into()))

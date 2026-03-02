@@ -348,13 +348,14 @@ pub fn write_market_collection(
                         Some(hs) if hs > 0.0 => {
                             let bid_sim = a.quote_fill_analysis(ex, id, QuoteSide::Bid, hs, ONE_HOUR);
                             let ask_sim = a.quote_fill_analysis(ex, id, QuoteSide::Ask, hs, ONE_HOUR);
-                            // Normalize fills to per-hour rate using actual data duration
-                            // Each snapshot ≈ 100ms, so n_total snaps = n_total/10 seconds = n_total/36000 hours
+                            // Normalize fills to per-hour rate: n_fills * 3600 / min(elapsed, 3600)
                             let bid_fph = bid_sim.as_ref().map(|r| {
-                                if r.n_total > 0 { r.n_fills as f64 * ONE_HOUR as f64 / r.n_total as f64 } else { 0.0 }
+                                let denom = r.elapsed_secs.min(3600.0);
+                                if denom > 0.0 { r.n_fills as f64 * 3600.0 / denom } else { 0.0 }
                             });
                             let ask_fph = ask_sim.as_ref().map(|r| {
-                                if r.n_total > 0 { r.n_fills as f64 * ONE_HOUR as f64 / r.n_total as f64 } else { 0.0 }
+                                let denom = r.elapsed_secs.min(3600.0);
+                                if denom > 0.0 { r.n_fills as f64 * 3600.0 / denom } else { 0.0 }
                             });
                             (
                                 bid_fph,

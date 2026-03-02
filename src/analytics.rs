@@ -97,6 +97,7 @@ impl QuoteSide {
 pub struct QuoteFillResult {
     pub n_fills: usize,
     pub n_total: usize,
+    pub elapsed_secs: f64,
     pub mean_markout_bps: f64,
     pub stdev_markout_bps: f64,
 }
@@ -317,6 +318,16 @@ impl Analytics {
             return None;
         }
 
+        // Compute actual elapsed time from snapshot timestamps
+        let first_ts = snaps.first().unwrap().snap_ts_ns;
+        let last_ts = snaps.last().unwrap().snap_ts_ns;
+        let elapsed_secs = if first_ts > 0 && last_ts > first_ts {
+            (last_ts - first_ts) as f64 / 1_000_000_000.0
+        } else {
+            // Fallback: estimate from snapshot count at 100ms intervals
+            (n - 1) as f64 * 0.1
+        };
+
         let spread_mult = spread_bps / 10_000.0;
         let mut markouts = Vec::new();
         // We can evaluate fills for snaps[0..n-1] (need snaps[t+1] for markout)
@@ -358,6 +369,7 @@ impl Analytics {
             return Some(QuoteFillResult {
                 n_fills: 0,
                 n_total,
+                elapsed_secs,
                 mean_markout_bps: 0.0,
                 stdev_markout_bps: 0.0,
             });
@@ -369,6 +381,7 @@ impl Analytics {
         Some(QuoteFillResult {
             n_fills,
             n_total,
+            elapsed_secs,
             mean_markout_bps: mean_mo,
             stdev_markout_bps: stdev_mo,
         })
