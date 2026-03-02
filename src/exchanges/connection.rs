@@ -211,6 +211,7 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
 
     if let Err(e) = feed.send_subscription(&mut write, symbols).await {
         error!("Error subscribing to {}: {}", feed_name, e);
+        close_stream(write, read, feed_name).await;
         return Ok(ConnectionResult::Reconnect);
     }
 
@@ -219,25 +220,25 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
 
     let mut last_message_time = Utc::now();
 
-    loop {
+    let result = loop {
         tokio::select! {
             _ = heartbeat.tick() => {
                 let elapsed = Utc::now() - last_message_time;
                 if elapsed > chrono::Duration::from_std(config.message_timeout)? {
                     warn!("No messages for {:?} on {}, reconnecting", config.message_timeout, feed_name);
-                    return Ok(ConnectionResult::Reconnect);
+                    break ConnectionResult::Reconnect;
                 }
 
                 if let Some(msg) = feed.heartbeat_message() {
                     if let Err(e) = write.send(msg).await {
                         error!("Failed heartbeat on {}: {}", feed_name, e);
-                        return Ok(ConnectionResult::Reconnect);
+                        break ConnectionResult::Reconnect;
                     }
                 } else {
                 // Keepalive ping (many servers ignore it; some require it)
                 if let Err(e) = write.send(Message::Ping(vec![].into())).await {
                     error!("Failed to send ping on {}: {}", feed_name, e);
-                    return Ok(ConnectionResult::Reconnect);
+                    break ConnectionResult::Reconnect;
                 }
                 }
 
@@ -259,7 +260,7 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                                 // intentionally ignored (heartbeats, sub acks, etc.)
                                 if let Err(e) = feed.process_other(&mut write, &text).await {
                                     error!("Error processing other: {}", e);
-                                    return Ok(ConnectionResult::Reconnect);
+                                    break ConnectionResult::Reconnect;
                                 }
                             }
                             Err(e) => {
@@ -296,22 +297,47 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
 
                     Some(Ok(Message::Close(_))) => {
                         warn!("{} socket closed.", feed_name);
-                        return Ok(ConnectionResult::Reconnect);
+                        break ConnectionResult::Reconnect;
                     }
 
                     Some(Err(e)) => {
                         error!("{} socket error: {}", feed_name, e);
-                        return Ok(ConnectionResult::Reconnect);
+                        break ConnectionResult::Reconnect;
                     }
 
                     None => {
                         warn!("{} stream ended.", feed_name);
-                        return Ok(ConnectionResult::Reconnect);
+                        break ConnectionResult::Reconnect;
                     }
 
                     _ => {}
                 }
             }
         }
+    };
+
+    close_stream(write, read, feed_name).await;
+    Ok(result)
+}
+
+/// Send a WebSocket close frame and cleanly shut down the connection.
+async fn close_stream(
+    mut write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+    read: futures_util::stream::SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+    feed_name: &str,
+) {
+    // Send close frame; don't block forever if the peer is unresponsive.
+    let close = tokio::time::timeout(
+        Duration::from_secs(5),
+        write.send(Message::Close(None)),
+    )
+    .await;
+
+    if let Err(_) | Ok(Err(_)) = close {
+        debug!("Could not send close frame for {}", feed_name);
     }
+
+    // Reunite and drop to ensure the underlying TCP socket is shut down.
+    drop(read);
+    drop(write);
 }

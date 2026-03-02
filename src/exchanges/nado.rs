@@ -192,27 +192,31 @@ async fn connect_and_stream(
             "id": i + 1,
         });
         debug!("Nado sub: {}", msg);
-        write
+        if let Err(e) = write
             .send(Message::Text(msg.to_string().into()))
             .await
-            .with_context(|| format!("failed to subscribe to Nado product {}", pid))?;
+        {
+            error!("Failed to subscribe to Nado product {}: {}", pid, e);
+            close_nado(write, read).await;
+            return Ok(false);
+        }
     }
 
     let mut heartbeat = tokio::time::interval(config.heartbeat_interval);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_message_time = Utc::now();
 
-    loop {
+    let result = loop {
         tokio::select! {
             _ = heartbeat.tick() => {
                 let elapsed = Utc::now() - last_message_time;
                 if elapsed > chrono::Duration::from_std(config.message_timeout)? {
                     warn!("No messages for {:?} on {}, reconnecting", config.message_timeout, FEED_NAME);
-                    return Ok(false);
+                    break false;
                 }
                 if let Err(e) = write.send(Message::Ping(vec![].into())).await {
                     error!("Failed heartbeat on {}: {}", FEED_NAME, e);
-                    return Ok(false);
+                    break false;
                 }
             }
 
@@ -235,21 +239,37 @@ async fn connect_and_stream(
                     Some(Ok(Message::Pong(_))) => {}
                     Some(Ok(Message::Close(_))) => {
                         warn!("{} socket closed.", FEED_NAME);
-                        return Ok(false);
+                        break false;
                     }
                     Some(Err(e)) => {
                         error!("{} socket error: {}", FEED_NAME, e);
-                        return Ok(false);
+                        break false;
                     }
                     None => {
                         warn!("{} stream ended.", FEED_NAME);
-                        return Ok(false);
+                        break false;
                     }
                     _ => {}
                 }
             }
         }
-    }
+    };
+
+    close_nado(write, read).await;
+    Ok(result)
+}
+
+async fn close_nado(
+    mut write: futures_util::stream::SplitSink<nado_ws::WsStream, Message>,
+    read: futures_util::stream::SplitStream<nado_ws::WsStream>,
+) {
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        write.send(Message::Close(None)),
+    )
+    .await;
+    drop(read);
+    drop(write);
 }
 
 pub async fn listen_perp_bbo(
