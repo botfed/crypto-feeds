@@ -1,0 +1,13 @@
+sample_interval_ms: 10
+
+spot:
+  binance:  ["BTC_USDT", "ETH_USDT", "CLANKER_USDT", "SPX_USDT"]
+  coinbase: ["BTC_USD", "ETH_USD", "CLANKER_USD", "SPX_USD"]
+  bybit:    ["BTC_USDT", "ETH_USDT", "CLANKER_USDT", "SPX_USDT"]
+  kraken:   ["BTC_USD", "ETH_USD", "CLANKER_USD", "SPX_USD"]
+
+perp:
+  binance:  ["BTC_USDT", "ETH_USDT", "CLANKER_USDT", "SPX_USDT"]
+  coinbase: ["BTC_USD", "ETH_USD", "CLANKER_USD", "SPX_USD"]
+  bybit:    ["BTC_USDT", "ETH_USDT", "CLANKER_USDT", "SPX_USDT"]
+  kraken:   ["BTC_USD", "ETH_USD", "CLANKER_USD", "SPX_USD"]
