@@ -16,6 +16,13 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub perp: HashMap<String, Vec<String>>,
+
+    #[serde(default = "default_sample_interval_ms")]
+    pub sample_interval_ms: u64,
+}
+
+fn default_sample_interval_ms() -> u64 {
+    10
 }
 
 pub fn load_config(path: &str) -> Result<AppConfig> {
