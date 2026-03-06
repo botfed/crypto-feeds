@@ -62,7 +62,11 @@ pub struct AllMarketData {
     pub extended: Arc<MarketDataCollection>,
     pub nado: Arc<MarketDataCollection>,
     pub okx: Arc<MarketDataCollection>,
+    pub kucoin: Arc<MarketDataCollection>,
+    pub bingx: Arc<MarketDataCollection>,
+    pub apex: Arc<MarketDataCollection>,
     pub aerodrome: Arc<MarketDataCollection>,
+    pub uniswap: Arc<MarketDataCollection>,
 }
 
 // Debug impl
@@ -82,7 +86,11 @@ pub enum Exchange {
     Extended,
     Nado,
     Okx,
+    Kucoin,
+    Bingx,
+    Apex,
     Aerodrome,
+    Uniswap,
 }
 
 impl AllMarketData {
@@ -98,7 +106,11 @@ impl AllMarketData {
             (Extended, &self.extended),
             (Nado, &self.nado),
             (Okx, &self.okx),
+            (Kucoin, &self.kucoin),
+            (Bingx, &self.bingx),
+            (Apex, &self.apex),
             (Aerodrome, &self.aerodrome),
+            (Uniswap, &self.uniswap),
         ]
         .into_iter()
     }
@@ -114,7 +126,11 @@ impl AllMarketData {
             Exchange::Extended => &self.extended,
             Exchange::Nado => &self.nado,
             Exchange::Okx => &self.okx,
+            Exchange::Kucoin => &self.kucoin,
+            Exchange::Bingx => &self.bingx,
+            Exchange::Apex => &self.apex,
             Exchange::Aerodrome => &self.aerodrome,
+            Exchange::Uniswap => &self.uniswap,
         }
     }
 }
@@ -132,7 +148,11 @@ impl AllMarketData {
             extended: new_coll(),
             nado: new_coll(),
             okx: new_coll(),
+            kucoin: new_coll(),
+            bingx: new_coll(),
+            apex: new_coll(),
             aerodrome: new_coll(),
+            uniswap: new_coll(),
         }
     }
 }

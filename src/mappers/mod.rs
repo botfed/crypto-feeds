@@ -8,6 +8,9 @@ mod lighter;
 mod extended;
 mod nado;
 mod okx;
+mod kucoin;
+mod bingx;
+mod apex;
 
 // Re-export the trait
 pub use symbol_mapper::{SymbolMapper, parse_normalized};
@@ -22,6 +25,9 @@ pub use lighter::LighterMapper;
 pub use extended::ExtendedMapper;
 pub use nado::NadoMapper;
 pub use okx::OkxMapper;
+pub use kucoin::KucoinMapper;
+pub use bingx::BingxMapper;
+pub use apex::ApexMapper;
 
 use anyhow::Result;
 
@@ -37,6 +43,9 @@ pub fn get_mapper(exchange: &str) -> Result<Box<dyn SymbolMapper>> {
         "extended" => Ok(Box::new(ExtendedMapper)),
         "nado" => Ok(Box::new(NadoMapper)),
         "okx" => Ok(Box::new(OkxMapper)),
+        "kucoin" => Ok(Box::new(KucoinMapper)),
+        "bingx" => Ok(Box::new(BingxMapper)),
+        "apex" => Ok(Box::new(ApexMapper)),
         _ => anyhow::bail!("Unsupported exchange: {}", exchange),
     }
 }

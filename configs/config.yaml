@@ -2,23 +2,33 @@ spot:
   binance:  ["BTC_USDT", "AIXBT_USDT", "UNI_USDT"]
   okx:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'UNI_USDT']
   bybit:   ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
-  coinbase: ["BTC_USD", "ETH_USD", "UNI_USD"]
+  coinbase: ["BTC_USD", "ETH_USD", "CLANKER_USD"]
   kraken:   ["BTC_USD", "ETH_USD", "AIXBT_USD"]
   mexc:    ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
 
-aerodrome:
+onchain:
   rpc_env: "BASE_WSS_RPC"
-  pools:
-    - address: "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"
-      symbol: "ETH_USDC"
-    - address: "0x22A52bB644f855ebD5ca2edB643FF70222D70C31"
-      symbol: "AIXBT_ETH"
+  aerodrome:
+    pools:
+      - address: "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"
+        symbol: "ETH_USDC"
+      - address: "0x22A52bB644f855ebD5ca2edB643FF70222D70C31"
+        symbol: "AIXBT_ETH"
+  uniswap:
+    pools:
+      - address: "0x6c561B446416E1A00E8E93E221854d6eA4171372"
+        symbol: "ETH_USDC"
+      - address: "0xf1Fdc83c3A336bdbDC9fB06e318B08EadDC82FF4"
+        symbol: "AIXBT_USDC"
 
 perp:
-  binance:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'UNI_USDT']
-  okx:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'UNI_USDT']
+  binance:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT']
+  kucoin:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT']
+  bingx:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT']
+  okx:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT']
+  apex:  ['BTC_USDT', "ETH_USDT", 'KAITO_USDT', 'SPX_USDT']
   bybit:    ['BTC_USDT', "UNI_USDT"]
-  coinbase: ['BTC_USD', 'ETH_USD']
+  coinbase: ['BTC_USD', 'ETH_USD', 'CLANKER_USD']
   kraken:   ['BTC_USD', 'ETH_USD']
   lighter:  ['BTC_USDC', "UNI_USDC"]
   extended: ['BTC_USD', 'ETH_USD', 'UNI_USD']

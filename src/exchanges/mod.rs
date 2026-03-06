@@ -7,4 +7,7 @@ pub mod lighter;
 pub mod extended;
 pub mod nado;
 pub mod okx;
+pub mod kucoin;
+pub mod bingx;
+pub mod apex;
 pub mod connection;

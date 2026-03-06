@@ -25,6 +25,10 @@ fn parse_exchange(exchange: &str) -> PyResult<Exchange> {
         "extended" => Ok(Exchange::Extended),
         "nado" => Ok(Exchange::Nado),
         "okx" => Ok(Exchange::Okx),
+        "kucoin" => Ok(Exchange::Kucoin),
+        "bingx" => Ok(Exchange::Bingx),
+        "apex" => Ok(Exchange::Apex),
+        "uniswap" => Ok(Exchange::Uniswap),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Unknown exchange: {}",
             exchange
@@ -579,7 +583,7 @@ impl PyAppConfig {
         }
 
         Ok(Self {
-            config: AppConfig { spot, perp, sample_interval_ms: 10, aerodrome: None },
+            config: AppConfig { spot, perp, sample_interval_ms: 10, onchain: None },
         })
     }
 

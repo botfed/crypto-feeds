@@ -91,7 +91,11 @@ pub struct AllSnapshotData {
     pub extended: Arc<SnapshotCollection>,
     pub nado: Arc<SnapshotCollection>,
     pub okx: Arc<SnapshotCollection>,
+    pub kucoin: Arc<SnapshotCollection>,
+    pub bingx: Arc<SnapshotCollection>,
+    pub apex: Arc<SnapshotCollection>,
     pub aerodrome: Arc<SnapshotCollection>,
+    pub uniswap: Arc<SnapshotCollection>,
 }
 
 impl std::fmt::Debug for AllSnapshotData {
@@ -113,7 +117,11 @@ impl AllSnapshotData {
             extended: new_coll(),
             nado: new_coll(),
             okx: new_coll(),
+            kucoin: new_coll(),
+            bingx: new_coll(),
+            apex: new_coll(),
             aerodrome: new_coll(),
+            uniswap: new_coll(),
         }
     }
 
@@ -128,7 +136,11 @@ impl AllSnapshotData {
             Exchange::Extended => &self.extended,
             Exchange::Nado => &self.nado,
             Exchange::Okx => &self.okx,
+            Exchange::Kucoin => &self.kucoin,
+            Exchange::Bingx => &self.bingx,
+            Exchange::Apex => &self.apex,
             Exchange::Aerodrome => &self.aerodrome,
+            Exchange::Uniswap => &self.uniswap,
         }
     }
 
@@ -144,13 +156,17 @@ impl AllSnapshotData {
             (Extended, &self.extended),
             (Nado, &self.nado),
             (Okx, &self.okx),
+            (Kucoin, &self.kucoin),
+            (Bingx, &self.bingx),
+            (Apex, &self.apex),
             (Aerodrome, &self.aerodrome),
+            (Uniswap, &self.uniswap),
         ]
         .into_iter()
     }
 }
 
-const NUM_EXCHANGES: usize = 10;
+const NUM_EXCHANGES: usize = 14;
 
 fn exchange_index(exchange: &Exchange) -> usize {
     match exchange {
@@ -163,7 +179,11 @@ fn exchange_index(exchange: &Exchange) -> usize {
         Exchange::Extended => 6,
         Exchange::Nado => 7,
         Exchange::Okx => 8,
-        Exchange::Aerodrome => 9,
+        Exchange::Kucoin => 9,
+        Exchange::Bingx => 10,
+        Exchange::Apex => 11,
+        Exchange::Aerodrome => 12,
+        Exchange::Uniswap => 13,
     }
 }
 

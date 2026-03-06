@@ -27,6 +27,7 @@ fn build_targets(cfg: &AppConfig, market_data: &AllMarketData) -> Vec<SampleTarg
         ("binance", Exchange::Binance, &market_data.binance),
         ("coinbase", Exchange::Coinbase, &market_data.coinbase),
         ("bybit", Exchange::Bybit, &market_data.bybit),
+        ("okx", Exchange::Okx, &market_data.okx),
         ("kraken", Exchange::Kraken, &market_data.kraken),
     ];
 

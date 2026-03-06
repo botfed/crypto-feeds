@@ -1,6 +1,6 @@
 use crate::exchanges::*;
 use crate::market_data::AllMarketData;
-use crate::onchain::aerodrome::AeroConfig;
+use crate::onchain::OnchainConfig;
 use anyhow::{Context, Result};
 use log::error;
 use serde::Deserialize;
@@ -22,7 +22,7 @@ pub struct AppConfig {
     pub sample_interval_ms: u64,
 
     #[serde(default)]
-    pub aerodrome: Option<AeroConfig>,
+    pub onchain: Option<OnchainConfig>,
 }
 
 fn default_sample_interval_ms() -> u64 {
@@ -110,26 +110,66 @@ pub fn load_spot(
             }
         }));
     }
+    if let Some(syms) = spot_syms("kucoin") {
+        let data = Arc::clone(&market_data.kucoin);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = kucoin::listen_spot_bbo(data, &symbol_refs, shutdown).await {
+                error!("KuCoin spot listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = spot_syms("bingx") {
+        let data = Arc::clone(&market_data.bingx);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = bingx::listen_spot_bbo(data, &symbol_refs, shutdown).await {
+                error!("BingX spot listener exited with error {:?}", e);
+            }
+        }));
+    }
     Ok(())
 }
 
-pub fn load_aerodrome(
+pub fn load_onchain(
     handles: &mut Vec<JoinHandle<()>>,
     cfg: &AppConfig,
     market_data: &Arc<AllMarketData>,
     shutdown: &Arc<Notify>,
 ) -> Result<()> {
-    if let Some(ref aero_cfg) = cfg.aerodrome {
-        let data = Arc::clone(&market_data.aerodrome);
-        let shutdown = shutdown.clone();
-        let aero_cfg = aero_cfg.clone();
-        handles.push(tokio::spawn(async move {
-            if let Err(e) =
-                crate::onchain::aerodrome::listen_aerodrome(data, aero_cfg, shutdown).await
-            {
-                error!("Aerodrome listener exited with error {:?}", e);
-            }
-        }));
+    if let Some(ref onchain_cfg) = cfg.onchain {
+        let rpc_url = onchain_cfg.rpc_url()?;
+
+        if let Some(ref aero) = onchain_cfg.aerodrome {
+            let data = Arc::clone(&market_data.aerodrome);
+            let shutdown = shutdown.clone();
+            let rpc_url = rpc_url.clone();
+            let pools = aero.pools.clone();
+            handles.push(tokio::spawn(async move {
+                if let Err(e) =
+                    crate::onchain::aerodrome::listen_aerodrome(data, rpc_url, pools, shutdown)
+                        .await
+                {
+                    error!("Aerodrome listener exited with error {:?}", e);
+                }
+            }));
+        }
+
+        if let Some(ref uni) = onchain_cfg.uniswap {
+            let data = Arc::clone(&market_data.uniswap);
+            let shutdown = shutdown.clone();
+            let rpc_url = rpc_url.clone();
+            let pools = uni.pools.clone();
+            handles.push(tokio::spawn(async move {
+                if let Err(e) =
+                    crate::onchain::uniswap::listen_uniswap(data, rpc_url, pools, shutdown).await
+                {
+                    error!("Uniswap listener exited with error {:?}", e);
+                }
+            }));
+        }
     }
     Ok(())
 }
@@ -231,6 +271,36 @@ pub fn load_perp(
             let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
             if let Err(e) = okx::listen_perp_bbo(data, &symbol_refs, shutdown).await {
                 error!("OKX perp listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = perp_syms("kucoin") {
+        let data = Arc::clone(&market_data.kucoin);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = kucoin::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("KuCoin perp listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = perp_syms("bingx") {
+        let data = Arc::clone(&market_data.bingx);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = bingx::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("BingX perp listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = perp_syms("apex") {
+        let data = Arc::clone(&market_data.apex);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = apex::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("Apex perp listener exited with error {:?}", e);
             }
         }));
     }

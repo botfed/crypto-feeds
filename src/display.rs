@@ -16,7 +16,7 @@ const CLEAR_BELOW: &str = "\x1B[J";
 const CURSOR_HIDE: &str = "\x1B[?25l";
 const CURSOR_SHOW: &str = "\x1B[?25h";
 const ERASE_EOL: &str = "\x1B[K";
-const NUM_EXCHANGES: usize = 10;
+const NUM_EXCHANGES: usize = 14;
 const MAX_LOG_LINES: usize = 20;
 
 // --------------- in-memory log capture ---------------
@@ -160,7 +160,11 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                     write_market_collection(&mut buf, "Extended", &md.extended, None, 6, false, &mut s[6], &mut scratch, &mut no_cache);
                     write_market_collection(&mut buf, "Nado    ", &md.nado, None, 7, false, &mut s[7], &mut scratch, &mut no_cache);
                     write_market_collection(&mut buf, "OKX     ", &md.okx, None, 8, false, &mut s[8], &mut scratch, &mut no_cache);
-                    write_market_collection(&mut buf, "Aero    ", &md.aerodrome, None, 9, false, &mut s[9], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "KuCoin  ", &md.kucoin, None, 9, false, &mut s[9], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "BingX   ", &md.bingx, None, 10, false, &mut s[10], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "Apex    ", &md.apex, None, 11, false, &mut s[11], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "Aero    ", &md.aerodrome, None, 12, false, &mut s[12], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "Uniswap ", &md.uniswap, None, 13, false, &mut s[13], &mut scratch, &mut no_cache);
                     let (_, rows) = term_size();
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
@@ -220,7 +224,7 @@ pub async fn print_bbo_with_analytics(
 
                     write_header(&mut buf, true);
                     let mut ex_times = [0.0f64; NUM_EXCHANGES];
-                    let ex_names = ["bin", "cb", "byb", "krk", "mxc", "ltr", "ext", "ndo", "okx", "aero"];
+                    let ex_names = ["bin", "cb", "byb", "krk", "mxc", "ltr", "ext", "ndo", "okx", "kuc", "bgx", "apx", "aero", "uni"];
                     macro_rules! timed_write {
                         ($i:expr, $name:expr, $coll:expr, $ex:expr) => {{
                             let t = std::time::Instant::now();
@@ -238,7 +242,11 @@ pub async fn print_bbo_with_analytics(
                     timed_write!(6, "Extended", md.extended, Exchange::Extended);
                     timed_write!(7, "Nado    ", md.nado, Exchange::Nado);
                     timed_write!(8, "OKX     ", md.okx, Exchange::Okx);
-                    timed_write!(9, "Aero    ", md.aerodrome, Exchange::Aerodrome);
+                    timed_write!(9, "KuCoin  ", md.kucoin, Exchange::Kucoin);
+                    timed_write!(10, "BingX   ", md.bingx, Exchange::Bingx);
+                    timed_write!(11, "Apex    ", md.apex, Exchange::Apex);
+                    timed_write!(12, "Aero    ", md.aerodrome, Exchange::Aerodrome);
+                    timed_write!(13, "Uniswap ", md.uniswap, Exchange::Uniswap);
                     let analytics_ms: f64 = ex_times.iter().sum();
 
                     if a.is_some() {
