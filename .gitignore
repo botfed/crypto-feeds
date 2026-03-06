@@ -49,6 +49,7 @@ env/
 
 # Output files
 *.csv
+*.csv.gz
 *.out
 *.log
 tmp.*
