@@ -9,6 +9,7 @@ pub mod orderbook;
 pub mod display;
 pub mod snapshot;
 pub mod analytics;
+pub mod onchain;
 
 #[cfg(feature = "python")]
 pub mod python;

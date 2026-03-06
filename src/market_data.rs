@@ -61,6 +61,8 @@ pub struct AllMarketData {
     pub mexc: Arc<MarketDataCollection>,
     pub extended: Arc<MarketDataCollection>,
     pub nado: Arc<MarketDataCollection>,
+    pub okx: Arc<MarketDataCollection>,
+    pub aerodrome: Arc<MarketDataCollection>,
 }
 
 // Debug impl
@@ -79,6 +81,8 @@ pub enum Exchange {
     Mexc,
     Extended,
     Nado,
+    Okx,
+    Aerodrome,
 }
 
 impl AllMarketData {
@@ -93,6 +97,8 @@ impl AllMarketData {
             (Mexc, &self.mexc),
             (Extended, &self.extended),
             (Nado, &self.nado),
+            (Okx, &self.okx),
+            (Aerodrome, &self.aerodrome),
         ]
         .into_iter()
     }
@@ -107,6 +113,8 @@ impl AllMarketData {
             Exchange::Mexc => &self.mexc,
             Exchange::Extended => &self.extended,
             Exchange::Nado => &self.nado,
+            Exchange::Okx => &self.okx,
+            Exchange::Aerodrome => &self.aerodrome,
         }
     }
 }
@@ -123,6 +131,8 @@ impl AllMarketData {
             mexc: new_coll(),
             extended: new_coll(),
             nado: new_coll(),
+            okx: new_coll(),
+            aerodrome: new_coll(),
         }
     }
 }

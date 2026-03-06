@@ -38,6 +38,7 @@ serde_json = "1.0.145"
 serde_yaml = "0.9.34"
 tokio = { version = "1.48.0", features = ["full"] }
 tokio-tungstenite = { version = "0.28.0", features = ["native-tls"] }
+alloy = { version = "1", default-features = false, features = ["provider-ws", "sol-types", "rpc-types"] }
 
 [build-dependencies]
 prost-build = "0.13"

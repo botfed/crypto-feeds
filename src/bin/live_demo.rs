@@ -6,7 +6,7 @@ use tokio::signal;
 use tokio::sync::Notify;
 
 use crypto_feeds::analytics::Analytics;
-use crypto_feeds::app_config::{load_config, load_perp, load_spot, AppConfig};
+use crypto_feeds::app_config::{load_aerodrome, load_config, load_perp, load_spot, AppConfig};
 use crypto_feeds::display::{init_display_logger, print_bbo_with_analytics};
 use crypto_feeds::market_data::AllMarketData;
 use crypto_feeds::snapshot::{run_snapshot_task, AllSnapshotData, SnapshotConfig};
@@ -21,9 +21,10 @@ async fn main() -> Result<()> {
 
     let mut handles = Vec::new();
 
-    // Start both spot and perp feeds
+    // Start spot, perp, and on-chain feeds
     let _ = load_spot(&mut handles, &cfg, &market_data, &shutdown);
     let _ = load_perp(&mut handles, &cfg, &market_data, &shutdown);
+    let _ = load_aerodrome(&mut handles, &cfg, &market_data, &shutdown);
 
     // Start snapshot engine (100ms interval, 65536 buffer ≈ 109 min at 100ms)
     // Must be >= 36_000 to support 1-hour analytics (fills/hr, median spread, etc.)

@@ -24,6 +24,7 @@ fn parse_exchange(exchange: &str) -> PyResult<Exchange> {
         "mexc" => Ok(Exchange::Mexc),
         "extended" => Ok(Exchange::Extended),
         "nado" => Ok(Exchange::Nado),
+        "okx" => Ok(Exchange::Okx),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Unknown exchange: {}",
             exchange
@@ -578,7 +579,7 @@ impl PyAppConfig {
         }
 
         Ok(Self {
-            config: AppConfig { spot, perp },
+            config: AppConfig { spot, perp, sample_interval_ms: 10, aerodrome: None },
         })
     }
 

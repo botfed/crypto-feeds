@@ -90,6 +90,8 @@ pub struct AllSnapshotData {
     pub mexc: Arc<SnapshotCollection>,
     pub extended: Arc<SnapshotCollection>,
     pub nado: Arc<SnapshotCollection>,
+    pub okx: Arc<SnapshotCollection>,
+    pub aerodrome: Arc<SnapshotCollection>,
 }
 
 impl std::fmt::Debug for AllSnapshotData {
@@ -110,6 +112,8 @@ impl AllSnapshotData {
             mexc: new_coll(),
             extended: new_coll(),
             nado: new_coll(),
+            okx: new_coll(),
+            aerodrome: new_coll(),
         }
     }
 
@@ -123,6 +127,8 @@ impl AllSnapshotData {
             Exchange::Mexc => &self.mexc,
             Exchange::Extended => &self.extended,
             Exchange::Nado => &self.nado,
+            Exchange::Okx => &self.okx,
+            Exchange::Aerodrome => &self.aerodrome,
         }
     }
 
@@ -137,12 +143,14 @@ impl AllSnapshotData {
             (Mexc, &self.mexc),
             (Extended, &self.extended),
             (Nado, &self.nado),
+            (Okx, &self.okx),
+            (Aerodrome, &self.aerodrome),
         ]
         .into_iter()
     }
 }
 
-const NUM_EXCHANGES: usize = 8;
+const NUM_EXCHANGES: usize = 10;
 
 fn exchange_index(exchange: &Exchange) -> usize {
     match exchange {
@@ -154,6 +162,8 @@ fn exchange_index(exchange: &Exchange) -> usize {
         Exchange::Mexc => 5,
         Exchange::Extended => 6,
         Exchange::Nado => 7,
+        Exchange::Okx => 8,
+        Exchange::Aerodrome => 9,
     }
 }
 

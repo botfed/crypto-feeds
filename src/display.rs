@@ -16,7 +16,7 @@ const CLEAR_BELOW: &str = "\x1B[J";
 const CURSOR_HIDE: &str = "\x1B[?25l";
 const CURSOR_SHOW: &str = "\x1B[?25h";
 const ERASE_EOL: &str = "\x1B[K";
-const NUM_EXCHANGES: usize = 8;
+const NUM_EXCHANGES: usize = 10;
 const MAX_LOG_LINES: usize = 20;
 
 // --------------- in-memory log capture ---------------
@@ -159,6 +159,8 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                     write_market_collection(&mut buf, "Lighter ", &md.lighter, None, 5, false, &mut s[5], &mut scratch, &mut no_cache);
                     write_market_collection(&mut buf, "Extended", &md.extended, None, 6, false, &mut s[6], &mut scratch, &mut no_cache);
                     write_market_collection(&mut buf, "Nado    ", &md.nado, None, 7, false, &mut s[7], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "OKX     ", &md.okx, None, 8, false, &mut s[8], &mut scratch, &mut no_cache);
+                    write_market_collection(&mut buf, "Aero    ", &md.aerodrome, None, 9, false, &mut s[9], &mut scratch, &mut no_cache);
                     let (_, rows) = term_size();
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
@@ -218,7 +220,7 @@ pub async fn print_bbo_with_analytics(
 
                     write_header(&mut buf, true);
                     let mut ex_times = [0.0f64; NUM_EXCHANGES];
-                    let ex_names = ["bin", "cb", "byb", "krk", "mxc", "ltr", "ext", "ndo"];
+                    let ex_names = ["bin", "cb", "byb", "krk", "mxc", "ltr", "ext", "ndo", "okx", "aero"];
                     macro_rules! timed_write {
                         ($i:expr, $name:expr, $coll:expr, $ex:expr) => {{
                             let t = std::time::Instant::now();
@@ -235,6 +237,8 @@ pub async fn print_bbo_with_analytics(
                     timed_write!(5, "Lighter ", md.lighter, Exchange::Lighter);
                     timed_write!(6, "Extended", md.extended, Exchange::Extended);
                     timed_write!(7, "Nado    ", md.nado, Exchange::Nado);
+                    timed_write!(8, "OKX     ", md.okx, Exchange::Okx);
+                    timed_write!(9, "Aero    ", md.aerodrome, Exchange::Aerodrome);
                     let analytics_ms: f64 = ex_times.iter().sum();
 
                     if a.is_some() {

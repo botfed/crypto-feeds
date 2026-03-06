@@ -1,15 +1,25 @@
 spot:
-  binance:  ["BTC_USDT", "UNI_USDT"]
+  binance:  ["BTC_USDT", "AIXBT_USDT", "UNI_USDT"]
+  okx:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'UNI_USDT']
+  bybit:   ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
   coinbase: ["BTC_USD", "ETH_USD", "UNI_USD"]
   kraken:   ["BTC_USD", "ETH_USD", "AIXBT_USD"]
   mexc:    ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
-  bybit:   ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
+
+aerodrome:
+  rpc_env: "BASE_WSS_RPC"
+  pools:
+    - address: "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"
+      symbol: "ETH_USDC"
+    - address: "0x22A52bB644f855ebD5ca2edB643FF70222D70C31"
+      symbol: "AIXBT_ETH"
 
 perp:
   binance:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'UNI_USDT']
+  okx:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'UNI_USDT']
+  bybit:    ['BTC_USDT', "UNI_USDT"]
   coinbase: ['BTC_USD', 'ETH_USD']
   kraken:   ['BTC_USD', 'ETH_USD']
-  bybit:    ['BTC_USDT', "UNI_USDT"]
   lighter:  ['BTC_USDC', "UNI_USDC"]
   extended: ['BTC_USD', 'ETH_USD', 'UNI_USD']
   nado:     ['BTC_USDT', 'ETH_USDT', 'UNI_USDT']

@@ -7,6 +7,7 @@ mod kraken;
 mod lighter;
 mod extended;
 mod nado;
+mod okx;
 
 // Re-export the trait
 pub use symbol_mapper::{SymbolMapper, parse_normalized};
@@ -20,6 +21,7 @@ pub use kraken::KrakenMapper;
 pub use lighter::LighterMapper;
 pub use extended::ExtendedMapper;
 pub use nado::NadoMapper;
+pub use okx::OkxMapper;
 
 use anyhow::Result;
 
@@ -34,6 +36,7 @@ pub fn get_mapper(exchange: &str) -> Result<Box<dyn SymbolMapper>> {
         "lighter" => Ok(Box::new(LighterMapper)),
         "extended" => Ok(Box::new(ExtendedMapper)),
         "nado" => Ok(Box::new(NadoMapper)),
+        "okx" => Ok(Box::new(OkxMapper)),
         _ => anyhow::bail!("Unsupported exchange: {}", exchange),
     }
 }

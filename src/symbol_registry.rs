@@ -37,7 +37,7 @@ impl SymbolRegistry {
 
         let mut reg = Self::new();
 
-        let quote_currencies = ["USDT", "USDC", "USD"];
+        let quote_currencies = ["USDT", "USDC", "USD", "ETH", "WETH"];
         let instrument_types = [InstrumentType::Spot, InstrumentType::Perp];
 
         for base in &config.base_assets {

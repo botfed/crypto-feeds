@@ -1,5 +1,6 @@
 use crate::exchanges::*;
 use crate::market_data::AllMarketData;
+use crate::onchain::aerodrome::AeroConfig;
 use anyhow::{Context, Result};
 use log::error;
 use serde::Deserialize;
@@ -19,6 +20,9 @@ pub struct AppConfig {
 
     #[serde(default = "default_sample_interval_ms")]
     pub sample_interval_ms: u64,
+
+    #[serde(default)]
+    pub aerodrome: Option<AeroConfig>,
 }
 
 fn default_sample_interval_ms() -> u64 {
@@ -93,6 +97,37 @@ pub fn load_spot(
             let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
             if let Err(e) = kraken::listen_spot_bbo(data, &symbol_refs, shutdown).await {
                 error!("Kraken spot listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = spot_syms("okx") {
+        let data = Arc::clone(&market_data.okx);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = okx::listen_spot_bbo(data, &symbol_refs, shutdown).await {
+                error!("OKX spot listener exited with error {:?}", e);
+            }
+        }));
+    }
+    Ok(())
+}
+
+pub fn load_aerodrome(
+    handles: &mut Vec<JoinHandle<()>>,
+    cfg: &AppConfig,
+    market_data: &Arc<AllMarketData>,
+    shutdown: &Arc<Notify>,
+) -> Result<()> {
+    if let Some(ref aero_cfg) = cfg.aerodrome {
+        let data = Arc::clone(&market_data.aerodrome);
+        let shutdown = shutdown.clone();
+        let aero_cfg = aero_cfg.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) =
+                crate::onchain::aerodrome::listen_aerodrome(data, aero_cfg, shutdown).await
+            {
+                error!("Aerodrome listener exited with error {:?}", e);
             }
         }));
     }
@@ -186,6 +221,16 @@ pub fn load_perp(
             let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
             if let Err(e) = nado::listen_perp_bbo(data, &symbol_refs, shutdown).await {
                 error!("Nado perp listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = perp_syms("okx") {
+        let data = Arc::clone(&market_data.okx);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = okx::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("OKX perp listener exited with error {:?}", e);
             }
         }));
     }
