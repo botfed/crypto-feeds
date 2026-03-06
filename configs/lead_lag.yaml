@@ -12,5 +12,7 @@ perp:
   kucoin:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "CLANKER_USDT", "SPX_USDT"]
   okx:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "CLANKER_USDT", "SPX_USDT"]
   bybit:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "CLANKER_USDT", "SPX_USDT"]
+  bingx:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "CLANKER_USDT", "SPX_USDT"]
+  kucoin:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "CLANKER_USDT", "SPX_USDT"]
   coinbase: ["BTC_USD", "ETH_USD", "CLANKER_USD", "SPX_USD"]
   kraken:   ["BTC_USD", "ETH_USD", "CLANKER_USD", "SPX_USD"]
