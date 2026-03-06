@@ -1,0 +1,5 @@
+# Placeholder — run the export cell in lead_lag_analysis.ipynb to populate
+# Cell: "Export model params for production micro price computation" (after SA loop)
+tau: 0.1
+relative: true
+models: {}
