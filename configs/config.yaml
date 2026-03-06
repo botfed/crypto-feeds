@@ -22,9 +22,9 @@ onchain:
         symbol: "AIXBT_USDC"
 
 perp:
-  binance:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT']
-  kucoin:  ['BTC_USDT', "CLANKER_USDT", 'AIXBT_USDT', 'SPX_USDT']
-  bingx:  ['BTC_USDT', "ETH_USDT", 'CLANKER_USDT', 'SPX_USDT']
+  binance:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT', 'CLANKER_USDT']
+  kucoin:  ['BTC_USDT', 'AIXBT_USDT', 'SPX_USDT', 'CLANKER_USDT']
+  bingx:  ['BTC_USDT', "ETH_USDT", 'CLANKER_USDT', 'SPX_USDT', 'CLANKER_USDT']
   okx:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT']
   apex:  ['BTC_USDT', "ETH_USDT", 'KAITO_USDT', 'SPX_USDT']
   bybit:    ['BTC_USDT', "CLANKER_USDT"]
