@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 use tokio::time::{self, MissedTickBehavior};
 
 use crypto_feeds::app_config::{load_config, load_perp, load_spot, AppConfig};
-use crypto_feeds::market_data::{AllMarketData, Exchange, MarketDataCollection};
+use crypto_feeds::market_data::{AllMarketData, MarketDataCollection};
 use crypto_feeds::symbol_registry::{REGISTRY, SymbolId};
 use crypto_feeds::market_data::InstrumentType;
 
@@ -23,17 +23,10 @@ struct SampleTarget {
 }
 
 fn build_targets(cfg: &AppConfig, market_data: &AllMarketData) -> Vec<SampleTarget> {
-    let exchanges: &[(&str, Exchange, &Arc<MarketDataCollection>)] = &[
-        ("binance", Exchange::Binance, &market_data.binance),
-        ("coinbase", Exchange::Coinbase, &market_data.coinbase),
-        ("bybit", Exchange::Bybit, &market_data.bybit),
-        ("okx", Exchange::Okx, &market_data.okx),
-        ("kraken", Exchange::Kraken, &market_data.kraken),
-    ];
-
     let mut targets = Vec::new();
 
-    for &(name, _, ref coll) in exchanges {
+    for (exchange, coll) in market_data.iter() {
+        let name = exchange.as_str();
         // Spot symbols
         if let Some(syms) = cfg.spot.get(name) {
             for raw in syms {

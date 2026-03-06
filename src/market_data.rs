@@ -93,6 +93,27 @@ pub enum Exchange {
     Uniswap,
 }
 
+impl Exchange {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Exchange::Binance => "binance",
+            Exchange::Coinbase => "coinbase",
+            Exchange::Bybit => "bybit",
+            Exchange::Kraken => "kraken",
+            Exchange::Lighter => "lighter",
+            Exchange::Mexc => "mexc",
+            Exchange::Extended => "extended",
+            Exchange::Nado => "nado",
+            Exchange::Okx => "okx",
+            Exchange::Kucoin => "kucoin",
+            Exchange::Bingx => "bingx",
+            Exchange::Apex => "apex",
+            Exchange::Aerodrome => "aerodrome",
+            Exchange::Uniswap => "uniswap",
+        }
+    }
+}
+
 impl AllMarketData {
     pub fn iter(&self) -> impl Iterator<Item = (Exchange, &Arc<MarketDataCollection>)> {
         use Exchange::*;
