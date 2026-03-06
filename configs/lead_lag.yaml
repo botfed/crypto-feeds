@@ -1,4 +1,4 @@
-sample_interval_ms: 10
+sample_interval_ms: 100
 
 spot:
   binance:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "CLANKER_USDT", "SPX_USDT"]
