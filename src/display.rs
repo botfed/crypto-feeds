@@ -297,23 +297,23 @@ fn write_header(buf: &mut String, has_analytics: bool) {
     if has_analytics {
         let _ = writeln!(
             buf,
-            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10} {:>5}",
+            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>5} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10}",
             "Symbol", "Mid", "Bid", "BidQty", "Ask", "AskQty",
+            "Age",
             "ELp50", "ELp9999", "RLp50", "RLp9999",
             "TWAP(10s)", "Sprd", "MdnSprd(1h)", "Vol(60s)", "MaxJmp(1h@100ms)",
             "MdnRng(1s)", "P99Rng(1s)",
             "BidFl/hr", "BidN", "BidMkout", "AskFl/hr", "AskN", "AskMkout",
-            "Age",
         );
         let _ = writeln!(
             buf,
-            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10} {:>5}",
+            "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>5} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10}",
             "", "", "", "", "", "",
+            "(ms)",
             "(ms,1h)", "(ms,1h)", "(ms,1h)", "(ms,1h)",
             "", "(bps)", "(bps)", "(bps/s)", "(bps)",
             "(bps,1h)", "(bps,1h)",
             "@p99/2", "", "(bps)", "@p99/2", "", "(bps)",
-            "(ms)",
         );
     } else {
         let _ = writeln!(
@@ -374,7 +374,7 @@ pub fn write_market_collection(
         };
 
         let age = md
-            .and_then(|m| m.received_ts)
+            .and_then(|m| m.exchange_ts)
             .map(|t| format!("{}", (now - t).num_milliseconds().max(0)))
             .unwrap_or_else(|| "-".into());
 
@@ -435,13 +435,14 @@ pub fn write_market_collection(
 
             let _ = writeln!(
                 buf,
-                "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10} {:>5}",
+                "  {:<20} {:>14} {:>14} {:>10} {:>14} {:>10} {:>5} {:>8} {:>8} {:>8} {:>8} {:>14} {:>8} {:>10} {:>10} {:>16} {:>12} {:>12} {:>10} {:>6} {:>10} {:>10} {:>6} {:>10}",
                 sym,
                 fmt_f6(mid),
                 fmt_f6(bid),
                 fmt_f2(bid_qty),
                 fmt_f6(ask),
                 fmt_f2(ask_qty),
+                age,
                 fmt_f1(el_p50),
                 fmt_f1(el_p9999),
                 fmt_f1(rl_p50),
@@ -459,7 +460,6 @@ pub fn write_market_collection(
                 fmt_f2(ask_fills_hr),
                 fmt_f0(ask_n_fills),
                 fmt_f2(ask_mkout),
-                age,
             );
         } else {
             let (e_lat, r_lat) = match md {
