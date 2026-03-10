@@ -65,6 +65,7 @@ pub struct AllMarketData {
     pub kucoin: Arc<MarketDataCollection>,
     pub bingx: Arc<MarketDataCollection>,
     pub apex: Arc<MarketDataCollection>,
+    pub hyperliquid: Arc<MarketDataCollection>,
     pub aerodrome: Arc<MarketDataCollection>,
     pub uniswap: Arc<MarketDataCollection>,
 }
@@ -76,6 +77,7 @@ impl std::fmt::Debug for AllMarketData {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum Exchange {
     Binance,
     Coinbase,
@@ -89,6 +91,7 @@ pub enum Exchange {
     Kucoin,
     Bingx,
     Apex,
+    Hyperliquid,
     Aerodrome,
     Uniswap,
 }
@@ -108,8 +111,30 @@ impl Exchange {
             Exchange::Kucoin => "kucoin",
             Exchange::Bingx => "bingx",
             Exchange::Apex => "apex",
+            Exchange::Hyperliquid => "hyperliquid",
             Exchange::Aerodrome => "aerodrome",
             Exchange::Uniswap => "uniswap",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "binance" => Some(Exchange::Binance),
+            "coinbase" => Some(Exchange::Coinbase),
+            "bybit" => Some(Exchange::Bybit),
+            "kraken" => Some(Exchange::Kraken),
+            "lighter" => Some(Exchange::Lighter),
+            "mexc" => Some(Exchange::Mexc),
+            "extended" => Some(Exchange::Extended),
+            "nado" => Some(Exchange::Nado),
+            "okx" => Some(Exchange::Okx),
+            "kucoin" => Some(Exchange::Kucoin),
+            "bingx" => Some(Exchange::Bingx),
+            "apex" => Some(Exchange::Apex),
+            "hyperliquid" => Some(Exchange::Hyperliquid),
+            "aerodrome" => Some(Exchange::Aerodrome),
+            "uniswap" => Some(Exchange::Uniswap),
+            _ => None,
         }
     }
 }
@@ -130,6 +155,7 @@ impl AllMarketData {
             (Kucoin, &self.kucoin),
             (Bingx, &self.bingx),
             (Apex, &self.apex),
+            (Hyperliquid, &self.hyperliquid),
             (Aerodrome, &self.aerodrome),
             (Uniswap, &self.uniswap),
         ]
@@ -150,6 +176,7 @@ impl AllMarketData {
             Exchange::Kucoin => &self.kucoin,
             Exchange::Bingx => &self.bingx,
             Exchange::Apex => &self.apex,
+            Exchange::Hyperliquid => &self.hyperliquid,
             Exchange::Aerodrome => &self.aerodrome,
             Exchange::Uniswap => &self.uniswap,
         }
@@ -172,6 +199,7 @@ impl AllMarketData {
             kucoin: new_coll(),
             bingx: new_coll(),
             apex: new_coll(),
+            hyperliquid: new_coll(),
             aerodrome: new_coll(),
             uniswap: new_coll(),
         }

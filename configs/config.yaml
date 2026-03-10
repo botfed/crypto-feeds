@@ -33,3 +33,4 @@ perp:
   lighter:  ['BTC_USDC', "UNI_USDC"]
   extended: ['BTC_USD', 'ETH_USD', 'UNI_USD']
   nado:     ['BTC_USDT', 'ETH_USDT', 'UNI_USDT']
+  hyperliquid: ['BTC_USDC', 'ETH_USDC']

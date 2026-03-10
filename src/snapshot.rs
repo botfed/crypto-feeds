@@ -94,6 +94,7 @@ pub struct AllSnapshotData {
     pub kucoin: Arc<SnapshotCollection>,
     pub bingx: Arc<SnapshotCollection>,
     pub apex: Arc<SnapshotCollection>,
+    pub hyperliquid: Arc<SnapshotCollection>,
     pub aerodrome: Arc<SnapshotCollection>,
     pub uniswap: Arc<SnapshotCollection>,
 }
@@ -120,6 +121,7 @@ impl AllSnapshotData {
             kucoin: new_coll(),
             bingx: new_coll(),
             apex: new_coll(),
+            hyperliquid: new_coll(),
             aerodrome: new_coll(),
             uniswap: new_coll(),
         }
@@ -139,6 +141,7 @@ impl AllSnapshotData {
             Exchange::Kucoin => &self.kucoin,
             Exchange::Bingx => &self.bingx,
             Exchange::Apex => &self.apex,
+            Exchange::Hyperliquid => &self.hyperliquid,
             Exchange::Aerodrome => &self.aerodrome,
             Exchange::Uniswap => &self.uniswap,
         }
@@ -159,6 +162,7 @@ impl AllSnapshotData {
             (Kucoin, &self.kucoin),
             (Bingx, &self.bingx),
             (Apex, &self.apex),
+            (Hyperliquid, &self.hyperliquid),
             (Aerodrome, &self.aerodrome),
             (Uniswap, &self.uniswap),
         ]
@@ -166,7 +170,7 @@ impl AllSnapshotData {
     }
 }
 
-const NUM_EXCHANGES: usize = 14;
+const NUM_EXCHANGES: usize = 15;
 
 fn exchange_index(exchange: &Exchange) -> usize {
     match exchange {
@@ -182,8 +186,9 @@ fn exchange_index(exchange: &Exchange) -> usize {
         Exchange::Kucoin => 9,
         Exchange::Bingx => 10,
         Exchange::Apex => 11,
-        Exchange::Aerodrome => 12,
-        Exchange::Uniswap => 13,
+        Exchange::Hyperliquid => 12,
+        Exchange::Aerodrome => 13,
+        Exchange::Uniswap => 14,
     }
 }
 

@@ -8,6 +8,7 @@ pub mod market_data;
 pub mod orderbook;
 pub mod display;
 pub mod snapshot;
+pub mod fair_price;
 pub mod analytics;
 pub mod onchain;
 

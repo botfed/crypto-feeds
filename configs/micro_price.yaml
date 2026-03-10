@@ -1,6 +1,6 @@
 tau: 0.1
 relative: true
-fit_timestamp: '2026-03-06T22:02:13Z'
+fit_timestamp: '2026-03-07T02:27:10Z'
 models:
   AIXBT:
     venues:
@@ -8,16 +8,22 @@ models:
     - okx|SPOT-AIXBT-USDT
     - okx|PERP-AIXBT-USDT
     - binance|PERP-AIXBT-USDT
+    - bingx|PERP-AIXBT-USDT
+    - kucoin|PERP-AIXBT-USDT
     fresh_shares:
-    - 0.652716
-    - 0.068246
-    - 0.001515
-    - 0.277523
+    - 0.36317
+    - 0.026851
+    - 7.5e-05
+    - 0.609389
+    - 6.5e-05
+    - 0.000451
     betas:
-    - 20.0
-    - 0.1
     - 0.0
+    - 0.0
+    - 0.0
+    - 3.0
     - 20.0
+    - 0.0
   BTC:
     venues:
     - coinbase|SPOT-BTC-USD
@@ -27,21 +33,30 @@ models:
     - bybit|PERP-BTC-USDT
     - okx|SPOT-BTC-USDT
     - okx|PERP-BTC-USDT
+    - bingx|PERP-BTC-USDT
+    - kucoin|PERP-BTC-USDT
+    - apex|PERP-BTC-USDT
     fresh_shares:
-    - 0.452715
-    - 0.467108
-    - 0.062093
-    - 0.000784
-    - 0.010738
-    - 0.006503
-    - 5.9e-05
+    - 0.887907
+    - 0.007066
+    - 0.071328
+    - 0.000232
+    - 5.0e-06
+    - 0.019329
+    - 0.01084
+    - 0.000134
+    - 0.002848
+    - 0.000311
     betas:
     - 0.0
-    - 1.566569
-    - 0.016223
-    - 0.123626
+    - 2.090325
     - 0.0
-    - 1.209461
+    - 0.067496
+    - 24.89228
+    - 0.084796
+    - 0.07552
+    - 0.0
+    - 0.0
     - 0.0
   CLANKER:
     venues:
@@ -50,18 +65,24 @@ models:
     - bybit|PERP-CLANKER-USDT
     - kraken|SPOT-CLANKER-USD
     - binance|PERP-CLANKER-USDT
+    - bingx|PERP-CLANKER-USDT
+    - kucoin|PERP-CLANKER-USDT
     fresh_shares:
-    - 0.97324
-    - 0.000615
-    - 0.004711
-    - 0.0
-    - 0.021433
+    - 0.999604
+    - 0.000142
+    - 0.00019
+    - 1.0e-06
+    - 1.5e-05
+    - 5.0e-06
+    - 4.3e-05
     betas:
-    - 1.0
-    - 1.0
-    - 0.56761
-    - 0.07037
-    - 2.825507
+    - 0.0
+    - 0.99426
+    - 0.0
+    - 0.638894
+    - 0.0
+    - 3.878311
+    - 0.543235
   ETH:
     venues:
     - coinbase|SPOT-ETH-USD
@@ -72,24 +93,49 @@ models:
     - okx|SPOT-ETH-USDT
     - okx|PERP-ETH-USDT
     - kraken|SPOT-ETH-USD
+    - bingx|PERP-ETH-USDT
+    - kucoin|PERP-ETH-USDT
     fresh_shares:
-    - 0.734868
-    - 0.022207
-    - 0.221005
-    - 0.000698
-    - 0.010541
-    - 0.00963
-    - 0.001021
-    - 2.9e-05
+    - 0.875487
+    - 0.007241
+    - 0.092542
+    - 0.000119
+    - 0.015226
+    - 0.000745
+    - 0.007353
+    - 0.000477
+    - 0.000811
+    - 0.0
     betas:
     - 0.0
-    - 2.097743
+    - 5.061034
     - 0.0
-    - 0.151043
+    - 0.282347
     - 0.0
-    - 0.494682
-    - 4.959466
-    - 1.339543
+    - 0.075679
+    - 18.978172
+    - 0.122883
+    - 0.0
+    - 0.0
+  KAITO:
+    venues:
+    - coinbase|PERP-KAITO-USD
+    - coinbase|SPOT-KAITO-USD
+    - apex|PERP-KAITO-USDT
+    - bingx|PERP-KAITO-USDT
+    - binance|PERP-KAITO-USDT
+    fresh_shares:
+    - 0.994714
+    - 0.000714
+    - 0.000109
+    - 0.000414
+    - 0.004048
+    betas:
+    - 1.0
+    - 0.0
+    - 0.0
+    - 0.1
+    - 0.0
   SPX:
     venues:
     - coinbase|SPOT-SPX-USD
@@ -98,17 +144,26 @@ models:
     - bybit|PERP-SPX-USDT
     - okx|PERP-SPX-USDT
     - kraken|SPOT-SPX-USD
+    - bingx|PERP-SPX-USDT
+    - kucoin|PERP-SPX-USDT
+    - apex|PERP-SPX-USDT
     fresh_shares:
-    - 0.95321
-    - 0.001938
-    - 0.030944
-    - 0.010828
-    - 0.00261
-    - 0.000469
+    - 0.978708
+    - 0.000185
+    - 0.012806
+    - 0.001105
+    - 8.0e-06
+    - 0.003415
+    - 0.000708
+    - 0.003058
+    - 6.0e-06
     betas:
     - 0.0
-    - 3.0
     - 0.0
     - 0.0
-    - 2.0
+    - 20.0
+    - 0.0
+    - 0.0
+    - 20.0
+    - 0.0
     - 0.0

@@ -10,4 +10,5 @@ pub mod okx;
 pub mod kucoin;
 pub mod bingx;
 pub mod apex;
+pub mod hyperliquid;
 pub mod connection;

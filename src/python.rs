@@ -1,5 +1,9 @@
 use crate::analytics::{Analytics, QuoteSide, RangeStat, SnapshotField};
 use crate::app_config::{AppConfig, load_config, load_perp, load_spot};
+use crate::fair_price::{
+    FairPriceConfig, FairPriceGroupConfig, FairPriceOutput, FairPriceOutputs, FairQuote,
+    GarchParams, GroupMember, RecalibConfig, run_fair_price_task,
+};
 use crate::market_data::{AllMarketData, Exchange, InstrumentType, MarketDataCollection};
 use crate::snapshot::{AllSnapshotData, SnapshotConfig, run_snapshot_task};
 use crate::symbol_registry::{SymbolId, REGISTRY};
@@ -28,6 +32,7 @@ fn parse_exchange(exchange: &str) -> PyResult<Exchange> {
         "kucoin" => Ok(Exchange::Kucoin),
         "bingx" => Ok(Exchange::Bingx),
         "apex" => Ok(Exchange::Apex),
+        "hyperliquid" => Ok(Exchange::Hyperliquid),
         "uniswap" => Ok(Exchange::Uniswap),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Unknown exchange: {}",
@@ -543,6 +548,265 @@ impl PyAnalytics {
 }
 
 #[pyclass]
+pub struct PyFairPrice {
+    outputs: Arc<FairPriceOutputs>,
+    tick_data: Arc<AllMarketData>,
+}
+
+#[pymethods]
+impl PyFairPrice {
+    /// Get the latest fair price output for a group.
+    fn latest(&self, group_name: &str, py: Python) -> PyResult<Option<PyObject>> {
+        let idx = self
+            .outputs
+            .find_group(group_name)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("Unknown group: {}", group_name)))?;
+        match self.outputs.latest(idx) {
+            Some(fp) => Ok(Some(fair_price_to_dict(py, &fp)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Get the last N fair price outputs for a group (newest first).
+    fn history(&self, group_name: &str, n: usize, py: Python) -> PyResult<PyObject> {
+        let idx = self
+            .outputs
+            .find_group(group_name)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("Unknown group: {}", group_name)))?;
+        let list = PyList::empty_bound(py);
+        if let Some(ring) = self.outputs.get_buffer(idx) {
+            let mut scratch = vec![FairPriceOutput::default(); n];
+            let count = ring.read_last_n(n, &mut scratch);
+            for i in 0..count {
+                list.append(fair_price_to_dict(py, &scratch[i])?)?;
+            }
+        }
+        Ok(list.into())
+    }
+
+    /// Get just the latest fair price value for a group.
+    fn latest_price(&self, group_name: &str) -> PyResult<Option<f64>> {
+        let idx = self
+            .outputs
+            .find_group(group_name)
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("Unknown group: {}", group_name)))?;
+        Ok(self.outputs.latest(idx).map(|fp| fp.fair_price))
+    }
+
+    /// Get full quoting context for a specific exchange-symbol within a group.
+    ///
+    /// Returns fair price adjusted for this exchange's bias, raw book data,
+    /// edge in bps, and projected uncertainty at the given horizon.
+    #[pyo3(signature = (group_name, exchange, symbol_id, horizon_ms=0.0))]
+    fn get_fair_quote(
+        &self,
+        group_name: &str,
+        exchange: &str,
+        symbol_id: SymbolId,
+        horizon_ms: f64,
+        py: Python,
+    ) -> PyResult<Option<PyObject>> {
+        let ex = parse_exchange(exchange)?;
+        match self
+            .outputs
+            .get_fair_quote(&self.tick_data, group_name, &ex, symbol_id, horizon_ms)
+        {
+            Some(q) => {
+                let dict = PyDict::new_bound(py);
+                dict.set_item("fair_price", q.fair_price)?;
+                dict.set_item("fair_at_exchange", q.fair_at_exchange)?;
+                dict.set_item("mid_at_exchange", q.mid_at_exchange)?;
+                dict.set_item("uncertainty_bps", q.uncertainty_bps)?;
+                dict.set_item("uncertainty_at_horizon_bps", q.uncertainty_at_horizon_bps)?;
+                dict.set_item("vol_bps", q.vol_bps)?;
+                dict.set_item("bid", q.bid)?;
+                dict.set_item("ask", q.ask)?;
+                dict.set_item("bid_qty", q.bid_qty)?;
+                dict.set_item("ask_qty", q.ask_qty)?;
+                dict.set_item("exchange_ts_ns", q.exchange_ts_ns)?;
+                dict.set_item("edge_bid_bps", q.edge_bid_bps)?;
+                dict.set_item("edge_ask_bps", q.edge_ask_bps)?;
+                dict.set_item("edge_mid_bps", q.edge_mid_bps)?;
+                dict.set_item("bias", q.bias)?;
+                dict.set_item("noise_var", q.noise_var)?;
+                Ok(Some(dict.into()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// List all group names.
+    fn groups(&self) -> Vec<String> {
+        self.outputs.group_names().to_vec()
+    }
+}
+
+fn fair_price_to_dict(py: Python, fp: &FairPriceOutput) -> PyResult<PyObject> {
+    let dict = PyDict::new_bound(py);
+    dict.set_item("fair_price", fp.fair_price)?;
+    dict.set_item("log_fair_price", fp.log_fair_price)?;
+    dict.set_item("uncertainty_bps", fp.uncertainty_bps)?;
+    dict.set_item("vol_bps", fp.vol_bps)?;
+    dict.set_item("snap_ts_ns", fp.snap_ts_ns)?;
+    dict.set_item("n_ticks_used", fp.n_ticks_used)?;
+    Ok(dict.into())
+}
+
+fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
+    let interval_ms: u64 = dict
+        .get_item("interval_ms")?
+        .map(|v| v.extract())
+        .transpose()?
+        .unwrap_or(100);
+
+    let buffer_capacity: usize = dict
+        .get_item("buffer_capacity")?
+        .map(|v| v.extract())
+        .transpose()?
+        .unwrap_or(65536);
+
+    let groups_list = dict
+        .get_item("groups")?
+        .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'groups' key"))?;
+    let groups_list: &Bound<PyList> = groups_list.downcast()?;
+
+    let mut groups = Vec::new();
+    for group_obj in groups_list.iter() {
+        let gd: &Bound<PyDict> = group_obj.downcast()?;
+
+        let name: String = gd
+            .get_item("name")?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'name'"))?
+            .extract()?;
+
+        let members_list = gd
+            .get_item("members")?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'members'"))?;
+        let members_list: &Bound<PyList> = members_list.downcast()?;
+
+        let mut members = Vec::new();
+        for mem_obj in members_list.iter() {
+            let md: &Bound<PyDict> = mem_obj.downcast()?;
+
+            let exchange_str: String = md
+                .get_item("exchange")?
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'exchange'"))?
+                .extract()?;
+            let exchange = parse_exchange(&exchange_str)?;
+
+            let symbol_id: SymbolId = md
+                .get_item("symbol_id")?
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'symbol_id'"))?
+                .extract()?;
+
+            let bias: f64 = md
+                .get_item("bias")?
+                .map(|v| v.extract())
+                .transpose()?
+                .unwrap_or(0.0);
+
+            let noise_var: f64 = md
+                .get_item("noise_var")?
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'noise_var'"))?
+                .extract()?;
+
+            let reprice_group: Option<String> = md
+                .get_item("reprice_group")?
+                .filter(|v| !v.is_none())
+                .map(|v| v.extract())
+                .transpose()?;
+
+            let invert_reprice: bool = md
+                .get_item("invert_reprice")?
+                .map(|v| v.extract())
+                .transpose()?
+                .unwrap_or(false);
+
+            members.push(GroupMember {
+                exchange,
+                symbol_id,
+                bias,
+                noise_var,
+                reprice_group,
+                invert_reprice,
+            });
+        }
+
+        let garch_alpha: f64 = gd
+            .get_item("garch_alpha")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(0.05);
+
+        let garch_beta: f64 = gd
+            .get_item("garch_beta")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(0.90);
+
+        let initial_var: f64 = gd
+            .get_item("initial_var")?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'initial_var'"))?
+            .extract()?;
+
+        let vol_halflife: u32 = gd
+            .get_item("vol_halflife")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(5000);
+
+        let process_noise_floor: f64 = gd
+            .get_item("process_noise_floor")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(1e-14);
+
+        // Parse optional ruler recalibration config
+        let recalib = if let Some(rc_obj) = gd.get_item("recalib")?.filter(|v| !v.is_none()) {
+            let rc: &Bound<PyDict> = rc_obj.downcast()?;
+            Some(RecalibConfig {
+                recalibrate_every: rc
+                    .get_item("recalibrate_every")?
+                    .map(|v| v.extract())
+                    .transpose()?
+                    .unwrap_or(1000),
+                prior_weight: rc
+                    .get_item("prior_weight")?
+                    .map(|v| v.extract())
+                    .transpose()?
+                    .unwrap_or(500.0),
+                ruler_halflife: rc
+                    .get_item("ruler_halflife")?
+                    .map(|v| v.extract())
+                    .transpose()?
+                    .unwrap_or(5000),
+            })
+        } else {
+            None
+        };
+
+        groups.push(FairPriceGroupConfig {
+            name,
+            members,
+            garch: GarchParams {
+                alpha: garch_alpha,
+                beta: garch_beta,
+                initial_var,
+                vol_halflife,
+            },
+            process_noise_floor,
+            recalib,
+        });
+    }
+
+    Ok(FairPriceConfig {
+        interval_ms,
+        buffer_capacity,
+        groups,
+    })
+}
+
+#[pyclass]
 pub struct PyAppConfig {
     config: AppConfig,
 }
@@ -615,6 +879,8 @@ pub struct PyFeedManager {
     spot_handles: Vec<JoinHandle<()>>,
     analytics: Option<Py<PyAnalytics>>,
     snapshot_handle: Option<JoinHandle<()>>,
+    fair_price_handle: Option<JoinHandle<()>>,
+    fair_price: Option<Py<PyFairPrice>>,
 }
 
 #[pymethods]
@@ -636,6 +902,8 @@ impl PyFeedManager {
             spot_handles: Vec::new(),
             analytics: None,
             snapshot_handle: None,
+            fair_price_handle: None,
+            fair_price: None,
         })
     }
 
@@ -727,6 +995,62 @@ impl PyFeedManager {
         Ok(self.market_data.clone_ref(py))
     }
 
+    /// Start the fair price engine.
+    ///
+    /// Args:
+    ///     config: dict with keys:
+    ///         interval_ms (int, default 100),
+    ///         buffer_capacity (int, default 65536),
+    ///         groups: list of dicts, each with:
+    ///             name (str),
+    ///             members: list of {exchange, symbol_id, noise_var, bias?},
+    ///             garch_alpha (float, default 0.05),
+    ///             garch_beta (float, default 0.90),  # α+β=1 → EWMA
+    ///             initial_var (float, required),
+    ///             vol_halflife (int, default 5000) — EWMA halflife for σ̄²,
+    ///             process_noise_floor (float, default 1e-14),
+    ///             recalib (dict, optional) — ruler param recalib: {
+    ///                 recalibrate_every (int, default 1000),
+    ///                 prior_weight (float, default 500.0),
+    ///                 ruler_halflife (int, default 5000)
+    ///             }
+    fn start_fair_price(&mut self, py: Python, config: &Bound<PyDict>) -> PyResult<()> {
+        if self.fair_price_handle.is_some() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Fair price already started",
+            ));
+        }
+
+        let fp_config = parse_fair_price_config(config)?;
+
+        let market_data_ref = self.market_data.borrow(py);
+        let tick_data = market_data_ref.get_arc();
+
+        let outputs = Arc::new(FairPriceOutputs::new(&fp_config));
+        let outputs_clone = Arc::clone(&outputs);
+        let shutdown = Arc::clone(&self.shutdown);
+        let tick_data_for_query = Arc::clone(&tick_data);
+
+        let handle = self
+            .runtime
+            .spawn(run_fair_price_task(tick_data, outputs_clone, fp_config, shutdown));
+
+        self.fair_price_handle = Some(handle);
+        self.fair_price = Some(Py::new(
+            py,
+            PyFairPrice {
+                outputs,
+                tick_data: tick_data_for_query,
+            },
+        )?);
+
+        Ok(())
+    }
+
+    fn get_fair_price(&self, py: Python) -> PyResult<Option<Py<PyFairPrice>>> {
+        Ok(self.fair_price.as_ref().map(|fp| fp.clone_ref(py)))
+    }
+
     fn shutdown(&self) {
         self.shutdown.notify_waiters();
     }
@@ -740,5 +1064,6 @@ fn crypto_feeds(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAppConfig>()?;
     m.add_class::<PyFeedManager>()?;
     m.add_class::<PyAnalytics>()?;
+    m.add_class::<PyFairPrice>()?;
     Ok(())
 }

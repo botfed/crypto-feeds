@@ -304,5 +304,15 @@ pub fn load_perp(
             }
         }));
     }
+    if let Some(syms) = perp_syms("hyperliquid") {
+        let data = Arc::clone(&market_data.hyperliquid);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = hyperliquid::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("Hyperliquid perp listener exited with error {:?}", e);
+            }
+        }));
+    }
     Ok(())
 }
