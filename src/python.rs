@@ -1033,7 +1033,7 @@ impl PyFeedManager {
 
         let handle = self
             .runtime
-            .spawn(run_fair_price_task(tick_data, outputs_clone, fp_config, shutdown));
+            .spawn(run_fair_price_task(tick_data, outputs_clone, fp_config, shutdown, None));
 
         self.fair_price_handle = Some(handle);
         self.fair_price = Some(Py::new(

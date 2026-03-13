@@ -17,6 +17,60 @@ use crypto_feeds::fair_price::{
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType};
 use crypto_feeds::symbol_registry::REGISTRY;
 
+const CACHE_PATH: &str = "/tmp/fair_price_cache.json";
+
+/// Cache key: "group/exchange/symbol_id"
+type ParamCache = HashMap<String, (f64, f64)>;
+
+fn cache_key(group: &str, exchange: &str, symbol_id: usize) -> String {
+    format!("{}/{}/{}", group, exchange, symbol_id)
+}
+
+fn load_cache() -> ParamCache {
+    match std::fs::read_to_string(CACHE_PATH) {
+        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn save_cache(outputs: &FairPriceOutputs) {
+    let mut cache = ParamCache::new();
+    for (group_idx, group_name) in outputs.group_names().iter().enumerate() {
+        if let Some(members) = outputs.group_members(group_idx) {
+            for (mem_idx, member) in members.iter().enumerate() {
+                if let Some((bias, noise_var)) = outputs.get_member_params(group_idx, mem_idx) {
+                    let key = cache_key(group_name, member.exchange.as_str(), member.symbol_id);
+                    cache.insert(key, (bias, noise_var));
+                }
+            }
+        }
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&cache) {
+        if let Err(e) = std::fs::write(CACHE_PATH, json) {
+            log::warn!("Failed to write param cache: {}", e);
+        } else {
+            log::info!("Saved param cache to {}", CACHE_PATH);
+        }
+    }
+}
+
+fn apply_cache(groups: &mut [FairPriceGroupConfig], cache: &ParamCache) {
+    let mut applied = 0;
+    for group in groups.iter_mut() {
+        for member in &mut group.members {
+            let key = cache_key(&group.name, member.exchange.as_str(), member.symbol_id);
+            if let Some(&(bias, noise_var)) = cache.get(&key) {
+                member.bias = bias;
+                member.noise_var = noise_var;
+                applied += 1;
+            }
+        }
+    }
+    if applied > 0 {
+        log::info!("Loaded {} cached params from {}", applied, CACHE_PATH);
+    }
+}
+
 const ALT_SCREEN_ON: &str = "\x1B[?1049h";
 const ALT_SCREEN_OFF: &str = "\x1B[?1049l";
 const CURSOR_HOME: &str = "\x1B[H";
@@ -72,7 +126,10 @@ fn best_arb(
             if best.as_ref().map_or(true, |b| buy_profit > b.profit_bps) {
                 best = Some(ArbResult {
                     dir: "BUY",
-                    leg2: format!("{}/{}", &ex_name[..ex_name.len().min(4)], sym_name),
+                    leg2: {
+                                    let s = format!("{}/{}", &ex_name[..ex_name.len().min(5)], sym_name);
+                                    if s.len() > 20 { s[..20].to_string() } else { s }
+                                },
                     profit_bps: buy_profit,
                 });
             }
@@ -84,7 +141,10 @@ fn best_arb(
             if best.as_ref().map_or(true, |b| sell_profit > b.profit_bps) {
                 best = Some(ArbResult {
                     dir: "SELL",
-                    leg2: format!("{}/{}", &ex_name[..ex_name.len().min(4)], sym_name),
+                    leg2: {
+                                    let s = format!("{}/{}", &ex_name[..ex_name.len().min(5)], sym_name);
+                                    if s.len() > 20 { s[..20].to_string() } else { s }
+                                },
                     profit_bps: sell_profit,
                 });
             }
@@ -225,7 +285,7 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 exchange,
                 symbol_id,
                 bias: 0.0,
-                noise_var: 1e-6, // 10 bps
+                noise_var: 4e-8, // 2 bps
                 reprice_group: reprice.clone(),
                 invert_reprice: reprice.is_some(),
             });
@@ -303,8 +363,8 @@ async fn run_display(
 
                     let _ = writeln!(
                         buf,
-                        "========== Fair Price Engine ==========  uptime: {:02}:{:02}:{:02}  last_recalib: {}",
-                        h, m, sec,
+                        "========== Fair Price Engine ==========  uptime: {:02}:{:02}:{:02}  tick: {}ms  last_recalib: {}",
+                        h, m, sec, out.interval_ms() as u64,
                         {
                             let best_ns = (0..out.group_names().len())
                                 .map(|i| out.last_recalib_ns(i))
@@ -350,23 +410,24 @@ async fn run_display(
                         let _ = writeln!(buf);
                         let _ = writeln!(
                             buf,
-                            "--- {} --- fair: {}  P_unc_now: {} bps  P_unc_100ms: {} bps  vol: {} bps  ticks: {}  age: {}",
+                            "--- {} --- fair: {}  P_unc0: {} bps  P_unc1: {} bps  vol: {} bps/\u{221A}tick  ticks: {}  age: {}",
                             group_name, fair_str, unc_now_str, unc_100_str, vol_str, ticks_str, age_str
                         );
 
                         // Header
                         macro_rules! row {
                             ($buf:expr, $($arg:expr),* $(,)?) => {
-                                writeln!($buf, "  {:<10} {:<28} {:>12} {:>12} {:>8} {:>8} {:>8} {:>8} {:>12} {:>12} {:>10} {:>10} {:>5} {:>24} {:>8}", $($arg),*)
+                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>7} {:>7} {:>4} {:<20} {:>7}", $($arg),*)
                             }
                         }
                         let _ = row!(buf,
-                            "Exchange", "Symbol", "Mid@Ex", "Fair@Ex",
+                            "Xchg", "Symbol", "Mid@Ex", "Fair@Ex",
                             "EdgMid",
                             "HSprd",
                             "EdgBid", "EdgAsk",
                             "BidQty", "AskQty",
                             "m_k", "sigma_k",
+                            "P_unc0", "P_unc1", "Age",
                             "Arb", "ArbLeg2", "ArbBps",
                         );
                         let _ = row!(buf,
@@ -376,6 +437,7 @@ async fn run_display(
                             "(bps)", "(bps)",
                             "", "",
                             "(bps)", "(bps)",
+                            "(bps)", "(bps)", "(ms)",
                             "", "", "(bps)",
                         );
 
@@ -419,7 +481,8 @@ async fn run_display(
 
                             // 4. Render rows
                             for (row_idx, (quote, ex_name, sym_name, orig_mem_idx)) in row_data.iter().enumerate() {
-                                let sym_name = sym_name.as_str();
+                                let ex_name = &ex_name[..ex_name.len().min(5)];
+                                let sym_name = &sym_name[..sym_name.len().min(16)];
                                 let is_best = best_arb_idx == Some(row_idx);
                                 let color_on = if is_best { GREEN } else { "" };
                                 let color_off = if is_best { RESET } else { "" };
@@ -434,7 +497,19 @@ async fn run_display(
                                         let hspread_bps = (q.ask - q.bid) / q.mid_at_exchange * BPS / 2.0;
                                         let mk_bps = q.bias * BPS;
                                         let sk_bps = q.noise_var.sqrt() * BPS;
+                                        // Local exchange uncertainty: σ_k² + h * (age / interval)
+                                        // time-dilated from last exchange quote to now and now+100ms
+                                        let h = (q.vol_bps / BPS).powi(2);
+                                        let interval_ms = out.interval_ms();
+                                        let age_ms = if q.exchange_ts_ns > 0 {
+                                            (now_ns - q.exchange_ts_ns).max(0) as f64 / 1_000_000.0
+                                        } else {
+                                            0.0
+                                        };
+                                        let lcu0 = (q.noise_var + h * (age_ms / interval_ms)).sqrt() * BPS;
+                                        let lcu1 = (q.noise_var + h * ((age_ms + 100.0) / interval_ms)).sqrt() * BPS;
                                         let _ = write!(buf, "{}", color_on);
+                                        let age_str = format!("{:.0}", age_ms);
                                         let _ = row!(buf,
                                             ex_name,
                                             sym_name,
@@ -448,6 +523,9 @@ async fn run_display(
                                             fmt_qty(q.ask_qty),
                                             fmt_bps(mk_bps),
                                             fmt_bps(sk_bps),
+                                            fmt_bps(lcu0),
+                                            fmt_bps(lcu1),
+                                            age_str,
                                             arb_dir, arb_leg2, arb_bps,
                                         );
                                         let _ = write!(buf, "{}", color_off);
@@ -467,6 +545,7 @@ async fn run_display(
                                             "-", "-",
                                             fmt_bps(mk_bps),
                                             fmt_bps(sk_bps),
+                                            "-", "-", "-",
                                             "", "", "",
                                         );
                                     }
@@ -490,6 +569,13 @@ async fn run_display(
 #[tokio::main]
 async fn main() -> Result<()> {
     init_display_logger(log::LevelFilter::Info);
+
+    let clear_cache = std::env::args().any(|a| a == "--clear-cache");
+    if clear_cache {
+        let _ = std::fs::remove_file(CACHE_PATH);
+        log::info!("Cleared param cache");
+    }
+
     let cfg: AppConfig = load_config("configs/config.yaml").context("loading config.yaml")?;
 
     let market_data = Arc::new(AllMarketData::new());
@@ -502,11 +588,20 @@ async fn main() -> Result<()> {
     let _ = load_onchain(&mut handles, &cfg, &market_data, &shutdown);
 
     // Auto-discover fair price groups from config
-    let groups = auto_discover_groups(&cfg);
+    let mut groups = auto_discover_groups(&cfg);
     if groups.is_empty() {
         log::error!("No pricing groups discovered (need >= 2 members per base asset)");
         return Ok(());
     }
+
+    // Load cached m_k / sigma_k from previous run
+    if !clear_cache {
+        let cache = load_cache();
+        if !cache.is_empty() {
+            apply_cache(&mut groups, &cache);
+        }
+    }
+
     for g in &groups {
         log::info!(
             "Group '{}': {} members",
@@ -528,7 +623,7 @@ async fn main() -> Result<()> {
         let tick = Arc::clone(&market_data);
         let out = Arc::clone(&outputs);
         let sd = Arc::clone(&shutdown);
-        handles.push(tokio::spawn(run_fair_price_task(tick, out, fp_config, sd)));
+        handles.push(tokio::spawn(run_fair_price_task(tick, out, fp_config, sd, None)));
     }
 
     // Start display
@@ -544,6 +639,7 @@ async fn main() -> Result<()> {
     }
 
     signal::ctrl_c().await?;
+    save_cache(&outputs);
     shutdown.notify_waiters();
     tokio::time::timeout(Duration::from_secs(5), async {
         for h in handles {

@@ -1,6 +1,9 @@
 use crate::market_data::{AllMarketData, Exchange};
 use crate::ring_buffer::RingBuffer;
 use crate::symbol_registry::SymbolId;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use std::io::{BufWriter, Write as IoWrite};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -274,6 +277,10 @@ impl FairPriceOutputs {
         self.group_names.iter().position(|n| n == name)
     }
 
+    pub fn interval_ms(&self) -> f64 {
+        self.interval_ms
+    }
+
     pub fn group_names(&self) -> &[String] {
         &self.group_names
     }
@@ -399,6 +406,133 @@ fn blend(prior_val: f64, data_val: f64, prior_weight: f64, data_count: u64, effe
     (prior_weight * prior_val + w_data * data_val) / w_total
 }
 
+/// Diagnostic writer: records tick innovations, group snapshots, and recalib events
+/// to gzipped CSV files for offline statistical validation.
+pub struct DiagWriter {
+    tick_wtr: BufWriter<GzEncoder<std::fs::File>>,
+    group_wtr: BufWriter<GzEncoder<std::fs::File>>,
+    recalib_wtr: BufWriter<GzEncoder<std::fs::File>>,
+    row_count: u64,
+}
+
+impl DiagWriter {
+    pub fn new(output_dir: &str) -> std::io::Result<Self> {
+        std::fs::create_dir_all(output_dir)?;
+
+        let tick_file = std::fs::File::create(format!("{}/tick_innovations.csv.gz", output_dir))?;
+        let group_file = std::fs::File::create(format!("{}/group_snaps.csv.gz", output_dir))?;
+        let recalib_file =
+            std::fs::File::create(format!("{}/recalib_events.csv.gz", output_dir))?;
+
+        let mut tick_wtr = BufWriter::new(GzEncoder::new(tick_file, Compression::fast()));
+        let mut group_wtr = BufWriter::new(GzEncoder::new(group_file, Compression::fast()));
+        let mut recalib_wtr = BufWriter::new(GzEncoder::new(recalib_file, Compression::fast()));
+
+        writeln!(
+            tick_wtr,
+            "snap_ts_ns,tick_ts_ns,group_idx,member_idx,log_mid,innovation,s,kalman_gain,standardized_innov,p_pre"
+        )?;
+        writeln!(
+            group_wtr,
+            "snap_ts_ns,group_idx,y,y_prev,p,h,omega,ewma_r2,r2_corrected,n_ticks"
+        )?;
+        writeln!(
+            recalib_wtr,
+            "snap_ts_ns,group_idx,member_idx,bias_old,bias_new,noise_var_old,noise_var_new,total_obs"
+        )?;
+
+        Ok(Self {
+            tick_wtr,
+            group_wtr,
+            recalib_wtr,
+            row_count: 0,
+        })
+    }
+
+    #[inline]
+    fn write_tick(
+        &mut self,
+        snap_ts: i64,
+        tick_ts: i64,
+        gi: usize,
+        mi: usize,
+        log_mid: f64,
+        innov: f64,
+        s: f64,
+        k: f64,
+        z: f64,
+        p_pre: f64,
+    ) {
+        let _ = writeln!(
+            self.tick_wtr,
+            "{},{},{},{},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e}",
+            snap_ts, tick_ts, gi, mi, log_mid, innov, s, k, z, p_pre
+        );
+        self.row_count += 1;
+    }
+
+    #[inline]
+    fn write_group(
+        &mut self,
+        snap_ts: i64,
+        gi: usize,
+        y: f64,
+        y_prev: f64,
+        p: f64,
+        h: f64,
+        omega: f64,
+        ewma_r2: f64,
+        r2c: f64,
+        n_ticks: usize,
+    ) {
+        let _ = writeln!(
+            self.group_wtr,
+            "{},{},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{}",
+            snap_ts, gi, y, y_prev, p, h, omega, ewma_r2, r2c, n_ticks
+        );
+    }
+
+    #[inline]
+    fn write_recalib(
+        &mut self,
+        snap_ts: i64,
+        gi: usize,
+        mi: usize,
+        bias_old: f64,
+        bias_new: f64,
+        nv_old: f64,
+        nv_new: f64,
+        total_obs: u64,
+    ) {
+        let _ = writeln!(
+            self.recalib_wtr,
+            "{},{},{},{:.16e},{:.16e},{:.16e},{:.16e},{}",
+            snap_ts, gi, mi, bias_old, bias_new, nv_old, nv_new, total_obs
+        );
+    }
+
+    fn maybe_flush(&mut self) {
+        if self.row_count % 10_000 == 0 {
+            let _ = self.tick_wtr.flush();
+            let _ = self.group_wtr.flush();
+            let _ = self.recalib_wtr.flush();
+        }
+    }
+
+    pub fn finish(self) {
+        let gz = self.tick_wtr.into_inner().expect("flush tick BufWriter");
+        let _ = gz.finish();
+        let gz = self.group_wtr.into_inner().expect("flush group BufWriter");
+        let _ = gz.finish();
+        let gz = self
+            .recalib_wtr
+            .into_inner()
+            .expect("flush recalib BufWriter");
+        let _ = gz.finish();
+        log::info!("DiagWriter finalized ({} tick rows written)", self.row_count);
+    }
+}
+
 /// Main fair price loop. Reads raw ticks from `AllMarketData` ring buffers,
 /// runs a Kalman filter with GARCH(1,1) process noise, optionally recalibrates
 /// ruler parameters online, and pushes `FairPriceOutput` into per-group ring buffers.
@@ -407,6 +541,7 @@ pub async fn run_fair_price_task(
     outputs: Arc<FairPriceOutputs>,
     config: FairPriceConfig,
     shutdown: Arc<Notify>,
+    mut diag: Option<DiagWriter>,
 ) {
     let garch_persistence: Vec<f64> = config
         .groups
@@ -489,6 +624,9 @@ pub async fn run_fair_price_task(
             _ = interval.tick() => {}
             _ = &mut shutdown_fut => {
                 log::info!("Fair price task shutting down");
+                if let Some(dw) = diag {
+                    dw.finish();
+                }
                 return;
             }
         }
@@ -606,17 +744,35 @@ pub async fn run_fair_price_task(
                     state.p += q_per_tick;
 
                     // Update: observation = log_mid = y + bias + noise
+                    let p_pre = state.p;
                     let innovation = obs.log_mid - ms.bias - state.y;
                     let s = state.p + ms.noise_var;
                     let k = state.p / s;
+
+                    if let Some(ref mut dw) = diag {
+                        dw.write_tick(
+                            snap_ts_ns,
+                            obs.ts_ns,
+                            group_idx,
+                            obs.member_idx,
+                            obs.log_mid,
+                            innovation,
+                            s,
+                            k,
+                            innovation / s.sqrt(),
+                            p_pre,
+                        );
+                    }
+
                     state.y += k * innovation;
                     state.p *= 1.0 - k;
                 }
             }
 
             // ── 5. GARCH(1,1) update on snapshot return ────────────────
-            let r2_corrected = if !state.y_prev.is_nan() {
-                let r = state.y - state.y_prev;
+            let y_prev_snap = state.y_prev;
+            let r2_corrected = if !y_prev_snap.is_nan() {
+                let r = state.y - y_prev_snap;
                 let rc = (r * r - state.p).max(0.0);
                 state.h = (state.omega
                     + group_cfg.garch.alpha * rc
@@ -640,6 +796,22 @@ pub async fn run_fair_price_task(
                     state.omega = state.ewma_r2 * garch_persistence[group_idx];
                 }
                 state.snap_count += 1;
+            }
+
+            // ── 6b. Diagnostic: group-level snapshot ──────────────────
+            if let Some(ref mut dw) = diag {
+                dw.write_group(
+                    snap_ts_ns,
+                    group_idx,
+                    state.y,
+                    y_prev_snap,
+                    state.p,
+                    state.h,
+                    state.omega,
+                    state.ewma_r2,
+                    r2_corrected,
+                    n_ticks,
+                );
             }
 
             // ── 7. Ruler recalibration: m_k, σ_k² ─────────────────────
@@ -669,6 +841,9 @@ pub async fn run_fair_price_task(
                         let ms = &mut state.member_states[k];
                         let cfg_m = &group_cfg.members[k];
 
+                        let bias_old = ms.bias;
+                        let noise_var_old = ms.noise_var;
+
                         ms.bias = blend(
                             cfg_m.bias,
                             ms.ewma_residual,
@@ -685,6 +860,19 @@ pub async fn run_fair_price_task(
                             ms.total_obs,
                             effective_n,
                         );
+
+                        if let Some(ref mut dw) = diag {
+                            dw.write_recalib(
+                                snap_ts_ns,
+                                group_idx,
+                                k,
+                                bias_old,
+                                ms.bias,
+                                noise_var_old,
+                                ms.noise_var,
+                                ms.total_obs,
+                            );
+                        }
                     }
 
                     state.snaps_since_recalib = 0;
@@ -709,6 +897,10 @@ pub async fn run_fair_price_task(
                     _pad: 0,
                 },
             );
+
+            if let Some(ref mut dw) = diag {
+                dw.maybe_flush();
+            }
         }
     }
 }
@@ -818,6 +1010,7 @@ mod tests {
             outputs_clone,
             config,
             shutdown_clone,
+            None,
         ));
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
