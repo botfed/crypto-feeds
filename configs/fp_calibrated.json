@@ -1,0 +1,48 @@
+{
+  "calibrated_at": "2026-03-14T14:04:07Z",
+  "capture_hours": 0.2,
+  "groups": {
+    "AIXBT": {
+      "alpha": 0.031691,
+      "beta": 0.951106,
+      "initial_var": 4.885740033442868e-10,
+      "process_noise_floor": 4.885740033442868e-12,
+      "vol_halflife": 5000
+    },
+    "BTC": {
+      "alpha": 0.06697,
+      "beta": 0.902395,
+      "initial_var": 3.2340106688933404e-11,
+      "process_noise_floor": 3.2340106688933403e-13,
+      "vol_halflife": 5000
+    },
+    "CLANKER": {
+      "alpha": 0.108384,
+      "beta": 0.76367,
+      "initial_var": 2.3241695444025003e-09,
+      "process_noise_floor": 2.3241695444025003e-11,
+      "vol_halflife": 5000
+    },
+    "ETH": {
+      "alpha": 0.1204,
+      "beta": 0.7,
+      "initial_var": 7.508898230801983e-11,
+      "process_noise_floor": 7.508898230801984e-13,
+      "vol_halflife": 5000
+    },
+    "SPX": {
+      "alpha": 0.25,
+      "beta": 0.7,
+      "initial_var": 1.0634958643903005e-09,
+      "process_noise_floor": 1.0634958643903005e-11,
+      "vol_halflife": 5000
+    },
+    "UNI": {
+      "alpha": 0.017862,
+      "beta": 0.975285,
+      "initial_var": 8.646845882883874e-11,
+      "process_noise_floor": 8.646845882883874e-13,
+      "vol_halflife": 5000
+    }
+  }
+}

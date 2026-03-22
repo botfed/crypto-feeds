@@ -1,12 +1,16 @@
 use crate::analytics::{Analytics, QuoteSide, RangeStat, SnapshotField};
 use crate::app_config::{AppConfig, load_config, load_perp, load_spot};
+use crate::bar_manager::{BarManager, BarSymbol};
 use crate::fair_price::{
     FairPriceConfig, FairPriceGroupConfig, FairPriceOutput, FairPriceOutputs, FairQuote,
     GarchParams, GroupMember, RecalibConfig, run_fair_price_task,
 };
+use crate::historical_bars::{aggregate_bars, load_1m_bars_with_backfill};
 use crate::market_data::{AllMarketData, Exchange, InstrumentType, MarketDataCollection};
 use crate::snapshot::{AllSnapshotData, SnapshotConfig, run_snapshot_task};
 use crate::symbol_registry::{SymbolId, REGISTRY};
+use crate::vol_engine::VolEngine;
+use crate::vol_params;
 use chrono::{DateTime, Utc};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -647,9 +651,50 @@ fn fair_price_to_dict(py: Python, fp: &FairPriceOutput) -> PyResult<PyObject> {
     dict.set_item("log_fair_price", fp.log_fair_price)?;
     dict.set_item("uncertainty_bps", fp.uncertainty_bps)?;
     dict.set_item("vol_bps", fp.vol_bps)?;
+    dict.set_item("vol_ann_pct", fp.vol_ann_pct)?;
+    dict.set_item("vol_source", match fp.vol_source {
+        1 => "har_qlike",
+        2 => "ext_garch",
+        _ => "inline_garch",
+    })?;
     dict.set_item("snap_ts_ns", fp.snap_ts_ns)?;
     dict.set_item("n_ticks_used", fp.n_ticks_used)?;
     Ok(dict.into())
+}
+
+#[pyclass]
+pub struct PyVolEngine {
+    engine: Arc<VolEngine>,
+    bar_mgr: Arc<BarManager>,
+    tick_data: Arc<AllMarketData>,
+}
+
+#[pymethods]
+impl PyVolEngine {
+    /// Get vol predictions for a symbol. Returns a dict with all model outputs.
+    fn predict(&self, symbol: &str, py: Python) -> PyResult<Option<PyObject>> {
+        match self.engine.predict_now(symbol, &self.tick_data) {
+            Ok(p) => {
+                let dict = PyDict::new_bound(py);
+                dict.set_item("har_ols", p.har_ols)?;
+                dict.set_item("har_qlike", p.har_qlike)?;
+                dict.set_item("garch", p.garch)?;
+                dict.set_item("ewma", p.ewma)?;
+                dict.set_item("realized", p.realized)?;
+                dict.set_item("n_completed_bars", p.n_completed_bars)?;
+                dict.set_item("partial_bar_age_secs", p.partial_bar_age_secs)?;
+                dict.set_item("ewma_halflife_min", p.ewma_halflife_min)?;
+                dict.set_item("rv_lookback_min", p.rv_lookback_min)?;
+                Ok(Some(dict.into()))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// List tracked symbols.
+    fn symbols(&self) -> Vec<String> {
+        self.engine.symbols()
+    }
 }
 
 fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
@@ -847,7 +892,7 @@ impl PyAppConfig {
         }
 
         Ok(Self {
-            config: AppConfig { spot, perp, sample_interval_ms: 10, onchain: None },
+            config: AppConfig { spot, perp, sample_interval_ms: 10, onchain: None, vol_models: None },
         })
     }
 
@@ -881,6 +926,8 @@ pub struct PyFeedManager {
     snapshot_handle: Option<JoinHandle<()>>,
     fair_price_handle: Option<JoinHandle<()>>,
     fair_price: Option<Py<PyFairPrice>>,
+    vol_engine: Option<Py<PyVolEngine>>,
+    bar_maintenance_handle: Option<JoinHandle<()>>,
 }
 
 #[pymethods]
@@ -904,6 +951,8 @@ impl PyFeedManager {
             snapshot_handle: None,
             fair_price_handle: None,
             fair_price: None,
+            vol_engine: None,
+            bar_maintenance_handle: None,
         })
     }
 
@@ -1033,7 +1082,7 @@ impl PyFeedManager {
 
         let handle = self
             .runtime
-            .spawn(run_fair_price_task(tick_data, outputs_clone, fp_config, shutdown, None));
+            .spawn(run_fair_price_task(tick_data, outputs_clone, fp_config, shutdown, None, None));
 
         self.fair_price_handle = Some(handle);
         self.fair_price = Some(Py::new(
@@ -1051,6 +1100,102 @@ impl PyFeedManager {
         Ok(self.fair_price.as_ref().map(|fp| fp.clone_ref(py)))
     }
 
+    /// Start the vol engine with bar manager.
+    ///
+    /// Args:
+    ///     params_dir: path to botfed-params/vol directory
+    ///     bar_data_dir: path to 1m bar CSV directory
+    ///     warmup_days: number of days of history to load (default 2)
+    #[pyo3(signature = (params_dir, bar_data_dir, warmup_days=2))]
+    fn start_vol_engine(
+        &mut self,
+        py: Python,
+        params_dir: &str,
+        bar_data_dir: &str,
+        warmup_days: u32,
+    ) -> PyResult<()> {
+        if self.vol_engine.is_some() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Vol engine already started",
+            ));
+        }
+
+        let all_params = vol_params::load_all_vol_params(std::path::Path::new(params_dir))
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to load vol params: {}", e)))?;
+
+        let target_min = all_params.values().next().map(|p| p.target_min).unwrap_or(5);
+        let max_window = all_params.values()
+            .flat_map(|p| [
+                p.har_ols.as_ref().map(|h| h.max_window()),
+                p.har_qlike.as_ref().map(|h| h.max_window()),
+            ])
+            .flatten()
+            .max()
+            .unwrap_or(288) + 16;
+
+        let market_data_ref = self.market_data.borrow(py);
+        let tick_data = market_data_ref.get_arc();
+
+        // Build bar symbols from params + registry
+        let mut bar_symbols = Vec::new();
+        let mut param_map = std::collections::HashMap::new();
+        for (sym, params) in all_params {
+            let perp_sym = format!("{}_USDT", sym);
+            let spot_sym = format!("{}_USDT", sym);
+            let venue = if let Some(&id) = REGISTRY.lookup(&perp_sym, &InstrumentType::Perp) {
+                Some((Exchange::Binance, id))
+            } else if let Some(&id) = REGISTRY.lookup(&spot_sym, &InstrumentType::Spot) {
+                Some((Exchange::Binance, id))
+            } else {
+                None
+            };
+            if let Some((exchange, symbol_id)) = venue {
+                bar_symbols.push(BarSymbol { name: sym.clone(), exchange, symbol_id });
+                param_map.insert(sym, params);
+            }
+        }
+
+        let bar_mgr = Arc::new(BarManager::new(bar_symbols, target_min, max_window));
+
+        // Warmup (blocking — runs backfill from disk + Binance API)
+        let bar_data_path = std::path::Path::new(bar_data_dir).to_path_buf();
+        let bar_mgr_clone = Arc::clone(&bar_mgr);
+        self.runtime.block_on(async {
+            for sym in bar_mgr_clone.symbols() {
+                match load_1m_bars_with_backfill(&bar_data_path, &sym, warmup_days).await {
+                    Ok(bars_1m) => {
+                        let target_bars = aggregate_bars(&bars_1m, target_min);
+                        bar_mgr_clone.warmup(&sym, target_bars, &bars_1m);
+                    }
+                    Err(e) => log::warn!("vol warmup failed for {}: {}", sym, e),
+                }
+            }
+        });
+
+        // Spawn bar maintenance
+        let handle = bar_mgr.spawn_maintenance(Arc::clone(&tick_data), Arc::clone(&self.shutdown));
+        self.bar_maintenance_handle = Some(handle);
+
+        // Create vol engine
+        let engine = Arc::new(VolEngine::new(param_map, Arc::clone(&bar_mgr)));
+        engine.replay_history();
+
+        self.vol_engine = Some(Py::new(
+            py,
+            PyVolEngine {
+                engine,
+                bar_mgr,
+                tick_data,
+            },
+        )?);
+
+        Ok(())
+    }
+
+    fn get_vol_engine(&self, py: Python) -> PyResult<Option<Py<PyVolEngine>>> {
+        Ok(self.vol_engine.as_ref().map(|ve| ve.clone_ref(py)))
+    }
+
     fn shutdown(&self) {
         self.shutdown.notify_waiters();
     }
@@ -1065,5 +1210,6 @@ fn crypto_feeds(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFeedManager>()?;
     m.add_class::<PyAnalytics>()?;
     m.add_class::<PyFairPrice>()?;
+    m.add_class::<PyVolEngine>()?;
     Ok(())
 }

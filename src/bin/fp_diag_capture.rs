@@ -14,6 +14,7 @@ use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType};
 use crypto_feeds::symbol_registry::REGISTRY;
 
 const DEFAULT_CACHE_PATH: &str = "/tmp/fair_price_cache.json";
+const CALIBRATION_PATH: &str = "configs/fp_calibrated.json";
 
 type ParamCache = HashMap<String, (f64, f64)>;
 
@@ -63,6 +64,52 @@ fn apply_cache(groups: &mut [FairPriceGroupConfig], cache: &ParamCache) {
     }
     if applied > 0 {
         log::info!("Loaded {} cached params from {}", applied, DEFAULT_CACHE_PATH);
+    }
+}
+
+fn load_calibration(groups: &mut [FairPriceGroupConfig]) {
+    let data = match std::fs::read_to_string(CALIBRATION_PATH) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let cal: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("Failed to parse {}: {}", CALIBRATION_PATH, e);
+            return;
+        }
+    };
+    let cal_groups = match cal.get("groups").and_then(|g| g.as_object()) {
+        Some(g) => g,
+        None => return,
+    };
+    let mut applied = 0;
+    for group in groups.iter_mut() {
+        if let Some(params) = cal_groups.get(&group.name).and_then(|p| p.as_object()) {
+            if let Some(v) = params.get("alpha").and_then(|v| v.as_f64()) {
+                group.garch.alpha = v;
+            }
+            if let Some(v) = params.get("beta").and_then(|v| v.as_f64()) {
+                group.garch.beta = v;
+            }
+            if let Some(v) = params.get("initial_var").and_then(|v| v.as_f64()) {
+                group.garch.initial_var = v;
+            }
+            if let Some(v) = params.get("process_noise_floor").and_then(|v| v.as_f64()) {
+                group.process_noise_floor = v;
+            }
+            if let Some(v) = params.get("vol_halflife").and_then(|v| v.as_u64()) {
+                group.garch.vol_halflife = v as u32;
+            }
+            applied += 1;
+        }
+    }
+    if applied > 0 {
+        eprintln!(
+            "Loaded calibrated structural params for {} group(s) from {}",
+            applied,
+            CALIBRATION_PATH
+        );
     }
 }
 
@@ -249,6 +296,9 @@ async fn main() -> Result<()> {
         anyhow::bail!("No pricing groups discovered (need >= 2 members per base asset)");
     }
 
+    // Load calibrated structural params (alpha, beta, initial_var, etc.)
+    load_calibration(&mut groups);
+
     if !args.clear_cache {
         let cache = load_cache();
         if !cache.is_empty() {
@@ -257,7 +307,10 @@ async fn main() -> Result<()> {
     }
 
     for g in &groups {
-        eprintln!("Group '{}': {} members", g.name, g.members.len());
+        eprintln!(
+            "Group '{}': {} members, alpha={:.4}, beta={:.4}, initial_var={:.2e}",
+            g.name, g.members.len(), g.garch.alpha, g.garch.beta, g.garch.initial_var,
+        );
     }
 
     let fp_config = FairPriceConfig {
@@ -279,7 +332,7 @@ async fn main() -> Result<()> {
         let out = Arc::clone(&outputs);
         let sd = Arc::clone(&shutdown);
         handles.push(tokio::spawn(
-            run_fair_price_task(tick, out, fp_config, sd, Some(diag)),
+            run_fair_price_task(tick, out, fp_config, sd, Some(diag), None),
         ));
     }
 

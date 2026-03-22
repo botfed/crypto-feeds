@@ -10,6 +10,28 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct VolModelConfig {
+    /// Directory containing per-symbol YAML param files.
+    pub params_dir: String,
+    /// Directory containing 1m CSV bar data (per-symbol subdirectories).
+    pub bar_data_dir: String,
+    /// Which HAR variant to use: "har_ols" or "har_qlike".
+    #[serde(default = "default_har_model")]
+    pub model: String,
+    /// Number of days of historical bars to load for warmup.
+    #[serde(default = "default_warmup_days")]
+    pub warmup_days: u32,
+}
+
+fn default_har_model() -> String {
+    "har_ols".to_string()
+}
+
+fn default_warmup_days() -> u32 {
+    2
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -23,6 +45,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub onchain: Option<OnchainConfig>,
+
+    #[serde(default)]
+    pub vol_models: Option<VolModelConfig>,
 }
 
 fn default_sample_interval_ms() -> u64 {

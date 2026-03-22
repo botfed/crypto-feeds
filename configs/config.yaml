@@ -22,7 +22,7 @@ onchain:
         symbol: "AIXBT_USDC"
 
 perp:
-  binance:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT', 'CLANKER_USDT']
+  binance:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT', 'CLANKER_USDT', 'AERO_USDT', 'BRETT_USDT', 'VIRTUAL_USDT']
   kucoin:  ['BTC_USDT', 'AIXBT_USDT', 'SPX_USDT', 'CLANKER_USDT']
   bingx:  ['BTC_USDT', "ETH_USDT", 'CLANKER_USDT', 'SPX_USDT', 'CLANKER_USDT']
   okx:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT']
@@ -34,3 +34,9 @@ perp:
   extended: ['BTC_USD', 'ETH_USD', 'UNI_USD']
   nado:     ['BTC_USDT', 'ETH_USDT', 'UNI_USDT']
   hyperliquid: ['BTC_USDC', 'ETH_USDC', 'UNI_USDC', 'AIXBT_USDC', 'SPX_USDC']
+
+vol_models:
+  params_dir: "../botfed-params/vol"
+  bar_data_dir: "../data/binance_ohlcv/perps/1m"
+  model: "har_ols"
+  warmup_days: 2

@@ -1,0 +1,19 @@
+sample_interval_ms: 100
+
+spot:
+  binance:  ["ETH_USDT", "AIXBT_USDT"]
+  okx:      ["ETH_USDT", "AIXBT_USDT"]
+  bybit:    ["ETH_USDT", "AIXBT_USDT"]
+  coinbase: ["ETH_USD"]
+  kraken:   ["ETH_USD"]
+  mexc:     ["ETH_USDT", "AIXBT_USDT"]
+
+perp:
+  binance:  ["ETH_USDT", "AIXBT_USDT"]
+  okx:      ["ETH_USDT", "AIXBT_USDT"]
+  bybit:    ["ETH_USDT", "AIXBT_USDT"]
+  kucoin:   ["ETH_USDT", "AIXBT_USDT"]
+  bingx:    ["ETH_USDT", "AIXBT_USDT"]
+  coinbase: ["ETH_USD"]
+  kraken:   ["ETH_USD"]
+  hyperliquid: ["ETH_USDC", "AIXBT_USDC"]

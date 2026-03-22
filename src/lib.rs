@@ -11,6 +11,10 @@ pub mod snapshot;
 pub mod fair_price;
 pub mod analytics;
 pub mod onchain;
+pub mod bar_manager;
+pub mod historical_bars;
+pub mod vol_engine;
+pub mod vol_params;
 
 #[cfg(feature = "python")]
 pub mod python;

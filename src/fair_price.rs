@@ -1,6 +1,7 @@
 use crate::market_data::{AllMarketData, Exchange};
 use crate::ring_buffer::RingBuffer;
 use crate::symbol_registry::SymbolId;
+use crate::vol_engine::VolEngine;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::io::{BufWriter, Write as IoWrite};
@@ -10,6 +11,7 @@ use tokio::sync::Notify;
 use tokio::time::{self, MissedTickBehavior};
 
 const BPS: f64 = 1e4;
+const MINUTES_PER_YEAR: f64 = 525_960.0;
 const LN2: f64 = std::f64::consts::LN_2;
 
 #[inline]
@@ -22,6 +24,12 @@ fn load_f64(atom: &AtomicU64) -> f64 {
     f64::from_bits(atom.load(Ordering::Acquire))
 }
 
+/// Vol source identifier for display.
+/// 0 = inline GARCH, 1 = HAR-QLIKE, 2 = ext GARCH fallback.
+pub const VOL_SRC_INLINE: u8 = 0;
+pub const VOL_SRC_HAR_QL: u8 = 1;
+pub const VOL_SRC_EXT_GARCH: u8 = 2;
+
 /// Output of the fair price engine for one pricing group at one snapshot.
 #[derive(Debug, Default, Copy, Clone)]
 #[repr(C)]
@@ -30,9 +38,13 @@ pub struct FairPriceOutput {
     pub log_fair_price: f64,
     pub uncertainty_bps: f64,
     pub vol_bps: f64,
+    /// Annualized vol as percentage (e.g. 45.2 for 45.2%).
+    pub vol_ann_pct: f64,
     pub snap_ts_ns: i64,
     pub n_ticks_used: u32,
-    _pad: u32,
+    /// Which vol model is driving h: 0=inline GARCH, 1=HAR-QL, 2=ext GARCH.
+    pub vol_source: u8,
+    _pad: [u8; 3],
 }
 
 /// Full quoting context for one exchange-symbol pair within a pricing group.
@@ -142,9 +154,12 @@ struct GroupState {
     y_prev: f64,
     initialized: bool,
     member_states: Vec<MemberState>,
-    // EWMA of noise-corrected squared returns → tracks σ̄²
     ewma_r2: f64,
     snap_count: u64,
+    /// Which vol model last set h.
+    vol_source: u8,
+    /// Annualized vol % from vol engine (NaN if using inline GARCH).
+    vol_ann_pct: f64,
     snaps_since_recalib: u32,
 }
 
@@ -542,6 +557,7 @@ pub async fn run_fair_price_task(
     config: FairPriceConfig,
     shutdown: Arc<Notify>,
     mut diag: Option<DiagWriter>,
+    vol_engine: Option<Arc<VolEngine>>,
 ) {
     let garch_persistence: Vec<f64> = config
         .groups
@@ -596,6 +612,8 @@ pub async fn run_fair_price_task(
                 ewma_r2: g.garch.initial_var,
                 snap_count: 0,
                 snaps_since_recalib: 0,
+                vol_source: VOL_SRC_INLINE,
+                vol_ann_pct: f64::NAN,
             }
         })
         .collect();
@@ -769,15 +787,51 @@ pub async fn run_fair_price_task(
                 }
             }
 
-            // ── 5. GARCH(1,1) update on snapshot return ────────────────
+            // ── 5. Volatility update ─────────────────────────────────
             let y_prev_snap = state.y_prev;
             let r2_corrected = if !y_prev_snap.is_nan() {
                 let r = state.y - y_prev_snap;
                 let rc = (r * r - state.p).max(0.0);
-                state.h = (state.omega
-                    + group_cfg.garch.alpha * rc
-                    + group_cfg.garch.beta * state.h)
-                    .max(group_cfg.process_noise_floor);
+
+                // Use external vol engine if available, else inline GARCH
+                let used_external = if let Some(ref ve) = vol_engine {
+                    if let Ok(pred) = ve.predict_now(&group_cfg.name, &tick_data) {
+                        let (ann_vol, src) = if pred.har_qlike.is_finite() {
+                            (pred.har_qlike, VOL_SRC_HAR_QL)
+                        } else if pred.garch.is_finite() {
+                            (pred.garch, VOL_SRC_EXT_GARCH)
+                        } else {
+                            (0.0, VOL_SRC_INLINE)
+                        };
+                        if ann_vol > 0.0 {
+                            let snaps_per_year =
+                                MINUTES_PER_YEAR * 60_000.0 / config.interval_ms as f64;
+                            state.h = ann_vol * ann_vol / snaps_per_year;
+                            state.vol_source = src;
+                            state.vol_ann_pct = ann_vol * 100.0;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if !used_external {
+                    state.h = (state.omega
+                        + group_cfg.garch.alpha * rc
+                        + group_cfg.garch.beta * state.h)
+                        .max(group_cfg.process_noise_floor);
+                    state.vol_source = VOL_SRC_INLINE;
+                    // Annualize inline GARCH: h is per-snapshot variance
+                    let snaps_per_year =
+                        MINUTES_PER_YEAR * 60_000.0 / config.interval_ms as f64;
+                    state.vol_ann_pct = (state.h * snaps_per_year).sqrt() * 100.0;
+                }
+
                 rc
             } else {
                 0.0
@@ -892,9 +946,11 @@ pub async fn run_fair_price_task(
                     log_fair_price: state.y,
                     uncertainty_bps: state.p.sqrt() * BPS,
                     vol_bps: state.h.sqrt() * BPS,
+                    vol_ann_pct: state.vol_ann_pct,
                     snap_ts_ns,
                     n_ticks_used: n_ticks as u32,
-                    _pad: 0,
+                    vol_source: state.vol_source,
+                    _pad: [0; 3],
                 },
             );
 
@@ -1011,6 +1067,7 @@ mod tests {
             config,
             shutdown_clone,
             None,
+            None,
         ));
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1098,9 +1155,11 @@ mod tests {
                 log_fair_price: 100.0_f64.ln(),
                 uncertainty_bps: 1.5,
                 vol_bps: 2.0,
+                vol_ann_pct: 45.0,
                 snap_ts_ns: 1000,
                 n_ticks_used: 5,
-                _pad: 0,
+                vol_source: VOL_SRC_INLINE,
+                _pad: [0; 3],
             },
         );
 

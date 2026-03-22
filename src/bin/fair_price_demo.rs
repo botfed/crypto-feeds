@@ -9,15 +9,21 @@ use tokio::signal;
 use tokio::sync::Notify;
 
 use crypto_feeds::app_config::{AppConfig, load_config, load_onchain, load_perp, load_spot};
+use crypto_feeds::bar_manager::{BarManager, BarSymbol};
 use crypto_feeds::display::init_display_logger;
 use crypto_feeds::fair_price::{
     FairPriceConfig, FairPriceGroupConfig, FairPriceOutputs, FairQuote, GarchParams, GroupMember,
     run_fair_price_task,
 };
+use crypto_feeds::historical_bars::{aggregate_bars, load_1m_bars_with_backfill};
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType};
 use crypto_feeds::symbol_registry::REGISTRY;
+use crypto_feeds::vol_engine::VolEngine;
+use crypto_feeds::vol_params;
+use std::path::Path;
 
 const CACHE_PATH: &str = "/tmp/fair_price_cache.json";
+const CALIBRATION_PATH: &str = "configs/fp_calibrated.json";
 
 /// Cache key: "group/exchange/symbol_id"
 type ParamCache = HashMap<String, (f64, f64)>;
@@ -68,6 +74,52 @@ fn apply_cache(groups: &mut [FairPriceGroupConfig], cache: &ParamCache) {
     }
     if applied > 0 {
         log::info!("Loaded {} cached params from {}", applied, CACHE_PATH);
+    }
+}
+
+fn load_calibration(groups: &mut [FairPriceGroupConfig]) {
+    let data = match std::fs::read_to_string(CALIBRATION_PATH) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let cal: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("Failed to parse {}: {}", CALIBRATION_PATH, e);
+            return;
+        }
+    };
+    let cal_groups = match cal.get("groups").and_then(|g| g.as_object()) {
+        Some(g) => g,
+        None => return,
+    };
+    let mut applied = 0;
+    for group in groups.iter_mut() {
+        if let Some(params) = cal_groups.get(&group.name).and_then(|p| p.as_object()) {
+            if let Some(v) = params.get("alpha").and_then(|v| v.as_f64()) {
+                group.garch.alpha = v;
+            }
+            if let Some(v) = params.get("beta").and_then(|v| v.as_f64()) {
+                group.garch.beta = v;
+            }
+            if let Some(v) = params.get("initial_var").and_then(|v| v.as_f64()) {
+                group.garch.initial_var = v;
+            }
+            if let Some(v) = params.get("process_noise_floor").and_then(|v| v.as_f64()) {
+                group.process_noise_floor = v;
+            }
+            if let Some(v) = params.get("vol_halflife").and_then(|v| v.as_u64()) {
+                group.garch.vol_halflife = v as u32;
+            }
+            applied += 1;
+        }
+    }
+    if applied > 0 {
+        log::info!(
+            "Loaded calibrated structural params for {} group(s) from {}",
+            applied,
+            CALIBRATION_PATH
+        );
     }
 }
 
@@ -382,36 +434,44 @@ async fn run_display(
                     for (group_idx, group_name) in out.group_names().iter().enumerate() {
                         let fp = out.latest(group_idx);
 
-                        let (fair_str, unc_now_str, unc_100_str, vol_str, ticks_str, age_str) = match fp {
+                        let (fair_str, unc_now_str, unc_100_str, vol_str, vol_ann_str, vol_src_str, ticks_str, age_str) = match fp {
                             Some(fp) => {
                                 let age_ms = (now_ns - fp.snap_ts_ns) / 1_000_000;
                                 let p = (fp.uncertainty_bps / BPS).powi(2);
                                 let h = (fp.vol_bps / BPS).powi(2);
                                 let p_100 = (p + h).sqrt() * BPS;
+                                let vol_src = match fp.vol_source {
+                                    1 => "HAR-QL",
+                                    2 => "ext-GARCH",
+                                    _ => "GARCH",
+                                };
+                                let vol_ann = if fp.vol_ann_pct.is_finite() {
+                                    format!("{:.1}%", fp.vol_ann_pct)
+                                } else {
+                                    "-".into()
+                                };
                                 (
                                     fmt_price(fp.fair_price),
                                     fmt_bps(fp.uncertainty_bps),
                                     fmt_bps(p_100),
                                     fmt_bps(fp.vol_bps),
+                                    vol_ann,
+                                    vol_src.to_string(),
                                     format!("{}", fp.n_ticks_used),
                                     format!("{}ms", age_ms),
                                 )
                             }
                             None => (
-                                "-".into(),
-                                "-".into(),
-                                "-".into(),
-                                "-".into(),
-                                "-".into(),
-                                "-".into(),
+                                "-".into(), "-".into(), "-".into(), "-".into(),
+                                "-".into(), "-".into(), "-".into(), "-".into(),
                             ),
                         };
 
                         let _ = writeln!(buf);
                         let _ = writeln!(
                             buf,
-                            "--- {} --- fair: {}  P_unc0: {} bps  P_unc1: {} bps  vol: {} bps/\u{221A}tick  ticks: {}  age: {}",
-                            group_name, fair_str, unc_now_str, unc_100_str, vol_str, ticks_str, age_str
+                            "--- {} --- fair: {}  P_unc: {} bps  vol[{}]: {} bps/\u{221A}tick ({} ann)  ticks: {}  age: {}",
+                            group_name, fair_str, unc_now_str, vol_src_str, vol_str, vol_ann_str, ticks_str, age_str
                         );
 
                         // Header
@@ -594,6 +654,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Load calibrated structural params (alpha, beta, initial_var, etc.)
+    load_calibration(&mut groups);
+
     // Load cached m_k / sigma_k from previous run
     if !clear_cache {
         let cache = load_cache();
@@ -604,9 +667,12 @@ async fn main() -> Result<()> {
 
     for g in &groups {
         log::info!(
-            "Group '{}': {} members",
+            "Group '{}': {} members, alpha={:.4}, beta={:.4}, initial_var={:.2e}",
             g.name,
-            g.members.len()
+            g.members.len(),
+            g.garch.alpha,
+            g.garch.beta,
+            g.garch.initial_var,
         );
     }
 
@@ -618,12 +684,82 @@ async fn main() -> Result<()> {
 
     let outputs = Arc::new(FairPriceOutputs::new(&fp_config));
 
+    // Optionally set up vol engine from config
+    let vol_engine: Option<Arc<VolEngine>> = if let Some(ref vol_cfg) = cfg.vol_models {
+        let params_dir = Path::new(&vol_cfg.params_dir);
+        match vol_params::load_all_vol_params(params_dir) {
+            Ok(all_params) => {
+                let target_min = all_params.values().next().map(|p| p.target_min).unwrap_or(5);
+                let max_window = all_params.values()
+                    .flat_map(|p| [
+                        p.har_ols.as_ref().map(|h| h.max_window()),
+                        p.har_qlike.as_ref().map(|h| h.max_window()),
+                    ])
+                    .flatten()
+                    .max()
+                    .unwrap_or(288) + 16;
+
+                // Build bar symbols from vol params + registry
+                let mut bar_symbols = Vec::new();
+                let mut param_map = HashMap::new();
+                for (sym, params) in all_params {
+                    let perp_sym = format!("{}_USDT", sym);
+                    let spot_sym = format!("{}_USDT", sym);
+                    let venue = if let Some(&id) = REGISTRY.lookup(&perp_sym, &InstrumentType::Perp) {
+                        Some((Exchange::Binance, id))
+                    } else if let Some(&id) = REGISTRY.lookup(&spot_sym, &InstrumentType::Spot) {
+                        Some((Exchange::Binance, id))
+                    } else {
+                        None
+                    };
+                    if let Some((exchange, symbol_id)) = venue {
+                        bar_symbols.push(BarSymbol { name: sym.clone(), exchange, symbol_id });
+                        param_map.insert(sym, params);
+                    }
+                }
+
+                let bar_mgr = Arc::new(BarManager::new(bar_symbols, target_min, max_window));
+
+                // Warmup from disk + Binance API backfill
+                let bar_data_dir = Path::new(&vol_cfg.bar_data_dir);
+                let bar_mgr_w = Arc::clone(&bar_mgr);
+                for sym in bar_mgr_w.symbols() {
+                    match load_1m_bars_with_backfill(bar_data_dir, &sym, vol_cfg.warmup_days).await {
+                        Ok(bars_1m) => {
+                            let target_bars = aggregate_bars(&bars_1m, target_min);
+                            bar_mgr_w.warmup(&sym, target_bars, &bars_1m);
+                        }
+                        Err(e) => log::warn!("vol warmup failed for {}: {}", sym, e),
+                    }
+                }
+
+                // Spawn bar maintenance
+                handles.push(bar_mgr.spawn_maintenance(
+                    Arc::clone(&market_data),
+                    Arc::clone(&shutdown),
+                ));
+
+                let engine = Arc::new(VolEngine::new(param_map, Arc::clone(&bar_mgr)));
+                engine.replay_history();
+                log::info!("Vol engine started with HAR-QL model for {} symbols", engine.symbols().len());
+                Some(engine)
+            }
+            Err(e) => {
+                log::warn!("Could not load vol params (using inline GARCH): {}", e);
+                None
+            }
+        }
+    } else {
+        log::info!("No vol_models config — using inline GARCH for vol");
+        None
+    };
+
     // Start fair price task
     {
         let tick = Arc::clone(&market_data);
         let out = Arc::clone(&outputs);
         let sd = Arc::clone(&shutdown);
-        handles.push(tokio::spawn(run_fair_price_task(tick, out, fp_config, sd, None)));
+        handles.push(tokio::spawn(run_fair_price_task(tick, out, fp_config, sd, None, vol_engine)));
     }
 
     // Start display
