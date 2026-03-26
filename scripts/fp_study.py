@@ -90,79 +90,273 @@ def resample_to_100ms(ts: np.ndarray, vals: np.ndarray, native_dt_ns: float):
     return ts, vals, 1
 
 
-# ── Kalman filter replay ───────────────────────────────────────────────
+# ── Observation extraction with latency ──────────────────────────────────
+
+
+def build_observations(
+    ll_base: pd.DataFrame,
+    tick_interval_ns: int = 100_000_000,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], int]:
+    """Build observation arrays from lead_lag data with latency-based age.
+
+    Every exchange quote at every sample tick is an observation.
+    Age = (sample_ts - exchange_ts) in ticks, used to inflate σ_k².
+
+    Returns: (obs_tick, obs_exch, obs_val, obs_age_ticks, exchanges, T)
+    """
+    # Assign tick indices from sample_ts
+    sample_ts = ll_base["sample_ts"].values
+    ts_unique = np.unique(sample_ts)
+    ts_unique.sort()
+    T = len(ts_unique)
+    ts_to_tick = {ts: i for i, ts in enumerate(ts_unique)}
+
+    exchanges = sorted(ll_base["exchange"].unique())
+    ex_to_idx = {ex: i for i, ex in enumerate(exchanges)}
+
+    obs_tick_list = []
+    obs_exch_list = []
+    obs_val_list = []
+    obs_age_list = []
+
+    for _, row in ll_base.iterrows():
+        bid, ask = row["bid"], row["ask"]
+        if not (np.isfinite(bid) and np.isfinite(ask) and bid > 0 and ask > 0):
+            continue
+        log_mid = math.log((bid + ask) / 2.0)
+        ts = row["sample_ts"]
+        ex_ts = row["exchange_ts"]
+        tick = ts_to_tick.get(ts)
+        if tick is None:
+            continue
+
+        age_ns = ts - ex_ts if np.isfinite(ex_ts) and ex_ts > 0 else 0
+        age_ticks = max(age_ns / tick_interval_ns, 0.0)
+
+        obs_tick_list.append(tick)
+        obs_exch_list.append(ex_to_idx[row["exchange"]])
+        obs_val_list.append(log_mid)
+        obs_age_list.append(age_ticks)
+
+    obs_tick = np.array(obs_tick_list, dtype=np.int64)
+    obs_exch = np.array(obs_exch_list, dtype=np.int32)
+    obs_val = np.array(obs_val_list, dtype=np.float64)
+    obs_age = np.array(obs_age_list, dtype=np.float64)
+
+    # Sort by tick
+    order = np.argsort(obs_tick, kind="stable")
+    obs_tick = obs_tick[order]
+    obs_exch = obs_exch[order]
+    obs_val = obs_val[order]
+    obs_age = obs_age[order]
+
+    K = len(exchanges)
+    N_obs = len(obs_tick)
+    median_age = float(np.median(obs_age))
+    print(f"    {N_obs} observations from {K} exchanges over {T} ticks "
+          f"({N_obs / T:.1f} obs/tick, median age={median_age:.1f} ticks)")
+
+    return obs_tick, obs_exch, obs_val, obs_age, exchanges, T
+
+
+# ── Kalman smoother (forward-backward) ──────────────────────────────────
+
+
+def tick_smoother(
+    T: int,
+    obs_tick: np.ndarray,
+    obs_exch: np.ndarray,
+    obs_val: np.ndarray,
+    obs_age: np.ndarray,
+    m: np.ndarray,
+    sigma_k: np.ndarray,
+    mu: float,
+    h_tick: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Tick-level Kalman forward-backward with latency-adjusted noise.
+
+    Each observation's effective noise is σ_k² + h * age_ticks,
+    where age_ticks = (sample_ts - exchange_ts) / tick_interval.
+    Stale quotes automatically get lower Kalman gain.
+
+    Returns Y_fwd, P_fwd, Y_smooth, P_smooth (all length T).
+    """
+    N_obs = len(obs_tick)
+    Y_fwd = np.empty(T)
+    P_fwd = np.empty(T)
+
+    # Init from first observation
+    if N_obs > 0:
+        k0 = obs_exch[0]
+        Y_pred = obs_val[0] - m[k0]
+        P_pred = sigma_k[k0] ** 2
+    else:
+        Y_pred = 0.0
+        P_pred = 1.0
+
+    obs_ptr = 0
+
+    # Forward pass
+    for t in range(T):
+        y = Y_pred
+        p = P_pred
+        h_t = h_tick[min(t, len(h_tick) - 1)]
+
+        while obs_ptr < N_obs and obs_tick[obs_ptr] == t:
+            k = obs_exch[obs_ptr]
+            w = obs_val[obs_ptr]
+            age = obs_age[obs_ptr]
+            # Effective noise: base σ_k² + diffusion since exchange_ts
+            R = sigma_k[k] ** 2 + h_t * age
+            innov = (w - m[k]) - y
+            S = p + R
+            if S > 0:
+                gain = p / S
+                y = y + gain * innov
+                p = (1.0 - gain) * p
+            obs_ptr += 1
+
+        Y_fwd[t] = y
+        P_fwd[t] = p
+
+        if t < T - 1:
+            Y_pred = y + mu
+            P_pred = p + h_t
+
+    # Backward pass (RTS smoother)
+    Y_smooth = np.empty(T)
+    P_smooth = np.empty(T)
+    Y_smooth[T - 1] = Y_fwd[T - 1]
+    P_smooth[T - 1] = P_fwd[T - 1]
+
+    for t in range(T - 2, -1, -1):
+        P_pred_t = P_fwd[t] + h_tick[min(t, len(h_tick) - 1)]
+        if P_pred_t > 0:
+            J = P_fwd[t] / P_pred_t
+        else:
+            J = 0.0
+        Y_smooth[t] = Y_fwd[t] + J * (Y_smooth[t + 1] - Y_fwd[t] - mu)
+        P_smooth[t] = P_fwd[t] + J * J * (P_smooth[t + 1] - P_pred_t)
+
+    return Y_fwd, P_fwd, Y_smooth, P_smooth
+
+
+# ── EM fitting of ruler params (smoother-based) ─────────────────────────
+
+
+def fit_rulers_em(
+    ll_base: pd.DataFrame,
+    h_series: np.ndarray,
+    n_iter: int = 30,
+    tick_interval_ns: int = 100_000_000,
+) -> tuple[dict[str, tuple[float, float]], np.ndarray, np.ndarray, list[str], int]:
+    """Fit (m_k, σ_k) via EM with RTS smoother and latency-adjusted noise.
+
+    Returns:
+        rulers: {exchange_name: (m_k, sigma_k_sq)}
+        Y_smooth: smoothed state (log price), length T
+        P_smooth: smoothed uncertainty, length T
+        exchanges: list of exchange names
+        T: number of ticks
+    """
+    obs_tick, obs_exch, obs_val, obs_age, exchanges, T = build_observations(
+        ll_base, tick_interval_ns
+    )
+    K = len(exchanges)
+
+    # Initialize
+    m = np.zeros(K)
+    sigma_k = np.ones(K) * 0.005
+    for k in range(K):
+        mask = obs_exch == k
+        if mask.sum() > 0:
+            m[k] = float(np.median(obs_val[mask]))
+    m -= m.mean()
+    mu = 0.0
+
+    # h_tick array
+    if len(h_series) < T - 1:
+        h_tick = np.full(T - 1, h_series[-1] if len(h_series) > 0 else 1e-10)
+        h_tick[:len(h_series)] = h_series
+    else:
+        h_tick = h_series[:T - 1]
+
+    Y_s = None
+    P_s = None
+
+    for it in range(n_iter):
+        Y_f, P_f, Y_s, P_s = tick_smoother(
+            T, obs_tick, obs_exch, obs_val, obs_age, m, sigma_k, mu, h_tick
+        )
+
+        # Update drift
+        dY = Y_s[1:] - Y_s[:-1]
+        mu = float(dY.mean())
+
+        # Update ruler params
+        for k in range(K):
+            mask = obs_exch == k
+            if mask.sum() == 0:
+                continue
+            ticks_k = obs_tick[mask]
+            vals_k = obs_val[mask]
+            ages_k = obs_age[mask]
+            resid = vals_k - Y_s[ticks_k]
+            m[k] = float(resid.mean())
+            P_at_obs = P_s[ticks_k]
+            # E[resid²] = σ_k² + h * age_k + P_smooth
+            # So σ_k² = E[(resid - m_k)²] + P_smooth - h * age_k
+            h_at_obs = np.array([h_tick[min(t, len(h_tick) - 1)] for t in ticks_k])
+            raw_var = float(np.mean((resid - m[k]) ** 2 + P_at_obs))
+            age_correction = float(np.mean(h_at_obs * ages_k))
+            sigma_k[k] = math.sqrt(max(raw_var - age_correction, 1e-16))
+
+        m -= m.mean()
+
+    rulers = {}
+    for k, ex in enumerate(exchanges):
+        rulers[ex] = (float(m[k]), float(sigma_k[k] ** 2))
+
+    return rulers, Y_s, P_s, exchanges, T
+
+
+# ── Kalman filter replay (forward only, for test-set evaluation) ────────
 
 
 def replay_kalman(
-    pivot: pd.DataFrame,
+    ll_base: pd.DataFrame,
     rulers: dict[str, tuple[float, float]],
     h_series: np.ndarray,
-    engine_interval_ns: int = 100_000_000,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Replay the Kalman filter on pivot data with a given h(t) series.
+    tick_interval_ns: int = 100_000_000,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Replay forward Kalman filter with fitted rulers on new data.
 
-    Args:
-        pivot: DataFrame with columns=exchanges, rows=timestamps, values=log_mid
-        rulers: {exchange: (m_k, sigma_k_sq)}
-        h_series: process noise variance per snapshot (len = n_snapshots)
-
-    Returns:
-        (y_series, p_series, innovations_by_exchange)
-        y_series: Kalman fair price (log space)
-        p_series: Kalman uncertainty
+    Uses latency-adjusted noise from exchange_ts.
+    Returns (Y_fwd, P_fwd, T).
     """
-    exchanges = [c for c in pivot.columns if c in rulers]
-    if not exchanges:
-        return np.array([]), np.array([]), {}
+    obs_tick, obs_exch, obs_val, obs_age, exchanges, T = build_observations(
+        ll_base, tick_interval_ns
+    )
+    K = len(exchanges)
 
-    n = len(pivot)
-    y = np.full(n, np.nan)
-    p = np.full(n, np.nan)
-    innovations = {ex: np.full(n, np.nan) for ex in exchanges}
-
-    # Initialize from first valid observation
-    initialized = False
-    y_cur = 0.0
-    p_cur = 0.0
-
-    for t in range(n):
-        h_t = h_series[min(t, len(h_series) - 1)]
-
-        if not initialized:
-            # Find first valid observation
-            for ex in exchanges:
-                val = pivot.iloc[t][ex]
-                if np.isfinite(val):
-                    m_k, sigma_k_sq = rulers[ex]
-                    y_cur = val - m_k
-                    p_cur = sigma_k_sq
-                    initialized = True
-                    break
-            if not initialized:
-                continue
-
-        # Predict
-        p_cur += h_t
-
-        # Update from each exchange
-        for ex in exchanges:
-            val = pivot.iloc[t][ex]
-            if not np.isfinite(val):
-                continue
+    m = np.zeros(K)
+    sigma_k = np.ones(K) * 0.005
+    for k, ex in enumerate(exchanges):
+        if ex in rulers:
             m_k, sigma_k_sq = rulers[ex]
-            z = val - m_k  # bias-corrected observation
-            innovation = z - y_cur
-            s = p_cur + sigma_k_sq
-            if s > 0:
-                k = p_cur / s  # Kalman gain
-                y_cur += k * innovation
-                p_cur *= (1.0 - k)
-                innovations[ex][t] = innovation / math.sqrt(s)
+            m[k] = m_k
+            sigma_k[k] = math.sqrt(sigma_k_sq)
 
-        y[t] = y_cur
-        p[t] = p_cur
+    if len(h_series) < T - 1:
+        h_tick = np.full(T - 1, h_series[-1] if len(h_series) > 0 else 1e-10)
+        h_tick[:len(h_series)] = h_series
+    else:
+        h_tick = h_series[:T - 1]
 
-    return y, p, innovations
+    Y_f, P_f, _, _ = tick_smoother(
+        T, obs_tick, obs_exch, obs_val, obs_age, m, sigma_k, 0.0, h_tick
+    )
+    return Y_f, P_f, T
 
 
 # ── Vol model candidates ────────────────────────────────────────────────
@@ -381,6 +575,11 @@ def score_fair_price(
     label: str,
 ) -> dict:
     """Score a fair price series on all quality metrics."""
+    # Align lengths (y_fp from smoother/filter may differ from pivot rows)
+    n = min(len(y_fp), len(pivot))
+    y_fp = y_fp[:n]
+    pivot_vals = {ex: pivot[ex].values[:n] for ex in pivot.columns}
+
     valid = np.isfinite(y_fp)
     y_clean = y_fp[valid]
     r_fp = np.diff(y_clean)
@@ -400,14 +599,13 @@ def score_fair_price(
     residuals = {}
     for ex in exchanges:
         m_k = rulers[ex][0]
-        res = pivot[ex].values[valid] - m_k - y_fp[valid]
+        res = pivot_vals[ex][valid] - m_k - y_fp[valid]
         residuals[ex] = res
 
     r_fp_for_r2 = np.diff(y_fp[valid])
     res_shifted = {ex: res[:-1] for ex, res in residuals.items()}
     r2s = residual_r2(r_fp_for_r2, res_shifted)
 
-    # Innovation whiteness (overall)
     acf1 = np.corrcoef(r_fp[:-1], r_fp[1:])[0, 1] if len(r_fp) > 2 else 0.0
 
     result = {
@@ -517,90 +715,123 @@ def study_group(
     print(f"  {base}")
     print(f"{'=' * 60}")
 
-    # Pivot: rows=sample_ts, cols=exchange, values=log_mid
-    pivot = ll_base.pivot_table(
-        index="sample_ts", columns="exchange", values="log_mid", aggfunc="mean"
-    )
-    valid = pivot.notna().sum(axis=1) >= 2
-    pivot = pivot[valid].sort_index()
-    print(f"  {len(pivot)} valid samples, {pivot.shape[1]} exchanges")
+    # Split raw data into train/test halves by time
+    ts_all = ll_base["sample_ts"].values
+    ts_mid = np.median(ts_all)
+    ll_train = ll_base[ll_base["sample_ts"] < ts_mid].copy()
+    ll_test = ll_base[ll_base["sample_ts"] >= ts_mid].copy()
+    print(f"  Train: {len(ll_train)} rows, Test: {len(ll_test)} rows")
 
-    if len(pivot) < 5000:
-        print("  Too few samples, skipping")
+    if len(ll_train) < 5000 or len(ll_test) < 5000:
+        print("  Too few rows, skipping")
         return
 
-    # Split: first half for calibration, second half for evaluation
-    mid = len(pivot) // 2
-    pivot_train = pivot.iloc[:mid]
-    pivot_test = pivot.iloc[mid:]
-    print(f"  Train: {len(pivot_train)}, Test: {len(pivot_test)}")
+    # Pivot for median FP and scoring (still needed for R² computation)
+    pivot_train = ll_train.pivot_table(
+        index="sample_ts", columns="exchange", values="log_mid", aggfunc="mean"
+    ).sort_index()
+    pivot_test = ll_test.pivot_table(
+        index="sample_ts", columns="exchange", values="log_mid", aggfunc="mean"
+    ).sort_index()
 
-    # ── Calibrate rulers from train set (median-based) ──
+    # Median FP for baseline scoring and vol model inputs
     median_fp_train = compute_median_fp(pivot_train)
-    rulers = {}
-    for ex in pivot_train.columns:
-        res = (pivot_train[ex] - median_fp_train).dropna()
-        if len(res) < 200:
-            continue
-        m_k = float(res.mean())
-        # Spread correction
-        ex_mask = ll_base["exchange"] == ex
-        median_spread = float(ll_base.loc[ex_mask, "rel_spread"].median())
-        sigma_k_sq = max(float(res.var()) - median_spread ** 2 / 12, 1e-12)
-        rulers[ex] = (m_k, sigma_k_sq)
-
-    print(f"  Rulers: {len(rulers)} exchanges")
-    for ex, (m, s) in rulers.items():
-        print(f"    {ex}: m_k={m * BPS:.3f} bps, sigma_k={np.sqrt(s) * BPS:.3f} bps")
-
-    # ── Resample test set to 100ms ──
-    ts = pivot_test.index.values
-    native_dt = float(np.median(np.diff(ts)))
     median_fp_test = compute_median_fp(pivot_test)
 
-    ts_100, mv_100, ratio = resample_to_100ms(ts, median_fp_test.values, native_dt)
-    if ratio > 1:
-        pivot_test = pivot_test.iloc[::ratio]
-    print(f"  Resampled: {len(ts_100)} snapshots at ~100ms (ratio={ratio})")
+    ts_train = pivot_train.index.values
+    ts_test = pivot_test.index.values
+    native_dt = float(np.median(np.diff(ts_train)))
+    ts_train_100, mv_train_100, ratio = resample_to_100ms(
+        ts_train, median_fp_train.values, native_dt
+    )
+    ts_test_100, mv_test_100, ratio_t = resample_to_100ms(
+        ts_test, median_fp_test.values, native_dt
+    )
+    print(f"  Ticks: train={len(ts_train_100)}, test={len(ts_test_100)} @ ~100ms")
 
-    # Compute median returns for noise correction
-    r_100 = np.diff(mv_100)
-    r_100 = r_100[np.isfinite(r_100)]
+    # Median returns for noise correction
+    r_train = np.diff(mv_train_100)
+    r_train = r_train[np.isfinite(r_train)]
+    r_test = np.diff(mv_test_100)
+    r_test = r_test[np.isfinite(r_test)]
 
-    lag1_cov = float(np.mean(r_100[:-1] * r_100[1:])) - float(np.mean(r_100)) ** 2
+    lag1_cov = float(np.mean(r_train[:-1] * r_train[1:])) - float(np.mean(r_train)) ** 2
     R_noise = max(-2.0 * lag1_cov, 0.0)
-    var_signal = max(np.var(r_100) - R_noise, 1e-20)
+    var_signal = max(np.var(r_train) - R_noise, 1e-20)
     print(f"  R_noise={R_noise:.2e}, var_signal={var_signal:.2e}")
 
-    # ── Variance signature ──
-    plot_variance_signature(r_100, output_dir, base)
+    plot_variance_signature(r_test, output_dir, base)
 
-    # ── Build vol model candidates ──
+    # ── Vol model candidates (from median returns) ──
     garch_alpha = garch_params["alpha"] if garch_params else 0.06
     garch_beta = garch_params["beta"] if garch_params else 0.94
 
-    candidates = [
-        ("Constant", vol_constant(r_100, R_noise)),
-        ("GARCH", vol_inline_garch(r_100, R_noise, garch_alpha, garch_beta)),
-        ("EWMA(60s)", vol_ewma(r_100, R_noise, halflife_ticks=600)),
-        ("EWMA(10min)", vol_ewma(r_100, R_noise, halflife_ticks=6000)),
+    train_candidates = [
+        ("Constant", vol_constant(r_train, R_noise)),
+        ("GARCH", vol_inline_garch(r_train, R_noise, garch_alpha, garch_beta)),
+        ("EWMA(60s)", vol_ewma(r_train, R_noise, halflife_ticks=600)),
+        ("EWMA(10min)", vol_ewma(r_train, R_noise, halflife_ticks=6000)),
+    ]
+    test_candidates = [
+        ("Constant", vol_constant(r_test, R_noise)),
+        ("GARCH", vol_inline_garch(r_test, R_noise, garch_alpha, garch_beta)),
+        ("EWMA(60s)", vol_ewma(r_test, R_noise, halflife_ticks=600)),
+        ("EWMA(10min)", vol_ewma(r_test, R_noise, halflife_ticks=6000)),
     ]
 
     if vol_params and "har_qlike" in vol_params.get("models", {}):
-        h_har = vol_har_qlike(r_100, ts_100[1:], vol_params)
-        candidates.append(("HAR-QL", h_har))
+        h_har_train = vol_har_qlike(r_train, ts_train_100[1:], vol_params)
+        h_har_test = vol_har_qlike(r_test, ts_test_100[1:], vol_params)
+        train_candidates.append(("HAR-QL", h_har_train))
+        test_candidates.append(("HAR-QL", h_har_test))
 
-    # Also score the median FP (no Kalman, no vol model)
-    median_result = score_fair_price(mv_100, pivot_test, rulers, "Median (baseline)")
+    # ── Median baseline ──
+    median_rulers = {}
+    for ex in pivot_test.columns:
+        col = pivot_test[ex].dropna()
+        med = median_fp_test[col.index]
+        res = (col - med).dropna()
+        if len(res) > 50:
+            median_rulers[ex] = (float(res.mean()), max(float(res.var()), 1e-14))
+    median_result = score_fair_price(
+        mv_test_100, pivot_test, median_rulers, "Median (baseline)"
+    )
 
-    # ── Evaluate each vol model ──
+    median_rulers_train = {}
+    for ex in pivot_train.columns:
+        col = pivot_train[ex].dropna()
+        med = median_fp_train[col.index]
+        res = (col - med).dropna()
+        if len(res) > 50:
+            median_rulers_train[ex] = (float(res.mean()), max(float(res.var()), 1e-14))
+    median_is = score_fair_price(
+        mv_train_100, pivot_train, median_rulers_train, "Median (IS)"
+    )
+
+    # ── For each vol model: EM-fit rulers on train, evaluate on both ──
     all_results = [median_result]
-    for name, h_series in candidates:
+    all_results_is = [median_is]
+    for (name, h_train), (_, h_test) in zip(train_candidates, test_candidates):
         print(f"\n  -- Vol model: {name} --")
-        y_fp, p_fp, innov = replay_kalman(pivot_test, rulers, h_series)
+
+        # EM fit on train (smoother-based, latency-adjusted)
+        print(f"    Fitting rulers via EM (smoother) on train set...")
+        rulers, Y_smooth_train, P_smooth_train, em_exchanges, T_train = fit_rulers_em(
+            ll_train, h_train, n_iter=250
+        )
+        for ex, (m, s) in sorted(rulers.items()):
+            print(f"      {ex}: m_k={m * BPS:.3f} bps, sigma_k={np.sqrt(s) * BPS:.3f} bps")
+
+        # In-sample: score smoother on train
+        result_is = score_fair_price(Y_smooth_train, pivot_train, rulers, f"Kalman+{name} (IS)")
+        all_results_is.append(result_is)
+
+        # Out-of-sample: forward filter on test with fitted rulers
+        y_fp, p_fp, T_test = replay_kalman(ll_test, rulers, h_test)
         result = score_fair_price(y_fp, pivot_test, rulers, f"Kalman+{name}")
         if result:
             result["r_fp"] = np.diff(y_fp[np.isfinite(y_fp)])
+            result["rulers"] = rulers
         all_results.append(result)
 
     # ── Plots ──
@@ -610,18 +841,26 @@ def study_group(
         [r for r in valid_results if "r_fp" in r], output_dir, base
     )
 
-    # ── Summary table ──
-    print(f"\n  {'=' * 70}")
+    # ── Summary table (in-sample + out-of-sample side by side) ──
+    print(f"\n  {'=' * 100}")
     print(f"  SUMMARY: {base}")
-    print(f"  {'=' * 70}")
-    print(f"  {'Model':<25} {'ACF(1)':>10} {'LB p':>8} {'mean R²':>10} {'max R²':>10}")
-    print(f"  {'-' * 65}")
-    for r in valid_results:
-        print(f"  {r.get('label', '?'):<25} "
-              f"{r.get('acf1', np.nan):>10.6f} "
-              f"{r.get('ljung_box_p', np.nan):>8.4f} "
-              f"{r.get('mean_r2', np.nan):>10.6f} "
-              f"{r.get('max_r2', np.nan):>10.6f}")
+    print(f"  {'=' * 100}")
+    print(f"  {'Model':<25} {'ACF(IS)':>9} {'R²(IS)':>9} {'ACF(OOS)':>9} {'R²(OOS)':>9} {'LB p(OOS)':>10} {'maxR²(OOS)':>11}")
+    print(f"  {'-' * 95}")
+
+    for r_is, r_oos in zip(all_results_is, all_results):
+        label = r_oos.get("label", "?") if r_oos else r_is.get("label", "?")
+        label = label.replace(" (IS)", "")
+        acf_is = r_is.get("acf1", np.nan) if r_is else np.nan
+        r2_is = r_is.get("mean_r2", np.nan) if r_is else np.nan
+        acf_oos = r_oos.get("acf1", np.nan) if r_oos else np.nan
+        r2_oos = r_oos.get("mean_r2", np.nan) if r_oos else np.nan
+        lb_oos = r_oos.get("ljung_box_p", np.nan) if r_oos else np.nan
+        maxr2_oos = r_oos.get("max_r2", np.nan) if r_oos else np.nan
+        print(f"  {label:<25} "
+              f"{acf_is:>9.4f} {r2_is:>9.6f} "
+              f"{acf_oos:>9.4f} {r2_oos:>9.6f} "
+              f"{lb_oos:>10.4f} {maxr2_oos:>11.6f}")
 
 
 def main():
@@ -631,6 +870,8 @@ def main():
     parser.add_argument("--warmup-secs", type=int, default=300)
     parser.add_argument("--vol-params-dir", default="../botfed-params/vol",
                         help="Directory with pre-calibrated HAR params")
+    parser.add_argument("--base", default=None,
+                        help="Run only this base asset (e.g. ETH)")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -648,7 +889,9 @@ def main():
     ll = load_lead_lag(data_dir, args.warmup_secs)
 
     bases = sorted(ll["base"].unique())
-    print(f"\nBases found: {bases}")
+    if args.base:
+        bases = [b for b in bases if b.upper() == args.base.upper()]
+    print(f"\nBases: {bases}")
 
     for base in bases:
         ll_base = ll[ll["base"] == base]

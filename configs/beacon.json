@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "groups": {
+    "BTC": {
+      "h_per_ms": 3.17e-14,
+      "members": {
+        "binance/PERP-BTC-USDT": { "bias": 0.0, "noise_var": 4e-8 },
+        "binance/SPOT-BTC-USDT": { "bias": 0.0, "noise_var": 4e-8 },
+        "coinbase/SPOT-BTC-USDT": { "bias": 0.0, "noise_var": 6e-8 },
+        "bybit/PERP-BTC-USDT": { "bias": 0.0, "noise_var": 5e-8 }
+      }
+    },
+    "ETH": {
+      "h_per_ms": 5.07e-14,
+      "members": {
+        "binance/PERP-ETH-USDT": { "bias": 0.0, "noise_var": 4e-8 },
+        "binance/SPOT-ETH-USDT": { "bias": 0.0, "noise_var": 4e-8 },
+        "coinbase/SPOT-ETH-USDT": { "bias": 0.0, "noise_var": 6e-8 },
+        "bybit/PERP-ETH-USDT": { "bias": 0.0, "noise_var": 5e-8 }
+      }
+    }
+  }
+}

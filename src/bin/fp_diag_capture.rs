@@ -7,111 +7,16 @@ use tokio::sync::Notify;
 
 use crypto_feeds::app_config::{AppConfig, load_config, load_onchain, load_perp, load_spot};
 use crypto_feeds::fair_price::{
-    DiagWriter, FairPriceConfig, FairPriceGroupConfig, FairPriceOutputs, GarchParams, GroupMember,
-    RecalibConfig, run_fair_price_task,
+    DiagWriter, FairPriceConfig, FairPriceGroupConfig, FairPriceOutputs, GroupMember,
+    SigmaMode, load_beacon, run_fair_price_task,
 };
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType};
 use crypto_feeds::symbol_registry::REGISTRY;
+use std::path::Path;
 
-const DEFAULT_CACHE_PATH: &str = "/tmp/fair_price_cache.json";
-const CALIBRATION_PATH: &str = "configs/fp_calibrated.json";
-
-type ParamCache = HashMap<String, (f64, f64)>;
-
-fn cache_key(group: &str, exchange: &str, symbol_id: usize) -> String {
-    format!("{}/{}/{}", group, exchange, symbol_id)
-}
-
-fn load_cache() -> ParamCache {
-    match std::fs::read_to_string(DEFAULT_CACHE_PATH) {
-        Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-        Err(_) => HashMap::new(),
-    }
-}
-
-fn save_cache(outputs: &FairPriceOutputs) {
-    let mut cache = ParamCache::new();
-    for (group_idx, group_name) in outputs.group_names().iter().enumerate() {
-        if let Some(members) = outputs.group_members(group_idx) {
-            for (mem_idx, member) in members.iter().enumerate() {
-                if let Some((bias, noise_var)) = outputs.get_member_params(group_idx, mem_idx) {
-                    let key = cache_key(group_name, member.exchange.as_str(), member.symbol_id);
-                    cache.insert(key, (bias, noise_var));
-                }
-            }
-        }
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&cache) {
-        if let Err(e) = std::fs::write(DEFAULT_CACHE_PATH, json) {
-            log::warn!("Failed to write param cache: {}", e);
-        } else {
-            log::info!("Saved param cache to {}", DEFAULT_CACHE_PATH);
-        }
-    }
-}
-
-fn apply_cache(groups: &mut [FairPriceGroupConfig], cache: &ParamCache) {
-    let mut applied = 0;
-    for group in groups.iter_mut() {
-        for member in &mut group.members {
-            let key = cache_key(&group.name, member.exchange.as_str(), member.symbol_id);
-            if let Some(&(bias, noise_var)) = cache.get(&key) {
-                member.bias = bias;
-                member.noise_var = noise_var;
-                applied += 1;
-            }
-        }
-    }
-    if applied > 0 {
-        log::info!("Loaded {} cached params from {}", applied, DEFAULT_CACHE_PATH);
-    }
-}
-
-fn load_calibration(groups: &mut [FairPriceGroupConfig]) {
-    let data = match std::fs::read_to_string(CALIBRATION_PATH) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let cal: serde_json::Value = match serde_json::from_str(&data) {
-        Ok(v) => v,
-        Err(e) => {
-            log::warn!("Failed to parse {}: {}", CALIBRATION_PATH, e);
-            return;
-        }
-    };
-    let cal_groups = match cal.get("groups").and_then(|g| g.as_object()) {
-        Some(g) => g,
-        None => return,
-    };
-    let mut applied = 0;
-    for group in groups.iter_mut() {
-        if let Some(params) = cal_groups.get(&group.name).and_then(|p| p.as_object()) {
-            if let Some(v) = params.get("alpha").and_then(|v| v.as_f64()) {
-                group.garch.alpha = v;
-            }
-            if let Some(v) = params.get("beta").and_then(|v| v.as_f64()) {
-                group.garch.beta = v;
-            }
-            if let Some(v) = params.get("initial_var").and_then(|v| v.as_f64()) {
-                group.garch.initial_var = v;
-            }
-            if let Some(v) = params.get("process_noise_floor").and_then(|v| v.as_f64()) {
-                group.process_noise_floor = v;
-            }
-            if let Some(v) = params.get("vol_halflife").and_then(|v| v.as_u64()) {
-                group.garch.vol_halflife = v as u32;
-            }
-            applied += 1;
-        }
-    }
-    if applied > 0 {
-        eprintln!(
-            "Loaded calibrated structural params for {} group(s) from {}",
-            applied,
-            CALIBRATION_PATH
-        );
-    }
-}
+const BEACON_PATH: &str = "configs/beacon.json";
+/// Default h_per_ms from 100% annualized vol
+const DEFAULT_H_PER_MS: f64 = 1.0 / (365.25 * 24.0 * 3600.0 * 1000.0);
 
 fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
     type Entry = (String, String, InstrumentType, Option<String>);
@@ -199,18 +104,10 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
             groups.push(FairPriceGroupConfig {
                 name: base.clone(),
                 members,
-                garch: GarchParams {
-                    alpha: 0.06,
-                    beta: 0.94,
-                    initial_var: 1e-6,
-                    vol_halflife: 5000,
-                },
-                process_noise_floor: 1e-8,
-                recalib: Some(RecalibConfig {
-                    recalibrate_every: 100,
-                    prior_weight: 200.0,
-                    ruler_halflife: 3000,
-                }),
+                h_per_ms: DEFAULT_H_PER_MS,
+                sigma_mode: SigmaMode::InstantSpread,
+                bias_ewma_halflife: 3000,
+                sigma_k_floor: 1e-6,
             });
         }
     }
@@ -220,13 +117,11 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
 
 struct Args {
     output_dir: String,
-    clear_cache: bool,
     warmup_secs: u64,
 }
 
 fn parse_args() -> Args {
     let mut output_dir = String::from("data/fp_diag");
-    let mut clear_cache = false;
     let mut warmup_secs: u64 = 900;
 
     let args: Vec<String> = std::env::args().collect();
@@ -239,9 +134,6 @@ fn parse_args() -> Args {
                     output_dir = args[i].clone();
                 }
             }
-            "--clear-cache" => {
-                clear_cache = true;
-            }
             "--warmup-secs" => {
                 i += 1;
                 if i < args.len() {
@@ -251,7 +143,7 @@ fn parse_args() -> Args {
             other => {
                 eprintln!("Unknown argument: {}", other);
                 eprintln!(
-                    "Usage: fp_diag_capture [--output-dir DIR] [--clear-cache] [--warmup-secs N]"
+                    "Usage: fp_diag_capture [--output-dir DIR] [--warmup-secs N]"
                 );
                 std::process::exit(1);
             }
@@ -261,7 +153,6 @@ fn parse_args() -> Args {
 
     Args {
         output_dir,
-        clear_cache,
         warmup_secs,
     }
 }
@@ -272,14 +163,9 @@ async fn main() -> Result<()> {
 
     let args = parse_args();
     eprintln!(
-        "fp_diag_capture: output_dir={}, clear_cache={}, warmup_secs={}",
-        args.output_dir, args.clear_cache, args.warmup_secs
+        "fp_diag_capture: output_dir={}, warmup_secs={}",
+        args.output_dir, args.warmup_secs
     );
-
-    if args.clear_cache {
-        let _ = std::fs::remove_file(DEFAULT_CACHE_PATH);
-        log::info!("Cleared param cache");
-    }
 
     let cfg: AppConfig = load_config("configs/config.yaml").context("loading config.yaml")?;
 
@@ -291,33 +177,27 @@ async fn main() -> Result<()> {
     let _ = load_perp(&mut handles, &cfg, &market_data, &shutdown);
     let _ = load_onchain(&mut handles, &cfg, &market_data, &shutdown);
 
-    let mut groups = auto_discover_groups(&cfg);
+    let groups = auto_discover_groups(&cfg);
     if groups.is_empty() {
         anyhow::bail!("No pricing groups discovered (need >= 2 members per base asset)");
     }
 
-    // Load calibrated structural params (alpha, beta, initial_var, etc.)
-    load_calibration(&mut groups);
-
-    if !args.clear_cache {
-        let cache = load_cache();
-        if !cache.is_empty() {
-            apply_cache(&mut groups, &cache);
-        }
-    }
-
-    for g in &groups {
-        eprintln!(
-            "Group '{}': {} members, alpha={:.4}, beta={:.4}, initial_var={:.2e}",
-            g.name, g.members.len(), g.garch.alpha, g.garch.beta, g.garch.initial_var,
-        );
-    }
-
-    let fp_config = FairPriceConfig {
+    // Build config, then load beacon params (h_per_ms, bias, noise_var)
+    let beacon = Path::new(BEACON_PATH);
+    let mut fp_config = FairPriceConfig {
         interval_ms: 100,
         buffer_capacity: 65536,
         groups,
     };
+    let mut beacon_mtime = std::time::UNIX_EPOCH;
+    load_beacon(beacon, &mut beacon_mtime, &mut fp_config);
+
+    for g in &fp_config.groups {
+        eprintln!(
+            "Group '{}': {} members, h_per_ms={:.2e}",
+            g.name, g.members.len(), g.h_per_ms,
+        );
+    }
 
     let outputs = Arc::new(FairPriceOutputs::new(&fp_config));
 
@@ -332,7 +212,7 @@ async fn main() -> Result<()> {
         let out = Arc::clone(&outputs);
         let sd = Arc::clone(&shutdown);
         handles.push(tokio::spawn(
-            run_fair_price_task(tick, out, fp_config, sd, Some(diag), None),
+            run_fair_price_task(tick, out, fp_config, sd, Some(diag)),
         ));
     }
 
@@ -373,8 +253,7 @@ async fn main() -> Result<()> {
     }
 
     signal::ctrl_c().await?;
-    eprintln!("\nShutting down, saving cache and finalizing diagnostics...");
-    save_cache(&outputs);
+    eprintln!("\nShutting down, finalizing diagnostics...");
     shutdown.notify_waiters();
 
     tokio::time::timeout(Duration::from_secs(5), async {

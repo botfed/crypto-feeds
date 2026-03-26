@@ -2,8 +2,8 @@ use crate::analytics::{Analytics, QuoteSide, RangeStat, SnapshotField};
 use crate::app_config::{AppConfig, load_config, load_perp, load_spot};
 use crate::bar_manager::{BarManager, BarSymbol};
 use crate::fair_price::{
-    FairPriceConfig, FairPriceGroupConfig, FairPriceOutput, FairPriceOutputs, FairQuote,
-    GarchParams, GroupMember, RecalibConfig, run_fair_price_task,
+    FairPriceConfig, FairPriceGroupConfig, FairPriceOutput, FairPriceOutputs,
+    GroupMember, SigmaMode, run_fair_price_task,
 };
 use crate::historical_bars::{aggregate_bars, load_1m_bars_with_backfill};
 use crate::market_data::{AllMarketData, Exchange, InstrumentType, MarketDataCollection};
@@ -622,7 +622,6 @@ impl PyFairPrice {
                 dict.set_item("mid_at_exchange", q.mid_at_exchange)?;
                 dict.set_item("uncertainty_bps", q.uncertainty_bps)?;
                 dict.set_item("uncertainty_at_horizon_bps", q.uncertainty_at_horizon_bps)?;
-                dict.set_item("vol_bps", q.vol_bps)?;
                 dict.set_item("bid", q.bid)?;
                 dict.set_item("ask", q.ask)?;
                 dict.set_item("bid_qty", q.bid_qty)?;
@@ -650,13 +649,7 @@ fn fair_price_to_dict(py: Python, fp: &FairPriceOutput) -> PyResult<PyObject> {
     dict.set_item("fair_price", fp.fair_price)?;
     dict.set_item("log_fair_price", fp.log_fair_price)?;
     dict.set_item("uncertainty_bps", fp.uncertainty_bps)?;
-    dict.set_item("vol_bps", fp.vol_bps)?;
     dict.set_item("vol_ann_pct", fp.vol_ann_pct)?;
-    dict.set_item("vol_source", match fp.vol_source {
-        1 => "har_qlike",
-        2 => "ext_garch",
-        _ => "inline_garch",
-    })?;
     dict.set_item("snap_ts_ns", fp.snap_ts_ns)?;
     dict.set_item("n_ticks_used", fp.n_ticks_used)?;
     Ok(dict.into())
@@ -777,70 +770,49 @@ fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
             });
         }
 
-        let garch_alpha: f64 = gd
-            .get_item("garch_alpha")?
-            .map(|v| v.extract())
-            .transpose()?
-            .unwrap_or(0.05);
-
-        let garch_beta: f64 = gd
-            .get_item("garch_beta")?
-            .map(|v| v.extract())
-            .transpose()?
-            .unwrap_or(0.90);
-
-        let initial_var: f64 = gd
-            .get_item("initial_var")?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'initial_var'"))?
+        let h_per_ms: f64 = gd
+            .get_item("h_per_ms")?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'h_per_ms'"))?
             .extract()?;
 
-        let vol_halflife: u32 = gd
-            .get_item("vol_halflife")?
-            .map(|v| v.extract())
+        let sigma_mode: SigmaMode = match gd
+            .get_item("sigma_mode")?
+            .map(|v| v.extract::<String>())
             .transpose()?
-            .unwrap_or(5000);
-
-        let process_noise_floor: f64 = gd
-            .get_item("process_noise_floor")?
-            .map(|v| v.extract())
-            .transpose()?
-            .unwrap_or(1e-14);
-
-        // Parse optional ruler recalibration config
-        let recalib = if let Some(rc_obj) = gd.get_item("recalib")?.filter(|v| !v.is_none()) {
-            let rc: &Bound<PyDict> = rc_obj.downcast()?;
-            Some(RecalibConfig {
-                recalibrate_every: rc
-                    .get_item("recalibrate_every")?
-                    .map(|v| v.extract())
-                    .transpose()?
-                    .unwrap_or(1000),
-                prior_weight: rc
-                    .get_item("prior_weight")?
-                    .map(|v| v.extract())
-                    .transpose()?
-                    .unwrap_or(500.0),
-                ruler_halflife: rc
-                    .get_item("ruler_halflife")?
-                    .map(|v| v.extract())
-                    .transpose()?
-                    .unwrap_or(5000),
-            })
-        } else {
-            None
+        {
+            Some(s) => match s.as_str() {
+                "instant_spread" => SigmaMode::InstantSpread,
+                "ewma_spread" => SigmaMode::EwmaSpread,
+                "static" => SigmaMode::Static,
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Unknown sigma_mode '{}'. Valid: instant_spread, ewma_spread, static",
+                        other
+                    )));
+                }
+            },
+            None => SigmaMode::InstantSpread,
         };
+
+        let bias_ewma_halflife: u32 = gd
+            .get_item("bias_ewma_halflife")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(3000);
+
+        let sigma_k_floor: f64 = gd
+            .get_item("sigma_k_floor")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(1e-6);
 
         groups.push(FairPriceGroupConfig {
             name,
             members,
-            garch: GarchParams {
-                alpha: garch_alpha,
-                beta: garch_beta,
-                initial_var,
-                vol_halflife,
-            },
-            process_noise_floor,
-            recalib,
+            h_per_ms,
+            sigma_mode,
+            bias_ewma_halflife,
+            sigma_k_floor,
         });
     }
 
@@ -1053,16 +1025,7 @@ impl PyFeedManager {
     ///         groups: list of dicts, each with:
     ///             name (str),
     ///             members: list of {exchange, symbol_id, noise_var, bias?},
-    ///             garch_alpha (float, default 0.05),
-    ///             garch_beta (float, default 0.90),  # α+β=1 → EWMA
-    ///             initial_var (float, required),
-    ///             vol_halflife (int, default 5000) — EWMA halflife for σ̄²,
-    ///             process_noise_floor (float, default 1e-14),
-    ///             recalib (dict, optional) — ruler param recalib: {
-    ///                 recalibrate_every (int, default 1000),
-    ///                 prior_weight (float, default 500.0),
-    ///                 ruler_halflife (int, default 5000)
-    ///             }
+    ///             h_per_ms (float, required) -- per-ms transition variance
     fn start_fair_price(&mut self, py: Python, config: &Bound<PyDict>) -> PyResult<()> {
         if self.fair_price_handle.is_some() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -1082,7 +1045,7 @@ impl PyFeedManager {
 
         let handle = self
             .runtime
-            .spawn(run_fair_price_task(tick_data, outputs_clone, fp_config, shutdown, None, None));
+            .spawn(run_fair_price_task(tick_data, outputs_clone, fp_config, shutdown, None));
 
         self.fair_price_handle = Some(handle);
         self.fair_price = Some(Py::new(

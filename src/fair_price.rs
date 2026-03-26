@@ -1,7 +1,6 @@
 use crate::market_data::{AllMarketData, Exchange};
 use crate::ring_buffer::RingBuffer;
 use crate::symbol_registry::SymbolId;
-use crate::vol_engine::VolEngine;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::io::{BufWriter, Write as IoWrite};
@@ -11,8 +10,7 @@ use tokio::sync::Notify;
 use tokio::time::{self, MissedTickBehavior};
 
 const BPS: f64 = 1e4;
-const MINUTES_PER_YEAR: f64 = 525_960.0;
-const LN2: f64 = std::f64::consts::LN_2;
+const MS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0 * 1000.0;
 
 #[inline]
 fn store_f64(atom: &AtomicU64, val: f64) {
@@ -24,12 +22,6 @@ fn load_f64(atom: &AtomicU64) -> f64 {
     f64::from_bits(atom.load(Ordering::Acquire))
 }
 
-/// Vol source identifier for display.
-/// 0 = inline GARCH, 1 = HAR-QLIKE, 2 = ext GARCH fallback.
-pub const VOL_SRC_INLINE: u8 = 0;
-pub const VOL_SRC_HAR_QL: u8 = 1;
-pub const VOL_SRC_EXT_GARCH: u8 = 2;
-
 /// Output of the fair price engine for one pricing group at one snapshot.
 #[derive(Debug, Default, Copy, Clone)]
 #[repr(C)]
@@ -37,14 +29,11 @@ pub struct FairPriceOutput {
     pub fair_price: f64,
     pub log_fair_price: f64,
     pub uncertainty_bps: f64,
-    pub vol_bps: f64,
-    /// Annualized vol as percentage (e.g. 45.2 for 45.2%).
+    /// Annualized vol as percentage, derived from h_per_ms.
     pub vol_ann_pct: f64,
     pub snap_ts_ns: i64,
     pub n_ticks_used: u32,
-    /// Which vol model is driving h: 0=inline GARCH, 1=HAR-QL, 2=ext GARCH.
-    pub vol_source: u8,
-    _pad: [u8; 3],
+    _pad: [u8; 4],
 }
 
 /// Full quoting context for one exchange-symbol pair within a pricing group.
@@ -55,7 +44,6 @@ pub struct FairQuote {
     pub mid_at_exchange: f64,
     pub uncertainty_bps: f64,
     pub uncertainty_at_horizon_bps: f64,
-    pub vol_bps: f64,
 
     pub bid: f64,
     pub ask: f64,
@@ -67,9 +55,9 @@ pub struct FairQuote {
     pub edge_ask_bps: f64,
     pub edge_mid_bps: f64,
 
-    /// Live recalibrated bias m_k (log-space) for this member.
+    /// Bias m_k (log-space) for this member.
     pub bias: f64,
-    /// Live recalibrated noise variance σ_k² (log-space) for this member.
+    /// Noise variance σ_k² (log-space) for this member.
     pub noise_var: f64,
 }
 
@@ -88,42 +76,29 @@ pub struct GroupMember {
     pub invert_reprice: bool,
 }
 
-/// GARCH(1,1) parameters.
-///
-/// When α + β < 1: standard GARCH with variance targeting,
-///   ω = initial_var · (1 - α - β), long-run variance = initial_var.
-/// When α + β = 1: reduces to EWMA (IGARCH), ω = 0, no mean reversion.
-pub struct GarchParams {
-    pub alpha: f64,
-    pub beta: f64,
-    /// Starting value for h. Also serves as the variance target when α+β < 1.
-    pub initial_var: f64,
-    /// EWMA halflife in snapshots for online σ̄² tracking (e.g. 5000 = ~8 min at 100ms).
-    /// Controls how fast the vol level adapts to regime shifts.
-    /// When α+β < 1, this updates ω = σ̄²·(1-α-β).
-    /// When α+β = 1 (EWMA), σ̄² is tracked but ω stays 0.
-    pub vol_halflife: u32,
-}
-
-/// Online recalibration of ruler params m_k and σ_k².
-/// α, β stay fixed from config — they're structural.
-pub struct RecalibConfig {
-    /// How often to apply blended updates, in snapshots (e.g. 1000 = ~100s).
-    pub recalibrate_every: u32,
-    /// Prior weight: config is trusted as much as this many observations.
-    /// High = slow adaptation, low = fast adaptation.
-    pub prior_weight: f64,
-    /// EWMA halflife in snapshots for ruler param tracking.
-    pub ruler_halflife: u32,
+/// How sigma_k (observation noise) is determined per tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigmaMode {
+    /// sigma_k² = max(log_half_spread², floor²) from each tick's bid/ask.
+    InstantSpread,
+    /// sigma_k² = max(ewma(log_half_spread)², floor²), smoothed over ticks.
+    EwmaSpread,
+    /// sigma_k² = member.noise_var from config/beacon, no online estimation.
+    Static,
 }
 
 /// Configuration for one pricing group.
 pub struct FairPriceGroupConfig {
     pub name: String,
     pub members: Vec<GroupMember>,
-    pub garch: GarchParams,
-    pub process_noise_floor: f64,
-    pub recalib: Option<RecalibConfig>,
+    /// Per-millisecond transition variance: h_per_ms = ann_vol² / ms_per_year.
+    pub h_per_ms: f64,
+    /// How sigma_k is determined. Default: InstantSpread.
+    pub sigma_mode: SigmaMode,
+    /// EWMA halflife in ticks for online m_k bias estimation. 0 = no online bias estimation.
+    pub bias_ewma_halflife: u32,
+    /// Floor for sigma_k in log-price units. Default 1e-6 (≈ 0.01 bps).
+    pub sigma_k_floor: f64,
 }
 
 /// Top-level configuration for the fair price task.
@@ -136,31 +111,22 @@ pub struct FairPriceConfig {
 /// Per-member mutable state tracked between snapshots.
 struct MemberState {
     prev_tick_pos: u64,
-    // Live params — initialized from config, updated by recalibration
+    /// Running bias estimate (EWMA of residuals).
     bias: f64,
+    /// Running noise variance estimate.
     noise_var: f64,
-    // EWMA accumulators for recalibration
-    ewma_residual: f64,
-    ewma_sq_resid: f64,
-    total_obs: u64,
+    /// EWMA of log half-spread (for EwmaSpread mode).
+    ewma_half_spread: f64,
 }
 
-/// Per-group Kalman filter + GARCH state.
+/// Per-group Kalman filter state.
 struct GroupState {
     y: f64,
     p: f64,
-    h: f64,
-    omega: f64,
-    y_prev: f64,
+    /// Nanosecond timestamp of the last processed tick (for tau computation).
+    prev_ts_ns: i64,
     initialized: bool,
     member_states: Vec<MemberState>,
-    ewma_r2: f64,
-    snap_count: u64,
-    /// Which vol model last set h.
-    vol_source: u8,
-    /// Annualized vol % from vol engine (NaN if using inline GARCH).
-    vol_ann_pct: f64,
-    snaps_since_recalib: u32,
 }
 
 /// A tick observation collected from a raw ring buffer.
@@ -168,6 +134,8 @@ struct TickObs {
     member_idx: usize,
     ts_ns: i64,
     log_mid: f64,
+    /// log(ask) - log(bid)) / 2, i.e. half-spread in log-price space.
+    log_half_spread: f64,
 }
 
 /// Shared member identity + live params, readable by query callers.
@@ -189,8 +157,8 @@ pub struct FairPriceOutputs {
     buffers: Vec<Box<RingBuffer<FairPriceOutput>>>,
     group_names: Vec<String>,
     group_members: Vec<Vec<MemberInfo>>,
-    interval_ms: f64,
-    last_recalib_ns: Vec<AtomicI64>,
+    /// h_per_ms per group, for horizon projection in get_fair_quote.
+    h_per_ms: Vec<f64>,
 }
 
 // SAFETY: AtomicU64 is Sync, everything else is immutable after construction.
@@ -212,6 +180,7 @@ impl FairPriceOutputs {
             .map(|_| Box::new(RingBuffer::with_capacity(config.buffer_capacity)))
             .collect();
         let group_names = config.groups.iter().map(|g| g.name.clone()).collect();
+        let h_per_ms = config.groups.iter().map(|g| g.h_per_ms).collect();
         let group_members = config
             .groups
             .iter()
@@ -246,17 +215,11 @@ impl FairPriceOutputs {
                     .collect()
             })
             .collect();
-        let last_recalib_ns = config
-            .groups
-            .iter()
-            .map(|_| AtomicI64::new(0))
-            .collect();
         Self {
             buffers,
             group_names,
             group_members,
-            interval_ms: config.interval_ms as f64,
-            last_recalib_ns,
+            h_per_ms,
         }
     }
 
@@ -272,14 +235,6 @@ impl FairPriceOutputs {
         store_f64(&self.group_members[group_idx][member_idx].live_noise_var, noise_var);
     }
 
-    fn set_last_recalib(&self, group_idx: usize, ts_ns: i64) {
-        self.last_recalib_ns[group_idx].store(ts_ns, Ordering::Release);
-    }
-
-    pub fn last_recalib_ns(&self, group_idx: usize) -> i64 {
-        self.last_recalib_ns[group_idx].load(Ordering::Acquire)
-    }
-
     pub fn latest(&self, group_idx: usize) -> Option<FairPriceOutput> {
         self.buffers.get(group_idx)?.latest()
     }
@@ -292,8 +247,8 @@ impl FairPriceOutputs {
         self.group_names.iter().position(|n| n == name)
     }
 
-    pub fn interval_ms(&self) -> f64 {
-        self.interval_ms
+    pub fn h_per_ms(&self, group_idx: usize) -> f64 {
+        self.h_per_ms[group_idx]
     }
 
     pub fn group_names(&self) -> &[String] {
@@ -377,10 +332,10 @@ impl FairPriceOutputs {
         let fair_at_exchange = (fp.log_fair_price + bias).exp();
         let mid = (bid + ask) / 2.0;
 
-        // Horizon projection: P_horizon = P + h * (horizon_ms / interval_ms)
+        // Horizon projection: P_horizon = P + h_per_ms * horizon_ms
         let p = (fp.uncertainty_bps / BPS).powi(2);
-        let h = (fp.vol_bps / BPS).powi(2);
-        let p_horizon = p + h * (horizon_ms / self.interval_ms);
+        let h_ms = self.h_per_ms[group_idx];
+        let p_horizon = p + h_ms * horizon_ms;
 
         let edge_bid = (fair_at_exchange - bid) / fair_at_exchange * BPS;
         let edge_ask = (ask - fair_at_exchange) / fair_at_exchange * BPS;
@@ -392,7 +347,6 @@ impl FairPriceOutputs {
             mid_at_exchange: mid,
             uncertainty_bps: fp.uncertainty_bps,
             uncertainty_at_horizon_bps: p_horizon.sqrt() * BPS,
-            vol_bps: fp.vol_bps,
             bid,
             ask,
             bid_qty,
@@ -410,23 +364,11 @@ impl FairPriceOutputs {
     }
 }
 
-/// Precision-weighted blend of prior (config) and data (EWMA estimate).
-#[inline]
-fn blend(prior_val: f64, data_val: f64, prior_weight: f64, data_count: u64, effective_n: f64) -> f64 {
-    let w_data = (data_count as f64).min(effective_n);
-    let w_total = prior_weight + w_data;
-    if w_total <= 0.0 {
-        return prior_val;
-    }
-    (prior_weight * prior_val + w_data * data_val) / w_total
-}
-
-/// Diagnostic writer: records tick innovations, group snapshots, and recalib events
-/// to gzipped CSV files for offline statistical validation.
+/// Diagnostic writer: records tick innovations and group snapshots
+/// to gzipped CSV files for offline validation against Python.
 pub struct DiagWriter {
     tick_wtr: BufWriter<GzEncoder<std::fs::File>>,
     group_wtr: BufWriter<GzEncoder<std::fs::File>>,
-    recalib_wtr: BufWriter<GzEncoder<std::fs::File>>,
     row_count: u64,
 }
 
@@ -436,30 +378,22 @@ impl DiagWriter {
 
         let tick_file = std::fs::File::create(format!("{}/tick_innovations.csv.gz", output_dir))?;
         let group_file = std::fs::File::create(format!("{}/group_snaps.csv.gz", output_dir))?;
-        let recalib_file =
-            std::fs::File::create(format!("{}/recalib_events.csv.gz", output_dir))?;
 
         let mut tick_wtr = BufWriter::new(GzEncoder::new(tick_file, Compression::fast()));
         let mut group_wtr = BufWriter::new(GzEncoder::new(group_file, Compression::fast()));
-        let mut recalib_wtr = BufWriter::new(GzEncoder::new(recalib_file, Compression::fast()));
 
         writeln!(
             tick_wtr,
-            "snap_ts_ns,tick_ts_ns,group_idx,member_idx,log_mid,innovation,s,kalman_gain,standardized_innov,p_pre"
+            "snap_ts_ns,tick_ts_ns,group_idx,member_idx,log_mid,tau_ms,q,p_pre,innovation,s,kalman_gain,y_post,p_post"
         )?;
         writeln!(
             group_wtr,
-            "snap_ts_ns,group_idx,y,y_prev,p,h,omega,ewma_r2,r2_corrected,n_ticks"
-        )?;
-        writeln!(
-            recalib_wtr,
-            "snap_ts_ns,group_idx,member_idx,bias_old,bias_new,noise_var_old,noise_var_new,total_obs"
+            "snap_ts_ns,group_idx,y,p,p_pre_fwd,tau_fwd_ms,n_ticks,last_tick_ts_ns"
         )?;
 
         Ok(Self {
             tick_wtr,
             group_wtr,
-            recalib_wtr,
             row_count: 0,
         })
     }
@@ -472,16 +406,19 @@ impl DiagWriter {
         gi: usize,
         mi: usize,
         log_mid: f64,
+        tau_ms: f64,
+        q: f64,
+        p_pre: f64,
         innov: f64,
         s: f64,
-        k: f64,
-        z: f64,
-        p_pre: f64,
+        gain: f64,
+        y_post: f64,
+        p_post: f64,
     ) {
         let _ = writeln!(
             self.tick_wtr,
-            "{},{},{},{},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e}",
-            snap_ts, tick_ts, gi, mi, log_mid, innov, s, k, z, p_pre
+            "{},{},{},{},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e}",
+            snap_ts, tick_ts, gi, mi, log_mid, tau_ms, q, p_pre, innov, s, gain, y_post, p_post
         );
         self.row_count += 1;
     }
@@ -492,37 +429,16 @@ impl DiagWriter {
         snap_ts: i64,
         gi: usize,
         y: f64,
-        y_prev: f64,
         p: f64,
-        h: f64,
-        omega: f64,
-        ewma_r2: f64,
-        r2c: f64,
+        p_pre_fwd: f64,
+        tau_fwd_ms: f64,
         n_ticks: usize,
+        last_tick_ts_ns: i64,
     ) {
         let _ = writeln!(
             self.group_wtr,
-            "{},{},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{:.16e},{}",
-            snap_ts, gi, y, y_prev, p, h, omega, ewma_r2, r2c, n_ticks
-        );
-    }
-
-    #[inline]
-    fn write_recalib(
-        &mut self,
-        snap_ts: i64,
-        gi: usize,
-        mi: usize,
-        bias_old: f64,
-        bias_new: f64,
-        nv_old: f64,
-        nv_new: f64,
-        total_obs: u64,
-    ) {
-        let _ = writeln!(
-            self.recalib_wtr,
-            "{},{},{},{:.16e},{:.16e},{:.16e},{:.16e},{}",
-            snap_ts, gi, mi, bias_old, bias_new, nv_old, nv_new, total_obs
+            "{},{},{:.16e},{:.16e},{:.16e},{:.16e},{},{}",
+            snap_ts, gi, y, p, p_pre_fwd, tau_fwd_ms, n_ticks, last_tick_ts_ns
         );
     }
 
@@ -530,7 +446,6 @@ impl DiagWriter {
         if self.row_count % 10_000 == 0 {
             let _ = self.tick_wtr.flush();
             let _ = self.group_wtr.flush();
-            let _ = self.recalib_wtr.flush();
         }
     }
 
@@ -539,32 +454,23 @@ impl DiagWriter {
         let _ = gz.finish();
         let gz = self.group_wtr.into_inner().expect("flush group BufWriter");
         let _ = gz.finish();
-        let gz = self
-            .recalib_wtr
-            .into_inner()
-            .expect("flush recalib BufWriter");
-        let _ = gz.finish();
         log::info!("DiagWriter finalized ({} tick rows written)", self.row_count);
     }
 }
 
 /// Main fair price loop. Reads raw ticks from `AllMarketData` ring buffers,
-/// runs a Kalman filter with GARCH(1,1) process noise, optionally recalibrates
-/// ruler parameters online, and pushes `FairPriceOutput` into per-group ring buffers.
+/// runs a static Kalman filter with tau-based process noise, and pushes
+/// `FairPriceOutput` into per-group ring buffers.
+///
+/// All parameters (h_per_ms, bias, noise_var) are fixed from config.
+/// Process noise is proportional to elapsed time between ticks.
 pub async fn run_fair_price_task(
     tick_data: Arc<AllMarketData>,
     outputs: Arc<FairPriceOutputs>,
     config: FairPriceConfig,
     shutdown: Arc<Notify>,
     mut diag: Option<DiagWriter>,
-    vol_engine: Option<Arc<VolEngine>>,
 ) {
-    let garch_persistence: Vec<f64> = config
-        .groups
-        .iter()
-        .map(|g| (1.0 - g.garch.alpha - g.garch.beta).max(0.0))
-        .collect();
-
     // Pre-resolve reprice_group names → group indices per member
     let reprice_idx: Vec<Vec<Option<usize>>> = config
         .groups
@@ -588,33 +494,21 @@ pub async fn run_fair_price_task(
     let mut states: Vec<GroupState> = config
         .groups
         .iter()
-        .map(|g| {
-            let omega = g.garch.initial_var * (1.0 - g.garch.alpha - g.garch.beta).max(0.0);
-            GroupState {
-                y: 0.0,
-                p: 0.0,
-                h: g.garch.initial_var,
-                omega,
-                y_prev: f64::NAN,
-                initialized: false,
-                member_states: g
-                    .members
-                    .iter()
-                    .map(|m| MemberState {
-                        prev_tick_pos: 0,
-                        bias: m.bias,
-                        noise_var: m.noise_var,
-                        ewma_residual: m.bias,
-                        ewma_sq_resid: m.noise_var,
-                        total_obs: 0,
-                    })
-                    .collect(),
-                ewma_r2: g.garch.initial_var,
-                snap_count: 0,
-                snaps_since_recalib: 0,
-                vol_source: VOL_SRC_INLINE,
-                vol_ann_pct: f64::NAN,
-            }
+        .map(|g| GroupState {
+            y: 0.0,
+            p: 0.0,
+            prev_ts_ns: 0,
+            initialized: false,
+            member_states: g
+                .members
+                .iter()
+                .map(|m| MemberState {
+                    prev_tick_pos: 0,
+                    bias: m.bias,
+                    noise_var: m.noise_var,
+                    ewma_half_spread: m.noise_var.sqrt(),
+                })
+                .collect(),
         })
         .collect();
 
@@ -626,16 +520,12 @@ pub async fn run_fair_price_task(
 
     let mut tick_scratch: Vec<TickObs> = Vec::with_capacity(256);
 
-    // Pre-allocate recalibration scratch buffers
-    let max_members = config
+    // Compute annualized vol per group (constant from h_per_ms)
+    let vol_ann_pct: Vec<f64> = config
         .groups
         .iter()
-        .map(|g| g.members.len())
-        .max()
-        .unwrap_or(0);
-    let mut rc_resid_sum = vec![0.0f64; max_members];
-    let mut rc_sq_sum = vec![0.0f64; max_members];
-    let mut rc_count = vec![0u32; max_members];
+        .map(|g| (g.h_per_ms * MS_PER_YEAR).sqrt() * 100.0)
+        .collect();
 
     loop {
         tokio::select! {
@@ -653,16 +543,15 @@ pub async fn run_fair_price_task(
 
         for (group_idx, group_cfg) in config.groups.iter().enumerate() {
             let state = &mut states[group_idx];
-            let n_members = group_cfg.members.len();
+            let h_per_ms = group_cfg.h_per_ms;
             tick_scratch.clear();
 
             // ── 1. Collect new ticks from all members ──────────────────
             for (mem_idx, member) in group_cfg.members.iter().enumerate() {
-                // If this member needs repricing, get the reprice group's log fair price
                 let reprice_log_fp = match reprice_idx[group_idx][mem_idx] {
                     Some(rg_idx) => match outputs.latest(rg_idx) {
                         Some(fp) if fp.log_fair_price.is_finite() => fp.log_fair_price,
-                        _ => continue, // reprice group not ready yet, skip member
+                        _ => continue,
                     },
                     None => 0.0,
                 };
@@ -695,10 +584,12 @@ pub async fn run_fair_price_task(
                                 } else {
                                     mid.ln() + reprice_log_fp
                                 };
+                                let log_half_spread = (ask.ln() - bid.ln()) / 2.0;
                                 tick_scratch.push(TickObs {
                                     member_idx: mem_idx,
                                     ts_ns: ts,
                                     log_mid: log_mid_adj,
+                                    log_half_spread,
                                 });
                             }
                         }
@@ -718,54 +609,76 @@ pub async fn run_fair_price_task(
                     let ms = &state.member_states[first.member_idx];
                     state.y = first.log_mid - ms.bias;
                     state.p = ms.noise_var;
+                    state.prev_ts_ns = first.ts_ns;
                     state.initialized = true;
                 } else {
                     continue;
                 }
             }
 
-            // ── 4. Kalman filter: predict + update per tick ────────────
-            let q_per_tick = if n_ticks > 1 {
-                (state.h / n_ticks as f64).max(group_cfg.process_noise_floor)
+            // EWMA decay/alpha for bias estimation
+            let (bias_decay, bias_alpha) = if group_cfg.bias_ewma_halflife > 0 {
+                let d = (-1.0 / group_cfg.bias_ewma_halflife as f64).exp();
+                (d, 1.0 - d)
             } else {
-                state.h.max(group_cfg.process_noise_floor)
+                (1.0, 0.0) // no update
             };
 
-            let has_recalib = group_cfg.recalib.is_some();
+            // EWMA decay/alpha for spread smoothing (reuse same halflife)
+            let (spread_decay, spread_alpha) = (bias_decay, bias_alpha);
 
-            // Zero recalib accumulators
-            if has_recalib {
-                for i in 0..n_members {
-                    rc_resid_sum[i] = 0.0;
-                    rc_sq_sum[i] = 0.0;
-                    rc_count[i] = 0;
-                }
-            }
+            let sigma_floor_sq = group_cfg.sigma_k_floor * group_cfg.sigma_k_floor;
 
+            // ── 4. Kalman filter: tau-based predict + update per tick ───
             if n_ticks == 0 {
-                // No observations — pure predict step
-                state.p += state.h;
+                // No observations — forward-propagate uncertainty to snap boundary
+                let tau_ms = (snap_ts_ns - state.prev_ts_ns) as f64 / 1_000_000.0;
+                state.p += h_per_ms * tau_ms;
+                state.prev_ts_ns = snap_ts_ns;
             } else {
                 for obs in &tick_scratch {
-                    let ms = &state.member_states[obs.member_idx];
+                    let ms = &mut state.member_states[obs.member_idx];
 
-                    // Accumulate recalib stats (pre-update y)
-                    if has_recalib {
-                        let raw_resid = obs.log_mid - state.y;
-                        rc_resid_sum[obs.member_idx] += raw_resid;
-                        let centered = raw_resid - ms.bias;
-                        rc_sq_sum[obs.member_idx] += centered * centered;
-                        rc_count[obs.member_idx] += 1;
-                    }
+                    // Tau-based process noise
+                    let tau_ms = (obs.ts_ns - state.prev_ts_ns) as f64 / 1_000_000.0;
+                    let q = h_per_ms * tau_ms.max(0.0);
 
                     // Predict
-                    state.p += q_per_tick;
+                    state.p += q;
 
-                    // Update: observation = log_mid = y + bias + noise
+                    // Determine noise_var based on sigma mode
+                    let noise_var = match group_cfg.sigma_mode {
+                        SigmaMode::InstantSpread => {
+                            obs.log_half_spread.powi(2).max(sigma_floor_sq)
+                        }
+                        SigmaMode::EwmaSpread => {
+                            // Update EWMA of half-spread
+                            ms.ewma_half_spread = spread_alpha * obs.log_half_spread
+                                + spread_decay * ms.ewma_half_spread;
+                            ms.ewma_half_spread.powi(2).max(sigma_floor_sq)
+                        }
+                        SigmaMode::Static => ms.noise_var,
+                    };
+
+                    // Pre-update residual for bias EWMA
+                    let residual = obs.log_mid - state.y;
+
+                    // Update
                     let p_pre = state.p;
                     let innovation = obs.log_mid - ms.bias - state.y;
-                    let s = state.p + ms.noise_var;
-                    let k = state.p / s;
+                    let s = state.p + noise_var;
+                    let gain = state.p / s;
+
+                    state.y += gain * innovation;
+                    state.p *= 1.0 - gain;
+
+                    // Online bias estimation (EWMA of pre-update residuals)
+                    if bias_alpha > 0.0 {
+                        ms.bias = bias_alpha * residual + bias_decay * ms.bias;
+                    }
+
+                    // Track noise_var for output/display
+                    ms.noise_var = noise_var;
 
                     if let Some(ref mut dw) = diag {
                         dw.write_tick(
@@ -774,183 +687,61 @@ pub async fn run_fair_price_task(
                             group_idx,
                             obs.member_idx,
                             obs.log_mid,
+                            tau_ms,
+                            q,
+                            p_pre,
                             innovation,
                             s,
-                            k,
-                            innovation / s.sqrt(),
-                            p_pre,
+                            gain,
+                            state.y,
+                            state.p,
                         );
                     }
 
-                    state.y += k * innovation;
-                    state.p *= 1.0 - k;
+                    state.prev_ts_ns = obs.ts_ns;
                 }
+
+                // Forward-propagate to snapshot boundary
+                let tau_fwd_ms = (snap_ts_ns - state.prev_ts_ns) as f64 / 1_000_000.0;
+                let p_pre_fwd = state.p;
+                if tau_fwd_ms > 0.0 {
+                    state.p += h_per_ms * tau_fwd_ms;
+                }
+
+                // Diagnostic: group-level snapshot
+                if let Some(ref mut dw) = diag {
+                    dw.write_group(
+                        snap_ts_ns,
+                        group_idx,
+                        state.y,
+                        state.p,
+                        p_pre_fwd,
+                        tau_fwd_ms,
+                        n_ticks,
+                        state.prev_ts_ns,
+                    );
+                }
+
+                state.prev_ts_ns = snap_ts_ns;
             }
 
-            // ── 5. Volatility update ─────────────────────────────────
-            let y_prev_snap = state.y_prev;
-            let r2_corrected = if !y_prev_snap.is_nan() {
-                let r = state.y - y_prev_snap;
-                let rc = (r * r - state.p).max(0.0);
-
-                // Use external vol engine if available, else inline GARCH
-                let used_external = if let Some(ref ve) = vol_engine {
-                    if let Ok(pred) = ve.predict_now(&group_cfg.name, &tick_data) {
-                        let (ann_vol, src) = if pred.har_qlike.is_finite() {
-                            (pred.har_qlike, VOL_SRC_HAR_QL)
-                        } else if pred.garch.is_finite() {
-                            (pred.garch, VOL_SRC_EXT_GARCH)
-                        } else {
-                            (0.0, VOL_SRC_INLINE)
-                        };
-                        if ann_vol > 0.0 {
-                            let snaps_per_year =
-                                MINUTES_PER_YEAR * 60_000.0 / config.interval_ms as f64;
-                            state.h = ann_vol * ann_vol / snaps_per_year;
-                            state.vol_source = src;
-                            state.vol_ann_pct = ann_vol * 100.0;
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !used_external {
-                    state.h = (state.omega
-                        + group_cfg.garch.alpha * rc
-                        + group_cfg.garch.beta * state.h)
-                        .max(group_cfg.process_noise_floor);
-                    state.vol_source = VOL_SRC_INLINE;
-                    // Annualize inline GARCH: h is per-snapshot variance
-                    let snaps_per_year =
-                        MINUTES_PER_YEAR * 60_000.0 / config.interval_ms as f64;
-                    state.vol_ann_pct = (state.h * snaps_per_year).sqrt() * 100.0;
-                }
-
-                rc
-            } else {
-                0.0
-            };
-            state.y_prev = state.y;
-
-            // ── 6. Online σ̄² tracking (always active) ─────────────────
-            {
-                let vol_decay = (-LN2 / group_cfg.garch.vol_halflife as f64).exp();
-                let vol_alpha = 1.0 - vol_decay;
-
-                if state.snap_count > 0 {
-                    state.ewma_r2 = (vol_alpha * r2_corrected + vol_decay * state.ewma_r2)
-                        .max(group_cfg.process_noise_floor);
-                    // Recompute omega from live σ̄² estimate
-                    state.omega = state.ewma_r2 * garch_persistence[group_idx];
-                }
-                state.snap_count += 1;
-            }
-
-            // ── 6b. Diagnostic: group-level snapshot ──────────────────
-            if let Some(ref mut dw) = diag {
-                dw.write_group(
-                    snap_ts_ns,
-                    group_idx,
-                    state.y,
-                    y_prev_snap,
-                    state.p,
-                    state.h,
-                    state.omega,
-                    state.ewma_r2,
-                    r2_corrected,
-                    n_ticks,
-                );
-            }
-
-            // ── 7. Ruler recalibration: m_k, σ_k² ─────────────────────
-            if let Some(rc_cfg) = &group_cfg.recalib {
-                let rc_decay = (-LN2 / rc_cfg.ruler_halflife as f64).exp();
-                let rc_alpha = 1.0 - rc_decay;
-
-                // Update per-member EWMAs
-                for k in 0..n_members {
-                    if rc_count[k] > 0 {
-                        let n = rc_count[k] as f64;
-                        let mean_resid = rc_resid_sum[k] / n;
-                        let mean_sq = rc_sq_sum[k] / n;
-                        let ms = &mut state.member_states[k];
-                        ms.ewma_residual = rc_alpha * mean_resid + rc_decay * ms.ewma_residual;
-                        ms.ewma_sq_resid = rc_alpha * mean_sq + rc_decay * ms.ewma_sq_resid;
-                        ms.total_obs += rc_count[k] as u64;
-                    }
-                }
-
-                // Periodic blend of config prior with EWMA estimates
-                state.snaps_since_recalib += 1;
-                if state.snaps_since_recalib >= rc_cfg.recalibrate_every {
-                    let effective_n = rc_cfg.ruler_halflife as f64 / LN2;
-
-                    for k in 0..n_members {
-                        let ms = &mut state.member_states[k];
-                        let cfg_m = &group_cfg.members[k];
-
-                        let bias_old = ms.bias;
-                        let noise_var_old = ms.noise_var;
-
-                        ms.bias = blend(
-                            cfg_m.bias,
-                            ms.ewma_residual,
-                            rc_cfg.prior_weight,
-                            ms.total_obs,
-                            effective_n,
-                        );
-
-                        let sigma_est = (ms.ewma_sq_resid - state.p).max(1e-16);
-                        ms.noise_var = blend(
-                            cfg_m.noise_var,
-                            sigma_est,
-                            rc_cfg.prior_weight,
-                            ms.total_obs,
-                            effective_n,
-                        );
-
-                        if let Some(ref mut dw) = diag {
-                            dw.write_recalib(
-                                snap_ts_ns,
-                                group_idx,
-                                k,
-                                bias_old,
-                                ms.bias,
-                                noise_var_old,
-                                ms.noise_var,
-                                ms.total_obs,
-                            );
-                        }
-                    }
-
-                    state.snaps_since_recalib = 0;
-                    outputs.set_last_recalib(group_idx, snap_ts_ns);
-                }
-            }
-
-            // ── 8. Sync live biases + noise vars, push output ─────────
+            // ── 5. Sync live params to outputs ──────────────────────────
             for (k, ms) in state.member_states.iter().enumerate() {
                 outputs.set_bias(group_idx, k, ms.bias);
                 outputs.set_noise_var(group_idx, k, ms.noise_var);
             }
+
+            // ── 6. Push output ─────────────────────────────────────────
             outputs.push(
                 group_idx,
                 FairPriceOutput {
                     fair_price: state.y.exp(),
                     log_fair_price: state.y,
                     uncertainty_bps: state.p.sqrt() * BPS,
-                    vol_bps: state.h.sqrt() * BPS,
-                    vol_ann_pct: state.vol_ann_pct,
+                    vol_ann_pct: vol_ann_pct[group_idx],
                     snap_ts_ns,
                     n_ticks_used: n_ticks as u32,
-                    vol_source: state.vol_source,
-                    _pad: [0; 3],
+                    _pad: [0; 4],
                 },
             );
 
@@ -961,42 +752,94 @@ pub async fn run_fair_price_task(
     }
 }
 
+/// Load beacon parameters from a JSON file if it has changed since last check.
+/// Returns true if params were updated.
+pub fn load_beacon(
+    path: &std::path::Path,
+    last_mtime: &mut std::time::SystemTime,
+    config: &mut FairPriceConfig,
+) -> bool {
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let mtime = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+    if mtime <= *last_mtime {
+        return false;
+    }
+
+    let data = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("Failed to read beacon file {}: {}", path.display(), e);
+            return false;
+        }
+    };
+    let beacon: serde_json::Value = match serde_json::from_str(&data) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("Failed to parse beacon file {}: {}", path.display(), e);
+            return false;
+        }
+    };
+
+    let groups = match beacon.get("groups").and_then(|g| g.as_object()) {
+        Some(g) => g,
+        None => return false,
+    };
+
+    let mut applied = 0;
+    for group in config.groups.iter_mut() {
+        if let Some(params) = groups.get(&group.name).and_then(|p| p.as_object()) {
+            if let Some(v) = params.get("h_per_ms").and_then(|v| v.as_f64()) {
+                group.h_per_ms = v;
+            }
+            if let Some(members) = params.get("members").and_then(|m| m.as_object()) {
+                for member in group.members.iter_mut() {
+                    let key = format!(
+                        "{}/{}",
+                        member.exchange.as_str(),
+                        crate::symbol_registry::REGISTRY
+                            .get_symbol(member.symbol_id)
+                            .unwrap_or("?")
+                    );
+                    if let Some(mp) = members.get(&key).and_then(|v| v.as_object()) {
+                        if let Some(v) = mp.get("bias").and_then(|v| v.as_f64()) {
+                            member.bias = v;
+                        }
+                        if let Some(v) = mp.get("noise_var").and_then(|v| v.as_f64()) {
+                            member.noise_var = v;
+                        }
+                    }
+                }
+            }
+            applied += 1;
+        }
+    }
+
+    if applied > 0 {
+        *last_mtime = mtime;
+        log::info!(
+            "Loaded beacon params for {} group(s) from {}",
+            applied,
+            path.display()
+        );
+    }
+    applied > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::market_data::MarketData;
     use chrono::Utc;
 
-    #[test]
-    fn test_blend_prior_only() {
-        // No data yet → returns prior
-        assert_eq!(blend(1.0, 999.0, 100.0, 0, 1000.0), 1.0);
-    }
-
-    #[test]
-    fn test_blend_equal_weight() {
-        // prior_weight=100, data_count=100, effective_n=1000 → 50/50
-        let v = blend(1.0, 3.0, 100.0, 100, 1000.0);
-        assert!((v - 2.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_blend_data_saturated() {
-        // data_count far exceeds effective_n → capped at effective_n
-        // prior=100, effective_n=500 → 100/(100+500) prior + 500/(100+500) data
-        let v = blend(0.0, 6.0, 100.0, 999999, 500.0);
-        let expected = 500.0 / 600.0 * 6.0;
-        assert!((v - expected).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_blend_zero_weights() {
-        assert_eq!(blend(42.0, 0.0, 0.0, 0, 100.0), 42.0);
-    }
-
     #[tokio::test]
     async fn test_fair_price_basic() {
         let tick_data = Arc::new(AllMarketData::new());
+
+        // h_per_ms from 100% annualized vol
+        let h_per_ms = 1.0_f64.powi(2) / MS_PER_YEAR;
 
         let config = FairPriceConfig {
             interval_ms: 10,
@@ -1021,14 +864,10 @@ mod tests {
                         invert_reprice: false,
                     },
                 ],
-                garch: GarchParams {
-                    alpha: 0.05,
-                    beta: 0.90,
-                    initial_var: 4e-8,
-                    vol_halflife: 5000,
-                },
-                process_noise_floor: 1e-14,
-                recalib: None,
+                h_per_ms,
+                sigma_mode: SigmaMode::Static,
+                bias_ewma_halflife: 0,
+                sigma_k_floor: 1e-6,
             }],
         };
 
@@ -1067,7 +906,6 @@ mod tests {
             config,
             shutdown_clone,
             None,
-            None,
         ));
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1083,7 +921,6 @@ mod tests {
             fp.fair_price
         );
         assert!(fp.uncertainty_bps > 0.0);
-        assert!(fp.vol_bps > 0.0);
     }
 
     #[test]
@@ -1095,26 +932,18 @@ mod tests {
                 FairPriceGroupConfig {
                     name: "BTC".to_string(),
                     members: vec![],
-                    garch: GarchParams {
-                        alpha: 0.05,
-                        beta: 0.90,
-                        initial_var: 4e-8,
-                    vol_halflife: 5000,
-                    },
-                    process_noise_floor: 1e-14,
-                    recalib: None,
+                    h_per_ms: 1e-14,
+                    sigma_mode: SigmaMode::Static,
+                    bias_ewma_halflife: 0,
+                    sigma_k_floor: 1e-6,
                 },
                 FairPriceGroupConfig {
                     name: "ETH".to_string(),
                     members: vec![],
-                    garch: GarchParams {
-                        alpha: 0.05,
-                        beta: 0.90,
-                        initial_var: 4e-8,
-                    vol_halflife: 5000,
-                    },
-                    process_noise_floor: 1e-14,
-                    recalib: None,
+                    h_per_ms: 1e-14,
+                    sigma_mode: SigmaMode::Static,
+                    bias_ewma_halflife: 0,
+                    sigma_k_floor: 1e-6,
                 },
             ],
         };
@@ -1134,14 +963,10 @@ mod tests {
             groups: vec![FairPriceGroupConfig {
                 name: "TEST".to_string(),
                 members: vec![],
-                garch: GarchParams {
-                    alpha: 0.05,
-                    beta: 0.90,
-                    initial_var: 4e-8,
-                    vol_halflife: 5000,
-                },
-                process_noise_floor: 1e-14,
-                recalib: None,
+                h_per_ms: 1e-14,
+                sigma_mode: SigmaMode::Static,
+                bias_ewma_halflife: 0,
+                sigma_k_floor: 1e-6,
             }],
         };
 
@@ -1154,12 +979,10 @@ mod tests {
                 fair_price: 100.0,
                 log_fair_price: 100.0_f64.ln(),
                 uncertainty_bps: 1.5,
-                vol_bps: 2.0,
                 vol_ann_pct: 45.0,
                 snap_ts_ns: 1000,
                 n_ticks_used: 5,
-                vol_source: VOL_SRC_INLINE,
-                _pad: [0; 3],
+                _pad: [0; 4],
             },
         );
 
@@ -1171,17 +994,5 @@ mod tests {
         let mut scratch = [FairPriceOutput::default(); 4];
         let count = buf.read_last_n(4, &mut scratch);
         assert_eq!(count, 1);
-    }
-
-    #[test]
-    fn test_ewma_garch_is_ewma() {
-        // α + β = 1 → omega = 0, pure EWMA
-        let g = GarchParams {
-            alpha: 0.06,
-            beta: 0.94,
-            initial_var: 1e-6,
-            vol_halflife: 5000,
-        };
-        assert_eq!(g.initial_var * (1.0 - g.alpha - g.beta).max(0.0), 0.0);
     }
 }
