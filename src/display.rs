@@ -52,7 +52,7 @@ pub fn init_display_logger(level: log::LevelFilter) {
     log::set_max_level(level);
 }
 
-fn write_log_section(buf: &mut String, max_lines: usize) {
+pub fn write_log_section(buf: &mut String, max_lines: usize) {
     if max_lines == 0 {
         return;
     }

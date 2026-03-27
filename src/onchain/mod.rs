@@ -152,9 +152,12 @@ impl PoolState {
             )
         };
 
+        // Spread bid/ask by full pool fee — the fee is the one-sided trading cost
+        let fee_frac = cfg.fee as f64 / 1_000_000.0;
+
         MarketData {
-            bid: Some(price),
-            ask: Some(price),
+            bid: Some(price * (1.0 - fee_frac)),
+            ask: Some(price * (1.0 + fee_frac)),
             bid_qty: Some(bid_qty),
             ask_qty: Some(ask_qty),
             exchange_ts: Some(self.block_ts),

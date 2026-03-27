@@ -11,7 +11,7 @@ use tokio::sync::Notify;
 use crypto_feeds::app_config::{AppConfig, load_config, load_onchain, load_perp, load_spot};
 use crypto_feeds::display::init_display_logger;
 use crypto_feeds::fair_price::{
-    FairPriceConfig, FairPriceGroupConfig, FairPriceModel, FairPriceOutputs, FairQuote, GroupMember,
+    FairPriceConfig, FairPriceGroupConfig, FairPriceModel, FairPriceOutputs, GroupMember,
     SigmaMode, load_beacon, run_fair_price_task,
 };
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType};
@@ -32,78 +32,6 @@ const ERASE_EOL: &str = "\x1B[K";
 const GREEN: &str = "\x1B[32m";
 const RESET: &str = "\x1B[0m";
 const BPS: f64 = 1e4;
-
-struct ArbResult {
-    dir: &'static str,   // "BUY" or "SELL"
-    leg2: String,        // "exchange/SYMBOL"
-    profit_bps: f64,
-}
-
-/// For row `i`, find best arb against all other members in the group.
-/// Prices are adjusted to common basis by removing each member's bias:
-///   adjusted = price * exp(-m_k)
-/// BUY arb:  buy at adj_ask_i, sell at best adj_bid_j → profit in bps
-/// SELL arb: sell at adj_bid_i, buy at best adj_ask_j → profit in bps
-fn best_arb(
-    i: usize,
-    quotes: &[(Option<FairQuote>, &str, String, usize)],
-) -> Option<ArbResult> {
-    let qi = quotes[i].0.as_ref()?;
-    let debias_i = (-qi.bias).exp();
-    let adj_bid_i = qi.bid * debias_i;
-    let adj_ask_i = qi.ask * debias_i;
-    let adj_mid_i = qi.mid_at_exchange * debias_i;
-    if adj_mid_i <= 0.0 {
-        return None;
-    }
-
-    let mut best: Option<ArbResult> = None;
-
-    for (j, (qj_opt, ex_name, sym_name, _)) in quotes.iter().enumerate() {
-        if j == i {
-            continue;
-        }
-        let qj = match qj_opt {
-            Some(q) => q,
-            None => continue,
-        };
-        let debias_j = (-qj.bias).exp();
-        let adj_bid_j = qj.bid * debias_j;
-        let adj_ask_j = qj.ask * debias_j;
-
-        // BUY this, SELL other: profit = adj_bid_j - adj_ask_i
-        let buy_profit = (adj_bid_j - adj_ask_i) / adj_mid_i * BPS;
-        if buy_profit >= 0.0 {
-            if best.as_ref().map_or(true, |b| buy_profit > b.profit_bps) {
-                best = Some(ArbResult {
-                    dir: "BUY",
-                    leg2: {
-                                    let s = format!("{}/{}", &ex_name[..ex_name.len().min(5)], sym_name);
-                                    if s.len() > 20 { s[..20].to_string() } else { s }
-                                },
-                    profit_bps: buy_profit,
-                });
-            }
-        }
-
-        // SELL this, BUY other: profit = adj_bid_i - adj_ask_j
-        let sell_profit = (adj_bid_i - adj_ask_j) / adj_mid_i * BPS;
-        if sell_profit >= 0.0 {
-            if best.as_ref().map_or(true, |b| sell_profit > b.profit_bps) {
-                best = Some(ArbResult {
-                    dir: "SELL",
-                    leg2: {
-                                    let s = format!("{}/{}", &ex_name[..ex_name.len().min(5)], sym_name);
-                                    if s.len() > 20 { s[..20].to_string() } else { s }
-                                },
-                    profit_bps: sell_profit,
-                });
-            }
-        }
-    }
-
-    best
-}
 
 fn term_size() -> (usize, usize) {
     #[cfg(unix)]
@@ -350,7 +278,7 @@ async fn run_display(
                         // Header
                         macro_rules! row {
                             ($buf:expr, $($arg:expr),* $(,)?) => {
-                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>7} {:>7} {:>4} {:<20} {:>7}", $($arg),*)
+                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>7} {:>7}", $($arg),*)
                             }
                         }
                         let _ = row!(buf,
@@ -361,7 +289,6 @@ async fn run_display(
                             "BidQty", "AskQty",
                             "m_k", "sigma_k",
                             "P_unc0", "P_unc1", "Age",
-                            "Arb", "ArbLeg2", "ArbBps",
                         );
                         let _ = row!(buf,
                             "", "", "", "",
@@ -371,17 +298,14 @@ async fn run_display(
                             "", "",
                             "(bps)", "(bps)",
                             "(bps)", "(bps)", "(ms)",
-                            "", "", "(bps)",
                         );
 
                         if let Some(members) = out.group_members(group_idx) {
-                            // 1. Collect all quotes + names + member index
-                            let mut row_data: Vec<(Option<FairQuote>, &str, String, usize)> = Vec::new();
                             for (mem_idx, member) in members.iter().enumerate() {
-                                let ex_name = member.exchange.as_str();
-                                let sym_name = member.display_name.as_deref()
-                                    .unwrap_or_else(|| REGISTRY.get_symbol(member.symbol_id).unwrap_or("?"))
-                                    .to_string();
+                                let ex_name = &member.exchange.as_str()[..member.exchange.as_str().len().min(5)];
+                                let sym_full = member.display_name.as_deref()
+                                    .unwrap_or_else(|| REGISTRY.get_symbol(member.symbol_id).unwrap_or("?"));
+                                let sym_name = &sym_full[..sym_full.len().min(16)];
                                 let quote = out.get_fair_quote(
                                     &md,
                                     group_name,
@@ -389,48 +313,12 @@ async fn run_display(
                                     member.symbol_id,
                                     0.0,
                                 );
-                                row_data.push((quote, ex_name, sym_name, mem_idx));
-                            }
-
-                            // Sort by sigma_k ascending (noise_var from quote or params)
-                            row_data.sort_by(|a, b| {
-                                let nv_a = a.0.as_ref().map(|q| q.noise_var)
-                                    .unwrap_or_else(|| out.get_member_params(group_idx, a.3).map(|(_, s)| s).unwrap_or(f64::MAX));
-                                let nv_b = b.0.as_ref().map(|q| q.noise_var)
-                                    .unwrap_or_else(|| out.get_member_params(group_idx, b.3).map(|(_, s)| s).unwrap_or(f64::MAX));
-                                nv_a.partial_cmp(&nv_b).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-
-                            // 2. Compute arb for each row
-                            let arbs: Vec<Option<ArbResult>> = (0..row_data.len())
-                                .map(|i| best_arb(i, &row_data))
-                                .collect();
-
-                            // 3. Find best arb row
-                            let best_arb_idx = arbs.iter().enumerate()
-                                .filter_map(|(i, a)| a.as_ref().map(|a| (i, a.profit_bps)))
-                                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                                .map(|(i, _)| i);
-
-                            // 4. Render rows
-                            for (row_idx, (quote, ex_name, sym_name, orig_mem_idx)) in row_data.iter().enumerate() {
-                                let ex_name = &ex_name[..ex_name.len().min(5)];
-                                let sym_name = &sym_name[..sym_name.len().min(16)];
-                                let is_best = best_arb_idx == Some(row_idx);
-                                let color_on = if is_best { GREEN } else { "" };
-                                let color_off = if is_best { RESET } else { "" };
-
-                                let (arb_dir, arb_leg2, arb_bps) = match &arbs[row_idx] {
-                                    Some(a) => (a.dir, a.leg2.as_str(), fmt_bps(a.profit_bps)),
-                                    None => ("", "", "".to_string()),
-                                };
 
                                 match quote {
                                     Some(q) => {
                                         let hspread_bps = (q.ask - q.bid) / q.mid_at_exchange * BPS / 2.0;
                                         let mk_bps = q.bias * BPS;
                                         let sk_bps = q.noise_var.sqrt() * BPS;
-                                        // Local exchange uncertainty: σ_k² + h_per_ms * age_ms
                                         let h_ms = out.h_per_ms(group_idx);
                                         let age_ms = if q.exchange_ts_ns > 0 {
                                             (now_ns - q.exchange_ts_ns).max(0) as f64 / 1_000_000.0
@@ -439,8 +327,14 @@ async fn run_display(
                                         };
                                         let lcu0 = (q.noise_var + h_ms * age_ms).sqrt() * BPS;
                                         let lcu1 = (q.noise_var + h_ms * (age_ms + 100.0)).sqrt() * BPS;
-                                        let _ = write!(buf, "{}", color_on);
+
+                                        // Highlight if edge > half spread
+                                        let edge_exceeds = q.edge_mid_bps.abs() > hspread_bps;
+                                        let color_on = if edge_exceeds { GREEN } else { "" };
+                                        let color_off = if edge_exceeds { RESET } else { "" };
+
                                         let age_str = format!("{:.0}", age_ms);
+                                        let _ = write!(buf, "{}", color_on);
                                         let _ = row!(buf,
                                             ex_name,
                                             sym_name,
@@ -457,12 +351,11 @@ async fn run_display(
                                             fmt_bps(lcu0),
                                             fmt_bps(lcu1),
                                             age_str,
-                                            arb_dir, arb_leg2, arb_bps,
                                         );
                                         let _ = write!(buf, "{}", color_off);
                                     }
                                     None => {
-                                        let params = out.get_member_params(group_idx, *orig_mem_idx);
+                                        let params = out.get_member_params(group_idx, mem_idx);
                                         let (mk, sk) = params.unwrap_or((0.0, 0.0));
                                         let mk_bps = mk * BPS;
                                         let sk_bps = sk.sqrt() * BPS;
@@ -477,7 +370,6 @@ async fn run_display(
                                             fmt_bps(mk_bps),
                                             fmt_bps(sk_bps),
                                             "-", "-", "-",
-                                            "", "", "",
                                         );
                                     }
                                 }
@@ -485,6 +377,7 @@ async fn run_display(
                         }
                     }
 
+                    crypto_feeds::display::write_log_section(&mut buf, 10);
                     let frame = prepare_frame(&buf);
                     format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW)
                 }).await?;
