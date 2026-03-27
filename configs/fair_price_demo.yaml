@@ -1,0 +1,59 @@
+spot:
+  binance:  ["BTC_USDT", "AIXBT_USDT", "UNI_USDT"]
+  okx:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'UNI_USDT']
+  bybit:   ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
+  coinbase: ["BTC_USD", "ETH_USD", "CLANKER_USD"]
+  kraken:   ["BTC_USD", "ETH_USD", "AIXBT_USD"]
+  mexc:    ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
+
+onchain:
+  rpc_env: "BASE_WSS_RPC"
+  aerodrome:
+    pools:
+      - address: "0xb2cc224c1c9feE385f8ad6a55b4d94E92359DC59"
+        symbol: "ETH_USDC"
+      - address: "0x22A52bB644f855ebD5ca2edB643FF70222D70C31"
+        symbol: "AIXBT_ETH"
+  uniswap:
+    pools:
+      - address: "0x6c561B446416E1A00E8E93E221854d6eA4171372"
+        symbol: "ETH_USDC"
+      - address: "0xf1Fdc83c3A336bdbDC9fB06e318B08EadDC82FF4"
+        symbol: "AIXBT_USDC"
+
+perp:
+  binance:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT', 'CLANKER_USDT', 'AERO_USDT', 'BRETT_USDT', 'VIRTUAL_USDT']
+  kucoin:  ['BTC_USDT', 'AIXBT_USDT', 'SPX_USDT', 'CLANKER_USDT']
+  bingx:  ['BTC_USDT', "ETH_USDT", 'CLANKER_USDT', 'SPX_USDT', 'CLANKER_USDT']
+  okx:  ['BTC_USDT', "ETH_USDT", 'AIXBT_USDT', 'SPX_USDT']
+  apex:  ['BTC_USDT', "ETH_USDT", 'KAITO_USDT', 'SPX_USDT']
+  bybit:    ['BTC_USDT', "CLANKER_USDT"]
+  coinbase: ['BTC_USD', 'ETH_USD', 'CLANKER_USD']
+  kraken:   ['BTC_USD', 'ETH_USD']
+  lighter:  ['BTC_USDC', "UNI_USDC"]
+  extended: ['BTC_USD', 'ETH_USD', 'UNI_USD']
+  nado:     ['BTC_USDT', 'ETH_USDT', 'UNI_USDT']
+  hyperliquid: ['BTC_USDC', 'ETH_USDC', 'UNI_USDC', 'AIXBT_USDC', 'SPX_USDC']
+
+fair_price:
+  model: "kalman"
+  sigma_mode: "instant_spread"
+  bias_ewma_halflife_s: 3.0
+  spread_ewma_halflife_s: 3.0
+  sigma_k_floor: 1e-6
+  vol_engine:
+    type: "gk_ewma"
+    default_init_ann_vol: 1.0
+    halflife_s: 600.0
+    floor_ann: 1.0
+    BTC:
+      init_ann_vol: 1.0
+      floor_ann: 0.30
+    ETH:
+      init_ann_vol: 1.27
+      floor_ann: 0.30
+    VIRTUAL:
+      init_ann_vol: 2.50
+    AIXBT:
+      init_ann_vol: 3.16
+
