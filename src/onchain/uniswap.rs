@@ -160,7 +160,7 @@ async fn run_feed(
                 }
             }
             Err(e) => {
-                error!("Uniswap poll error at block {}: {}", block_number, e);
+                error!("Uniswap poll error at block {}: {:#}", block_number, e);
             }
         }
     }
@@ -197,7 +197,7 @@ pub async fn listen_uniswap(
                 match result {
                     Ok(()) => break,
                     Err(e) => {
-                        error!("Uniswap feed error: {}. Reconnecting in {:?}", e, backoff);
+                        error!("Uniswap feed error: {:#}. Reconnecting in {:?}", e, backoff);
                         tokio::select! {
                             _ = tokio::time::sleep(backoff) => {}
                             _ = shutdown.notified() => {
