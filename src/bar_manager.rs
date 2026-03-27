@@ -9,26 +9,191 @@ use tokio::time::{self, Duration, MissedTickBehavior};
 
 const ONE_MIN_MS: i64 = 60_000;
 
-// ── Internal state ────────────────────────────────────────────────────
+// ── BarBuilder ───────────────────────────────────────────────────────
 
-struct Partial1m {
+struct BuilderPartial {
     open_time_ms: i64,
     open: f64,
     high: f64,
     low: f64,
     close: f64,
-    prev_tick_pos: u64,
-    n_ticks: u64,
 }
 
-pub(crate) struct SymbolBarState {
-    pub completed: VecDeque<Bar>,
-    pub completed_1m: VecDeque<Bar>,
-    partial_1m: Option<Partial1m>,
-    pub exchange: Exchange,
-    pub symbol_id: SymbolId,
+pub struct BarBuilder {
+    pub(crate) completed: VecDeque<Bar>,
+    pub(crate) completed_1m: VecDeque<Bar>,
+    partial_1m: Option<BuilderPartial>,
+    target_min: usize,
     max_bars: usize,
     max_1m: usize,
+}
+
+impl BarBuilder {
+    pub fn new(target_min: usize, max_bars: usize) -> Self {
+        let max_1m = 2 * target_min + 4;
+        Self {
+            completed: VecDeque::with_capacity(max_bars + 1),
+            completed_1m: VecDeque::with_capacity(max_1m + 1),
+            partial_1m: None,
+            target_min,
+            max_bars,
+            max_1m,
+        }
+    }
+
+    pub fn feed(&mut self, price: f64, ts_ms: i64) {
+        let current_1m_start = (ts_ms / ONE_MIN_MS) * ONE_MIN_MS;
+
+        let partial = match self.partial_1m.as_ref() {
+            None => {
+                self.partial_1m = Some(BuilderPartial {
+                    open_time_ms: current_1m_start,
+                    open: price,
+                    high: price,
+                    low: price,
+                    close: price,
+                });
+                return;
+            }
+            Some(p) => p,
+        };
+
+        if current_1m_start > partial.open_time_ms {
+            // Freeze partial into a completed 1m bar
+            let completed_1m = Bar {
+                open_time_ms: partial.open_time_ms,
+                open: partial.open,
+                high: partial.high,
+                low: partial.low,
+                close: partial.close,
+                volume: 0.0,
+            };
+            let partial_start = partial.open_time_ms;
+
+            self.completed_1m.push_back(completed_1m);
+            while self.completed_1m.len() > self.max_1m {
+                self.completed_1m.pop_front();
+            }
+
+            // Check target_min boundary
+            let target_ms = self.target_min as i64 * ONE_MIN_MS;
+            let current_target_start = (ts_ms / target_ms) * target_ms;
+            if current_target_start > partial_start
+                && (partial_start + ONE_MIN_MS) >= current_target_start
+            {
+                let n_1m = self.completed_1m.len();
+                let take = self.target_min.min(n_1m);
+                let slice_start = n_1m - take;
+                let slice: Vec<Bar> =
+                    self.completed_1m.range(slice_start..).copied().collect();
+                if let Some(target_bar) = aggregate_1m_to_target(&slice) {
+                    self.completed.push_back(target_bar);
+                    while self.completed.len() > self.max_bars {
+                        self.completed.pop_front();
+                    }
+                }
+            }
+
+            // Start new partial with current price as OHLC
+            self.partial_1m = Some(BuilderPartial {
+                open_time_ms: current_1m_start,
+                open: price,
+                high: price,
+                low: price,
+                close: price,
+            });
+        } else {
+            // Update partial high/low/close
+            let p = self.partial_1m.as_mut().unwrap();
+            if price > p.high { p.high = price; }
+            if price < p.low { p.low = price; }
+            p.close = price;
+        }
+    }
+
+    pub fn completed(&self) -> &VecDeque<Bar> {
+        &self.completed
+    }
+
+    pub fn completed_1m(&self) -> &VecDeque<Bar> {
+        &self.completed_1m
+    }
+
+    pub fn n_completed(&self) -> usize {
+        self.completed.len()
+    }
+
+    pub fn target_min(&self) -> usize {
+        self.target_min
+    }
+
+    /// Build the virtual head bar: a sliding window of the last `target_min`
+    /// 1-min bars (completed + partial), aggregated into a single OHLC bar.
+    ///
+    /// `latest_price` extends the partial 1m bar with the most recent BBO mid.
+    ///
+    /// Falls back to the last completed target_min bar when fewer than
+    /// `target_min` 1-min bars are available.
+    pub fn virtual_head(&self, latest_price: f64) -> Option<Bar> {
+        let partial = self.partial_1m.as_ref()?;
+
+        // Virtual partial 1m with latest tick
+        let vp = Bar {
+            open_time_ms: partial.open_time_ms,
+            open: partial.open,
+            high: partial.high.max(latest_price),
+            low: if partial.low > 0.0 {
+                partial.low.min(latest_price)
+            } else {
+                latest_price
+            },
+            close: latest_price,
+            volume: 0.0,
+        };
+
+        let n_1m = self.completed_1m.len();
+        let total_1m = n_1m + 1;
+
+        if total_1m >= self.target_min {
+            // Enough 1-min bars — build sliding window aggregate
+            let take_1m = self.target_min - 1;
+            if take_1m == 0 {
+                return Some(vp);
+            }
+            let start_idx = n_1m - take_1m;
+            let first = &self.completed_1m[start_idx];
+            let mut agg = Bar {
+                open_time_ms: first.open_time_ms,
+                open: first.open,
+                high: first.high,
+                low: first.low,
+                close: first.close,
+                volume: 0.0,
+            };
+            for i in (start_idx + 1)..n_1m {
+                let b = &self.completed_1m[i];
+                if b.high > agg.high { agg.high = b.high; }
+                if b.low < agg.low { agg.low = b.low; }
+                agg.close = b.close;
+            }
+            if vp.high > agg.high { agg.high = vp.high; }
+            if vp.low < agg.low { agg.low = vp.low; }
+            agg.close = vp.close;
+            Some(agg)
+        } else {
+            // Not enough 1-min bars — fall back to last completed target_min bar
+            Some(self.completed.back().copied().unwrap_or(vp))
+        }
+    }
+}
+
+// ── Internal state ────────────────────────────────────────────────────
+
+pub(crate) struct SymbolBarState {
+    pub builder: BarBuilder,
+    pub exchange: Exchange,
+    pub symbol_id: SymbolId,
+    pub prev_tick_pos: u64,
 }
 
 pub(crate) struct BarManagerInner {
@@ -53,15 +218,15 @@ pub struct BarsView<'a> {
 
 impl<'a> BarsView<'a> {
     pub fn completed(&self) -> &VecDeque<Bar> {
-        &self.guard.symbols[&self.symbol].completed
+        self.guard.symbols[&self.symbol].builder.completed()
     }
 
     pub fn completed_1m(&self) -> &VecDeque<Bar> {
-        &self.guard.symbols[&self.symbol].completed_1m
+        self.guard.symbols[&self.symbol].builder.completed_1m()
     }
 
     pub fn n_completed(&self) -> usize {
-        self.guard.symbols[&self.symbol].completed.len()
+        self.guard.symbols[&self.symbol].builder.n_completed()
     }
 
     pub fn target_min(&self) -> usize {
@@ -70,7 +235,7 @@ impl<'a> BarsView<'a> {
 
     pub fn partial_age_secs(&self) -> f64 {
         let state = &self.guard.symbols[&self.symbol];
-        match &state.partial_1m {
+        match &state.builder.partial_1m {
             Some(p) => {
                 (Utc::now().timestamp_millis() - p.open_time_ms) as f64 / 1000.0
             }
@@ -79,7 +244,7 @@ impl<'a> BarsView<'a> {
     }
 
     pub fn has_ticks(&self) -> bool {
-        self.guard.symbols[&self.symbol].partial_1m.is_some()
+        self.guard.symbols[&self.symbol].builder.partial_1m.is_some()
     }
 
     pub fn exchange(&self) -> Exchange {
@@ -98,54 +263,7 @@ impl<'a> BarsView<'a> {
     /// Falls back to the last completed target_min bar when fewer than
     /// `target_min` 1-min bars are available.
     pub fn virtual_head(&self, latest_mid: f64) -> Option<Bar> {
-        let state = &self.guard.symbols[&self.symbol];
-        let target_min = self.guard.target_min;
-        let partial = state.partial_1m.as_ref()?;
-
-        // Virtual partial 1m with latest tick
-        let vp = Bar {
-            open_time_ms: partial.open_time_ms,
-            open: partial.open,
-            high: partial.high.max(latest_mid),
-            low: if partial.low > 0.0 {
-                partial.low.min(latest_mid)
-            } else {
-                latest_mid
-            },
-            close: latest_mid,
-            volume: 0.0,
-        };
-
-        let n_1m = state.completed_1m.len();
-        let total_1m = n_1m + 1;
-
-        if total_1m >= target_min {
-            // Enough 1-min bars — build sliding window aggregate
-            let take_1m = target_min - 1;
-            let start_idx = n_1m - take_1m;
-            let first = &state.completed_1m[start_idx];
-            let mut agg = Bar {
-                open_time_ms: first.open_time_ms,
-                open: first.open,
-                high: first.high,
-                low: first.low,
-                close: first.close,
-                volume: 0.0,
-            };
-            for i in (start_idx + 1)..n_1m {
-                let b = &state.completed_1m[i];
-                if b.high > agg.high { agg.high = b.high; }
-                if b.low < agg.low { agg.low = b.low; }
-                agg.close = b.close;
-            }
-            if vp.high > agg.high { agg.high = vp.high; }
-            if vp.low < agg.low { agg.low = vp.low; }
-            agg.close = vp.close;
-            Some(agg)
-        } else {
-            // Not enough 1-min bars — fall back to last completed target_min bar
-            Some(state.completed.back().copied().unwrap_or(vp))
-        }
+        self.guard.symbols[&self.symbol].builder.virtual_head(latest_mid)
     }
 }
 
@@ -157,19 +275,15 @@ pub struct BarManager {
 
 impl BarManager {
     pub fn new(symbols: Vec<BarSymbol>, target_min: usize, max_bars: usize) -> Self {
-        let max_1m = 2 * target_min + 4;
         let mut map = HashMap::new();
         for s in symbols {
             map.insert(
                 s.name,
                 SymbolBarState {
-                    completed: VecDeque::with_capacity(max_bars + 1),
-                    completed_1m: VecDeque::with_capacity(max_1m + 1),
-                    partial_1m: None,
+                    builder: BarBuilder::new(target_min, max_bars),
                     exchange: s.exchange,
                     symbol_id: s.symbol_id,
-                    max_bars,
-                    max_1m,
+                    prev_tick_pos: 0,
                 },
             );
         }
@@ -185,25 +299,25 @@ impl BarManager {
     pub fn warmup(&self, symbol: &str, target_bars: Vec<Bar>, bars_1m: &[Bar]) {
         let mut inner = self.inner.write().unwrap();
         if let Some(state) = inner.symbols.get_mut(symbol) {
-            let max = state.max_bars;
+            let max = state.builder.max_bars;
             let start = target_bars.len().saturating_sub(max);
-            state.completed.clear();
+            state.builder.completed.clear();
             for bar in &target_bars[start..] {
-                state.completed.push_back(*bar);
+                state.builder.completed.push_back(*bar);
             }
 
-            let keep_1m = state.max_1m;
+            let keep_1m = state.builder.max_1m;
             let start_1m = bars_1m.len().saturating_sub(keep_1m);
-            state.completed_1m.clear();
+            state.builder.completed_1m.clear();
             for bar in &bars_1m[start_1m..] {
-                state.completed_1m.push_back(*bar);
+                state.builder.completed_1m.push_back(*bar);
             }
 
             log::info!(
                 "bar warmup {}: {} target bars, {} 1m bars",
                 symbol,
-                state.completed.len(),
-                state.completed_1m.len(),
+                state.builder.completed.len(),
+                state.builder.completed_1m.len(),
             );
         }
     }
@@ -277,14 +391,10 @@ async fn run_bar_maintenance(
             _ = interval.tick() => {}
         }
 
-        let now_ms = Utc::now().timestamp_millis();
         let mut guard = match inner.write() {
             Ok(g) => g,
             Err(_) => continue,
         };
-
-        let target_min = guard.target_min;
-        let target_ms = target_min as i64 * ONE_MIN_MS;
 
         for state in guard.symbols.values_mut() {
             let coll = tick_data.get_collection(&state.exchange);
@@ -293,99 +403,21 @@ async fn run_bar_maintenance(
                 None => continue,
             };
             let cur_pos = tick_buf.write_pos();
-
-            // Initialize partial_1m if needed
-            if state.partial_1m.is_none() {
-                let bar_start = (now_ms / ONE_MIN_MS) * ONE_MIN_MS;
-                if let Some(md) = tick_buf.latest() {
-                    if let Some(mid) = md.midquote() {
-                        state.partial_1m = Some(Partial1m {
-                            open_time_ms: bar_start,
-                            open: mid,
-                            high: mid,
-                            low: mid,
-                            close: mid,
-                            prev_tick_pos: cur_pos,
-                            n_ticks: 1,
-                        });
-                    }
-                }
-                continue;
-            }
-
-            // Check 1-min boundary
-            let current_1m_start = (now_ms / ONE_MIN_MS) * ONE_MIN_MS;
-            let partial_start = state.partial_1m.as_ref().unwrap().open_time_ms;
-
-            if current_1m_start > partial_start {
-                let p = state.partial_1m.as_ref().unwrap();
-                let completed_1m = Bar {
-                    open_time_ms: p.open_time_ms,
-                    open: p.open,
-                    high: p.high,
-                    low: p.low,
-                    close: p.close,
-                    volume: 0.0,
-                };
-                let prev_close = p.close;
-
-                state.completed_1m.push_back(completed_1m);
-                while state.completed_1m.len() > state.max_1m {
-                    state.completed_1m.pop_front();
-                }
-
-                // Check target_min boundary: did this 1-min bar end at or past a target boundary?
-                let current_target_start = (now_ms / target_ms) * target_ms;
-                if current_target_start > partial_start
-                    && (partial_start + ONE_MIN_MS) >= current_target_start
-                {
-                    let n_1m = state.completed_1m.len();
-                    let take = target_min.min(n_1m);
-                    let slice_start = n_1m - take;
-                    let slice: Vec<Bar> =
-                        state.completed_1m.range(slice_start..).copied().collect();
-                    if let Some(target_bar) = aggregate_1m_to_target(&slice) {
-                        state.completed.push_back(target_bar);
-                        while state.completed.len() > state.max_bars {
-                            state.completed.pop_front();
-                        }
-                    }
-                }
-
-                // Start new partial_1m
-                let mid = tick_buf
-                    .latest()
-                    .and_then(|md| md.midquote())
-                    .unwrap_or(prev_close);
-                state.partial_1m = Some(Partial1m {
-                    open_time_ms: current_1m_start,
-                    open: mid,
-                    high: mid,
-                    low: mid,
-                    close: mid,
-                    prev_tick_pos: cur_pos,
-                    n_ticks: 1,
-                });
-                continue;
-            }
-
-            // Scan new ticks into partial_1m
-            let partial = state.partial_1m.as_mut().unwrap();
-            let start_pos = partial.prev_tick_pos;
+            let start_pos = state.prev_tick_pos;
             let count = cur_pos.saturating_sub(start_pos).min(5000);
             for i in 0..count {
                 if let Some(md) = tick_buf.read_at(start_pos + i) {
                     if let Some(mid) = md.midquote() {
                         if mid > 0.0 {
-                            if mid > partial.high { partial.high = mid; }
-                            if mid < partial.low { partial.low = mid; }
-                            partial.close = mid;
-                            partial.n_ticks += 1;
+                            let ts_ms = md.exchange_ts
+                                .map(|t| t.timestamp_millis())
+                                .unwrap_or_else(|| Utc::now().timestamp_millis());
+                            state.builder.feed(mid, ts_ms);
                         }
                     }
                 }
             }
-            partial.prev_tick_pos = cur_pos;
+            state.prev_tick_pos = cur_pos;
         }
     }
 }
@@ -410,5 +442,76 @@ mod tests {
         assert_eq!(agg.high, 104.0);
         assert_eq!(agg.low, 98.0);
         assert_eq!(agg.close, 99.0);
+    }
+
+    #[test]
+    fn test_bar_builder_feed() {
+        let mut builder = BarBuilder::new(3, 10);
+
+        // Feed ticks within minute 0 (0..60_000ms)
+        builder.feed(100.0, 0);
+        builder.feed(102.0, 10_000);
+        builder.feed(99.0, 20_000);
+        builder.feed(101.0, 50_000);
+
+        assert_eq!(builder.n_completed(), 0);
+        assert_eq!(builder.completed_1m().len(), 0);
+        // partial should exist
+        assert!(builder.partial_1m.is_some());
+
+        // Cross into minute 1 — freezes minute 0
+        builder.feed(103.0, 60_000);
+        assert_eq!(builder.completed_1m().len(), 1);
+        let bar0 = &builder.completed_1m()[0];
+        assert_eq!(bar0.open_time_ms, 0);
+        assert_eq!(bar0.open, 100.0);
+        assert_eq!(bar0.high, 102.0);
+        assert_eq!(bar0.low, 99.0);
+        assert_eq!(bar0.close, 101.0);
+
+        // Feed more in minute 1
+        builder.feed(105.0, 90_000);
+
+        // Cross into minute 2 — freezes minute 1
+        builder.feed(104.0, 120_000);
+        assert_eq!(builder.completed_1m().len(), 2);
+        let bar1 = &builder.completed_1m()[1];
+        assert_eq!(bar1.open, 103.0);
+        assert_eq!(bar1.high, 105.0);
+        assert_eq!(bar1.low, 103.0);
+        assert_eq!(bar1.close, 105.0);
+
+        // Cross into minute 3 — freezes minute 2, and hits target boundary (3 min)
+        builder.feed(106.0, 180_000);
+        assert_eq!(builder.completed_1m().len(), 3);
+        // Should have aggregated a 3-min target bar
+        assert_eq!(builder.n_completed(), 1);
+        let target = &builder.completed()[0];
+        assert_eq!(target.open, 100.0);
+        assert_eq!(target.high, 105.0);
+        assert_eq!(target.low, 99.0);
+        assert_eq!(target.close, 104.0);
+    }
+
+    #[test]
+    fn test_bar_builder_virtual_head() {
+        let mut builder = BarBuilder::new(2, 10);
+
+        // No partial → None
+        assert!(builder.virtual_head(100.0).is_none());
+
+        // Start partial
+        builder.feed(100.0, 0);
+        // With partial but no completed 1m, falls back (no completed target bars either)
+        let vh = builder.virtual_head(101.0).unwrap();
+        assert_eq!(vh.close, 101.0);
+
+        // Complete minute 0, start minute 1
+        builder.feed(102.0, 60_000);
+        // Now have 1 completed 1m + 1 partial = 2 = target_min
+        let vh = builder.virtual_head(103.0).unwrap();
+        assert_eq!(vh.open, 100.0);     // from completed_1m[0]
+        assert_eq!(vh.high, 103.0);     // from virtual partial
+        assert_eq!(vh.close, 103.0);    // latest_price
     }
 }

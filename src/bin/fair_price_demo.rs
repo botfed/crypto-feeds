@@ -11,17 +11,13 @@ use tokio::sync::Notify;
 use crypto_feeds::app_config::{AppConfig, load_config, load_onchain, load_perp, load_spot};
 use crypto_feeds::display::init_display_logger;
 use crypto_feeds::fair_price::{
-    FairPriceConfig, FairPriceGroupConfig, FairPriceModel, FairPriceOutputs, GroupMember,
-    SigmaMode, load_beacon, run_fair_price_task,
+    FairPriceConfig, FairPriceGroupConfig, FairPriceOutputs, GroupMember,
+    run_fair_price_task,
 };
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType};
 use crypto_feeds::symbol_registry::REGISTRY;
-use std::path::Path;
 
-const BEACON_PATH: &str = "configs/beacon.yaml";
-/// Default h_per_ms from 100% annualized vol
-const MS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0 * 1000.0;
-const DEFAULT_H_PER_MS: f64 = 1.0 / MS_PER_YEAR;
+const DEFAULT_CONFIG: &str = "configs/fair_price_demo.yaml";
 
 const ALT_SCREEN_ON: &str = "\x1B[?1049h";
 const ALT_SCREEN_OFF: &str = "\x1B[?1049l";
@@ -83,6 +79,9 @@ async fn flush_str(s: String) -> Result<()> {
 /// Groups symbols by base asset. For each base, collects all (exchange, symbol_id)
 /// pairs across spot and perp sections. The underlying is "BASE_USD" style.
 fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
+    let fp = &cfg.fair_price;
+    let model = fp.parse_model();
+    let sigma_mode = fp.parse_sigma_mode();
     // (exchange_name, symbol_str, instrument_type, reprice_group)
     type Entry = (String, String, InstrumentType, Option<String>);
     let mut base_map: HashMap<String, Vec<Entry>> = HashMap::new();
@@ -177,15 +176,11 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
             groups.push(FairPriceGroupConfig {
                 name: base.clone(),
                 members,
-                h_per_ms: DEFAULT_H_PER_MS,
-                sigma_mode: SigmaMode::InstantSpread,
-                model: FairPriceModel::Kalman,
-                bias_ewma_halflife_ms: 3000.0,
-                spread_ewma_halflife_ms: 3000.0,
-                sigma_k_floor: 1e-6,
-                vol_ewma_halflife_ms: None,
-                vol_floor_ann: None,
-                vol_init_ann: None,
+                sigma_mode: sigma_mode,
+                model: model,
+                bias_ewma_halflife_ms: fp.bias_ewma_halflife_s * 1000.0,
+                spread_ewma_halflife_ms: fp.spread_ewma_halflife_s * 1000.0,
+                sigma_k_floor: fp.sigma_k_floor,
             });
         }
     }
@@ -213,6 +208,8 @@ async fn run_display(
     tick_data: Arc<AllMarketData>,
     outputs: Arc<FairPriceOutputs>,
     shutdown: Arc<Notify>,
+    fp_model_str: String,
+    vol_engine_str: String,
 ) -> Result<()> {
     let shutdown_fut = shutdown.notified();
     tokio::pin!(shutdown_fut);
@@ -231,6 +228,8 @@ async fn run_display(
             _ = interval.tick() => {
                 let md = Arc::clone(&tick_data);
                 let out = Arc::clone(&outputs);
+                let ms = fp_model_str.clone();
+                let vs = vol_engine_str.clone();
                 let frame = tokio::task::spawn_blocking(move || {
                     let elapsed = start.elapsed().as_secs();
                     let h = elapsed / 3600;
@@ -242,8 +241,8 @@ async fn run_display(
 
                     let _ = writeln!(
                         buf,
-                        "========== Fair Price Engine (static) ==========  uptime: {:02}:{:02}:{:02}",
-                        h, m, sec,
+                        "========== Fair Price Engine ({} + {}) ==========  uptime: {:02}:{:02}:{:02}",
+                        ms, vs, h, m, sec,
                     );
 
                     for (group_idx, group_name) in out.group_names().iter().enumerate() {
@@ -395,11 +394,11 @@ async fn run_display(
 async fn main() -> Result<()> {
     init_display_logger(log::LevelFilter::Info);
 
-    let beacon_path = std::env::args()
+    let config_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| BEACON_PATH.to_string());
+        .unwrap_or_else(|| DEFAULT_CONFIG.to_string());
 
-    let cfg: AppConfig = load_config("configs/config.yaml").context("loading config.yaml")?;
+    let cfg: AppConfig = load_config(&config_path).context("loading config")?;
 
     let market_data = Arc::new(AllMarketData::new());
     let shutdown = Arc::new(Notify::new());
@@ -419,27 +418,23 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Build config, then load beacon params (h_per_ms, bias, noise_var)
-    let beacon = Path::new(&beacon_path);
-    let mut fp_config = FairPriceConfig {
+    // Build vol_provider from fair_price config section
+    let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+    let vol_provider = cfg.fair_price.to_vol_provider(&group_names);
+
+    let fp_config = FairPriceConfig {
         interval_ms: 100,
         buffer_capacity: 65536,
         groups,
-        vol_ewma_halflife_ms: 0.0,
-        vol_floor_ann: 0.50,
-        vol_init_ann: 0.0,
+        vol_provider,
     };
-    let mut beacon_mtime = std::time::UNIX_EPOCH;
-    load_beacon(beacon, &mut beacon_mtime, &mut fp_config);
 
-    for g in &fp_config.groups {
-        let vol_hl = g.vol_ewma_halflife_ms.unwrap_or(fp_config.vol_ewma_halflife_ms);
-        let vol_floor = g.vol_floor_ann.unwrap_or(fp_config.vol_floor_ann);
-        let vol_init = g.vol_init_ann.unwrap_or(fp_config.vol_init_ann);
-        let ann_vol_pct = (g.h_per_ms * MS_PER_YEAR).sqrt() * 100.0;
+    for (gi, g) in fp_config.groups.iter().enumerate() {
+        let ann_vol_pct = fp_config.vol_provider.h_per_ms(gi).max(0.0).sqrt()
+            * (365.25 * 24.0 * 3600.0 * 1000.0_f64).sqrt() * 100.0;
         log::info!(
-            "Group '{}': {} members, ann_vol={:.1}%, vol_ewma_hl={}ms, floor={:.0}%, init={:.0}%",
-            g.name, g.members.len(), ann_vol_pct, vol_hl, vol_floor * 100.0, vol_init * 100.0,
+            "Group '{}': {} members, ann_vol={:.1}%",
+            g.name, g.members.len(), ann_vol_pct,
         );
     }
 
@@ -458,8 +453,11 @@ async fn main() -> Result<()> {
         let md = Arc::clone(&market_data);
         let out = Arc::clone(&outputs);
         let sd = Arc::clone(&shutdown);
+        let model_str = format!("{}_{}", cfg.fair_price.model, cfg.fair_price.sigma_mode);
+        let ve = &cfg.fair_price.vol_engine;
+        let ve_str = format!("{} hl={}s", ve.engine_type, ve.halflife_s);
         handles.push(tokio::spawn(async move {
-            if let Err(e) = run_display(md, out, sd).await {
+            if let Err(e) = run_display(md, out, sd, model_str, ve_str).await {
                 error!("display exited with error {:?}", e);
             }
         }));

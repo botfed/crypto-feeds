@@ -32,6 +32,163 @@ fn default_warmup_days() -> u32 {
     2
 }
 
+/// Per-asset vol config within the vol_engine section.
+#[derive(Debug, Deserialize, Clone)]
+pub struct AssetVolConfig {
+    pub init_ann_vol: f64,
+    pub floor_ann: Option<f64>,
+}
+
+/// Vol engine config — nested under fair_price.vol_engine.
+#[derive(Debug, Deserialize, Clone)]
+pub struct VolEngineConfig {
+    #[serde(rename = "type", default = "default_vol_engine_type")]
+    pub engine_type: String,
+    #[serde(default = "default_init_ann_vol")]
+    pub default_init_ann_vol: f64,
+    #[serde(default)]
+    pub halflife_s: f64,
+    #[serde(default = "default_floor_ann")]
+    pub floor_ann: f64,
+    #[serde(default = "default_bar_min")]
+    pub bar_min: usize,
+    #[serde(flatten)]
+    pub assets: HashMap<String, AssetVolConfig>,
+}
+
+fn default_bar_min() -> usize {
+    1
+}
+
+fn default_vol_engine_type() -> String {
+    "static".to_string()
+}
+
+fn default_init_ann_vol() -> f64 {
+    1.0
+}
+
+fn default_floor_ann() -> f64 {
+    0.50
+}
+
+impl Default for VolEngineConfig {
+    fn default() -> Self {
+        Self {
+            engine_type: default_vol_engine_type(),
+            default_init_ann_vol: default_init_ann_vol(),
+            halflife_s: 0.0,
+            floor_ann: default_floor_ann(),
+            bar_min: default_bar_min(),
+            assets: HashMap::new(),
+        }
+    }
+}
+
+impl VolEngineConfig {
+    /// Get initial annualized vol for an asset, falling back to the default.
+    pub fn init_ann_vol(&self, asset: &str) -> f64 {
+        self.assets
+            .get(asset)
+            .map(|a| a.init_ann_vol)
+            .unwrap_or(self.default_init_ann_vol)
+    }
+
+    /// Get floor_ann for an asset, falling back to the global default.
+    pub fn floor_ann_for(&self, asset: &str) -> f64 {
+        self.assets
+            .get(asset)
+            .and_then(|a| a.floor_ann)
+            .unwrap_or(self.floor_ann)
+    }
+}
+
+fn default_model() -> String { "kalman".to_string() }
+fn default_sigma_mode() -> String { "instant_spread".to_string() }
+fn default_bias_ewma_halflife_s() -> f64 { 3.0 }
+fn default_spread_ewma_halflife_s() -> f64 { 3.0 }
+fn default_sigma_k_floor() -> f64 { 1e-6 }
+
+/// Top-level fair_price config section.
+#[derive(Debug, Deserialize, Clone)]
+pub struct FairPriceParamsConfig {
+    #[serde(default = "default_model")]
+    pub model: String,
+    #[serde(default = "default_sigma_mode")]
+    pub sigma_mode: String,
+    #[serde(default = "default_bias_ewma_halflife_s")]
+    pub bias_ewma_halflife_s: f64,
+    #[serde(default = "default_spread_ewma_halflife_s")]
+    pub spread_ewma_halflife_s: f64,
+    #[serde(default = "default_sigma_k_floor")]
+    pub sigma_k_floor: f64,
+    /// GG-specific: max age in seconds before an exchange is excluded. 0 = no cutoff.
+    #[serde(default)]
+    pub max_latency_s: f64,
+    /// GG-specific: exp decay half-life in seconds. 0 = no decay.
+    #[serde(default)]
+    pub decay_halflife_s: f64,
+    #[serde(default)]
+    pub vol_engine: VolEngineConfig,
+}
+
+impl Default for FairPriceParamsConfig {
+    fn default() -> Self {
+        Self {
+            model: default_model(),
+            sigma_mode: default_sigma_mode(),
+            bias_ewma_halflife_s: default_bias_ewma_halflife_s(),
+            spread_ewma_halflife_s: default_spread_ewma_halflife_s(),
+            sigma_k_floor: default_sigma_k_floor(),
+            max_latency_s: 0.0,
+            decay_halflife_s: 0.0,
+            vol_engine: VolEngineConfig::default(),
+        }
+    }
+}
+
+impl FairPriceParamsConfig {
+    pub fn parse_model(&self) -> crate::fair_price::FairPriceModel {
+        match self.model.as_str() {
+            "gg" | "gonzalo_granger" => crate::fair_price::FairPriceModel::GonzaloGranger {
+                max_latency_ms: self.max_latency_s * 1000.0,
+                decay_halflife_ms: self.decay_halflife_s * 1000.0,
+            },
+            _ => crate::fair_price::FairPriceModel::Kalman,
+        }
+    }
+
+    pub fn parse_sigma_mode(&self) -> crate::fair_price::SigmaMode {
+        match self.sigma_mode.as_str() {
+            "ewma_spread" => crate::fair_price::SigmaMode::EwmaSpread,
+            "static" => crate::fair_price::SigmaMode::Static,
+            _ => crate::fair_price::SigmaMode::InstantSpread,
+        }
+    }
+
+    /// Build a VolProvider from this config for the given group names.
+    pub fn to_vol_provider(&self, group_names: &[String]) -> crate::vol_provider::VolProvider {
+        let ve = &self.vol_engine;
+        let groups: Vec<(f64, f64, f64)> = group_names
+            .iter()
+            .map(|name| (ve.init_ann_vol(name), ve.halflife_s * 1000.0, ve.floor_ann_for(name)))
+            .collect();
+
+        match ve.engine_type.as_str() {
+            "ewma" => {
+                crate::vol_provider::VolProvider::new_ewma(&groups)
+            }
+            "gk_ewma" => {
+                crate::vol_provider::VolProvider::new_gk_ewma(&groups, ve.bar_min)
+            }
+            _ => {
+                let ann_vols = group_names.iter().map(|n| ve.init_ann_vol(n)).collect();
+                crate::vol_provider::VolProvider::new_static(ann_vols)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -45,6 +202,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub onchain: Option<OnchainConfig>,
+
+    #[serde(default)]
+    pub fair_price: FairPriceParamsConfig,
 
     #[serde(default)]
     pub vol_models: Option<VolModelConfig>,

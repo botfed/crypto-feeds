@@ -107,8 +107,6 @@ pub enum FairPriceModel {
 pub struct FairPriceGroupConfig {
     pub name: String,
     pub members: Vec<GroupMember>,
-    /// Per-millisecond transition variance: h_per_ms = ann_vol² / ms_per_year.
-    pub h_per_ms: f64,
     /// Which fair price model to use. Default: Kalman.
     pub model: FairPriceModel,
     /// How sigma_k is determined. Default: InstantSpread.
@@ -119,12 +117,6 @@ pub struct FairPriceGroupConfig {
     pub spread_ewma_halflife_ms: f64,
     /// Floor for sigma_k in log-price units. Default 1e-6 (≈ 0.01 bps).
     pub sigma_k_floor: f64,
-    /// Per-group override for vol EWMA halflife. None = use global.
-    pub vol_ewma_halflife_ms: Option<f64>,
-    /// Per-group override for vol floor (annualized). None = use global.
-    pub vol_floor_ann: Option<f64>,
-    /// Per-group override for vol init seed (annualized). None = use global.
-    pub vol_init_ann: Option<f64>,
 }
 
 /// Top-level configuration for the fair price task.
@@ -132,12 +124,7 @@ pub struct FairPriceConfig {
     pub interval_ms: u64,
     pub buffer_capacity: usize,
     pub groups: Vec<FairPriceGroupConfig>,
-    /// Global default: EWMA halflife in ms for vol adaptation. 0 = static.
-    pub vol_ewma_halflife_ms: f64,
-    /// Global default: hard floor as annualized vol fraction. Default 0.10.
-    pub vol_floor_ann: f64,
-    /// Global default: initial vol seed as annualized fraction. 0 = use beacon h_per_ms.
-    pub vol_init_ann: f64,
+    pub vol_provider: crate::vol_provider::VolProvider,
 }
 
 /// Per-member mutable state tracked between snapshots.
@@ -163,16 +150,6 @@ struct GroupState {
     prev_ts_ns: i64,
     initialized: bool,
     member_states: Vec<MemberState>,
-    /// Live h_per_ms (mutable, adapted online via EWMA+GK).
-    h_per_ms: f64,
-    /// Previous snapshot's y (for return / GK computation).
-    y_prev: f64,
-    /// Previous snapshot's timestamp.
-    snap_ts_prev_ns: i64,
-    /// GK: max y seen during current snapshot's tick loop.
-    y_high: f64,
-    /// GK: min y seen during current snapshot's tick loop.
-    y_low: f64,
 }
 
 /// A tick observation collected from a raw ring buffer.
@@ -203,8 +180,8 @@ pub struct FairPriceOutputs {
     buffers: Vec<Box<RingBuffer<FairPriceOutput>>>,
     group_names: Vec<String>,
     group_members: Vec<Vec<MemberInfo>>,
-    /// h_per_ms per group, for horizon projection in get_fair_quote.
-    h_per_ms: Vec<f64>,
+    /// h_per_ms per group, live-updated by vol provider.
+    h_per_ms: Vec<AtomicU64>,
 }
 
 // SAFETY: AtomicU64 is Sync, everything else is immutable after construction.
@@ -225,8 +202,12 @@ impl FairPriceOutputs {
             .iter()
             .map(|_| Box::new(RingBuffer::with_capacity(config.buffer_capacity)))
             .collect();
-        let group_names = config.groups.iter().map(|g| g.name.clone()).collect();
-        let h_per_ms = config.groups.iter().map(|g| g.h_per_ms).collect();
+        let group_names: Vec<String> = config.groups.iter().map(|g| g.name.clone()).collect();
+        let h_per_ms = group_names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| AtomicU64::new(config.vol_provider.h_per_ms(i).to_bits()))
+            .collect();
         let group_members = config
             .groups
             .iter()
@@ -294,7 +275,11 @@ impl FairPriceOutputs {
     }
 
     pub fn h_per_ms(&self, group_idx: usize) -> f64 {
-        self.h_per_ms[group_idx]
+        load_f64(&self.h_per_ms[group_idx])
+    }
+
+    fn set_h_per_ms(&self, group_idx: usize, val: f64) {
+        store_f64(&self.h_per_ms[group_idx], val);
     }
 
     pub fn group_names(&self) -> &[String] {
@@ -380,7 +365,7 @@ impl FairPriceOutputs {
 
         // Horizon projection: P_horizon = P + h_per_ms * horizon_ms
         let p = (fp.uncertainty_bps / BPS).powi(2);
-        let h_ms = self.h_per_ms[group_idx];
+        let h_ms = load_f64(&self.h_per_ms[group_idx]);
         let p_horizon = p + h_ms * horizon_ms;
 
         let edge_bid = (fair_at_exchange - bid) / fair_at_exchange * BPS;
@@ -514,7 +499,7 @@ impl DiagWriter {
 pub async fn run_fair_price_task(
     tick_data: Arc<AllMarketData>,
     outputs: Arc<FairPriceOutputs>,
-    config: FairPriceConfig,
+    mut config: FairPriceConfig,
     shutdown: Arc<Notify>,
     mut diag: Option<DiagWriter>,
 ) {
@@ -538,25 +523,10 @@ pub async fn run_fair_price_task(
         })
         .collect();
 
-    // Resolve vol params: per-group override or global default
-    let resolved_vol: Vec<(f64, f64, f64)> = config.groups.iter().map(|g| {
-        let hl = g.vol_ewma_halflife_ms.unwrap_or(config.vol_ewma_halflife_ms);
-        let floor = g.vol_floor_ann.unwrap_or(config.vol_floor_ann);
-        let init = g.vol_init_ann.unwrap_or(config.vol_init_ann);
-        (hl, floor, init)
-    }).collect();
-
     let mut states: Vec<GroupState> = config
         .groups
         .iter()
-        .enumerate()
-        .map(|(gi, g)| {
-            let (_, _, vol_init) = resolved_vol[gi];
-            let h_init = if vol_init > 0.0 {
-                vol_init * vol_init / MS_PER_YEAR
-            } else {
-                g.h_per_ms
-            };
+        .map(|g| {
             GroupState {
                 y: 0.0,
                 p: 0.0,
@@ -574,11 +544,6 @@ pub async fn run_fair_price_task(
                         latest_ts_ns: 0,
                     })
                     .collect(),
-                h_per_ms: h_init,
-                y_prev: f64::NAN,
-                snap_ts_prev_ns: 0,
-                y_high: f64::NAN,
-                y_low: f64::NAN,
             }
         })
         .collect();
@@ -590,8 +555,6 @@ pub async fn run_fair_price_task(
     tokio::pin!(shutdown_fut);
 
     let mut tick_scratch: Vec<TickObs> = Vec::with_capacity(256);
-
-    // (vol_ann_pct now computed per-snapshot from live state.h_per_ms)
 
     loop {
         tokio::select! {
@@ -609,7 +572,7 @@ pub async fn run_fair_price_task(
 
         for (group_idx, group_cfg) in config.groups.iter().enumerate() {
             let state = &mut states[group_idx];
-            let h_per_ms = state.h_per_ms;
+            let h_per_ms = config.vol_provider.h_per_ms(group_idx);
             tick_scratch.clear();
 
             // ── 1. Collect new ticks from all members ──────────────────
@@ -747,10 +710,6 @@ pub async fn run_fair_price_task(
                         state.y += gain * innovation;
                         state.p *= 1.0 - gain;
 
-                        // Track GK high/low
-                        if state.y > state.y_high || state.y_high.is_nan() { state.y_high = state.y; }
-                        if state.y < state.y_low || state.y_low.is_nan() { state.y_low = state.y; }
-
                         // Time-weighted bias EWMA
                         if group_cfg.bias_ewma_halflife_ms > 0.0 {
                             let d = ewma_decay(tau_ms.max(0.0), group_cfg.bias_ewma_halflife_ms);
@@ -861,40 +820,19 @@ pub async fn run_fair_price_task(
 
             } // match model
 
-            // ── 4. Online vol adaptation (GK + EWMA) ────────────────────
-            let (vol_hl, vol_floor, _) = resolved_vol[group_idx];
-            let h_floor = vol_floor * vol_floor / MS_PER_YEAR;
-
-            if vol_hl > 0.0 && state.y_prev.is_finite() && state.snap_ts_prev_ns > 0 {
-                let tau_ms = (snap_ts_ns - state.snap_ts_prev_ns) as f64 / 1e6;
-                if tau_ms > 0.0 {
-                    // Garman-Klass variance estimator (if we have high/low)
-                    let r2_gk = if state.y_high.is_finite() && state.y_low.is_finite() {
-                        let hl = state.y_high - state.y_low;
-                        let cc = state.y - state.y_prev;
-                        (0.5 * hl * hl - (2.0 * ln2 - 1.0) * cc * cc).max(0.0)
-                    } else {
-                        let r = state.y - state.y_prev;
-                        (r * r).max(0.0)
-                    };
-
-                    let d = ewma_decay(tau_ms, vol_hl);
-                    state.h_per_ms = d * state.h_per_ms + (1.0 - d) * (r2_gk / tau_ms);
-                    state.h_per_ms = state.h_per_ms.max(h_floor);
-                }
+            // ── 4. Update vol provider + sync to outputs ────────────────
+            if state.initialized {
+                config.vol_provider.update(group_idx, state.y.exp(), snap_ts_ns);
             }
-            state.y_prev = state.y;
-            state.snap_ts_prev_ns = snap_ts_ns;
-            state.y_high = state.y;
-            state.y_low = state.y;
+            let h_per_ms = config.vol_provider.h_per_ms(group_idx);
+            outputs.set_h_per_ms(group_idx, h_per_ms);
 
-            // ── 5. Sync live params to outputs ──────────────────────────
             for (k, ms) in state.member_states.iter().enumerate() {
                 outputs.set_bias(group_idx, k, ms.bias);
                 outputs.set_noise_var(group_idx, k, ms.noise_var);
             }
 
-            let vol_ann_pct = (state.h_per_ms * MS_PER_YEAR).sqrt() * 100.0;
+            let vol_ann_pct = config.vol_provider.ann_vol(group_idx) * 100.0;
 
             // ── 6. Push output ─────────────────────────────────────────
             outputs.push(
@@ -956,31 +894,20 @@ pub fn load_beacon(
         }
     };
 
-    // Global vol params
-    if let Some(v) = beacon.get("vol_ewma_halflife_ms").and_then(|v| v.as_f64()) {
-        config.vol_ewma_halflife_ms = v;
-    }
-    if let Some(v) = beacon.get("vol_floor_ann").and_then(|v| v.as_f64()) {
-        config.vol_floor_ann = v;
-    }
-    if let Some(v) = beacon.get("vol_init_ann").and_then(|v| v.as_f64()) {
-        config.vol_init_ann = v;
-    }
-
     let groups = match beacon.get("groups").and_then(|g| g.as_object()) {
         Some(g) => g,
         None => return false,
     };
 
     let mut applied = 0;
-    for group in config.groups.iter_mut() {
+    for (group_idx, group) in config.groups.iter_mut().enumerate() {
         if let Some(params) = groups.get(&group.name).and_then(|p| p.as_object()) {
-            // h_per_ms vs ann_vol (prefer ann_vol, warn if both)
+            // ann_vol → update vol provider
             let has_h = params.get("h_per_ms").and_then(|v| v.as_f64());
             let has_ann = params.get("ann_vol").and_then(|v| v.as_f64());
             match (has_h, has_ann) {
                 (_, Some(av)) => {
-                    group.h_per_ms = av * av / MS_PER_YEAR;
+                    config.vol_provider.set_ann_vol(group_idx, av);
                     if has_h.is_some() {
                         log::warn!(
                             "Group '{}': both h_per_ms and ann_vol specified, using ann_vol",
@@ -988,7 +915,9 @@ pub fn load_beacon(
                         );
                     }
                 }
-                (Some(h), None) => { group.h_per_ms = h; }
+                (Some(h), None) => {
+                    config.vol_provider.set_ann_vol(group_idx, (h * MS_PER_YEAR).sqrt());
+                }
                 _ => {}
             }
 
@@ -1020,16 +949,6 @@ pub fn load_beacon(
             if let Some(v) = params.get("sigma_k_floor").and_then(|v| v.as_f64()) {
                 group.sigma_k_floor = v;
             }
-            if let Some(v) = params.get("vol_ewma_halflife_ms").and_then(|v| v.as_f64()) {
-                group.vol_ewma_halflife_ms = Some(v);
-            }
-            if let Some(v) = params.get("vol_floor_ann").and_then(|v| v.as_f64()) {
-                group.vol_floor_ann = Some(v);
-            }
-            if let Some(v) = params.get("vol_init_ann").and_then(|v| v.as_f64()) {
-                group.vol_init_ann = Some(v);
-            }
-
             if let Some(members) = params.get("members").and_then(|m| m.as_object()) {
                 for member in group.members.iter_mut() {
                     let key = format!(
@@ -1077,15 +996,10 @@ mod tests {
     async fn test_fair_price_basic() {
         let tick_data = Arc::new(AllMarketData::new());
 
-        // h_per_ms from 100% annualized vol
-        let h_per_ms = 1.0_f64.powi(2) / MS_PER_YEAR;
-
         let config = FairPriceConfig {
             interval_ms: 10,
             buffer_capacity: 1024,
-            vol_ewma_halflife_ms: 0.0,
-            vol_floor_ann: 0.50,
-            vol_init_ann: 0.0,
+            vol_provider: crate::vol_provider::VolProvider::new_static(vec![1.0]),
             groups: vec![FairPriceGroupConfig {
                 name: "TEST".to_string(),
                 members: vec![
@@ -1108,15 +1022,11 @@ mod tests {
                         invert_reprice: false,
                     },
                 ],
-                h_per_ms,
                 sigma_mode: SigmaMode::Static,
                 model: FairPriceModel::Kalman,
                 bias_ewma_halflife_ms: 0.0,
                 spread_ewma_halflife_ms: 0.0,
                 sigma_k_floor: 1e-6,
-                vol_ewma_halflife_ms: None,
-                vol_floor_ann: None,
-                vol_init_ann: None,
             }],
         };
 
@@ -1177,35 +1087,25 @@ mod tests {
         let config = FairPriceConfig {
             interval_ms: 100,
             buffer_capacity: 1024,
-            vol_ewma_halflife_ms: 0.0,
-            vol_floor_ann: 0.50,
-            vol_init_ann: 0.0,
+            vol_provider: crate::vol_provider::VolProvider::new_static(vec![1e-2, 1e-2]),
             groups: vec![
                 FairPriceGroupConfig {
                     name: "BTC".to_string(),
                     members: vec![],
-                    h_per_ms: 1e-14,
                     sigma_mode: SigmaMode::Static,
                     model: FairPriceModel::Kalman,
                     bias_ewma_halflife_ms: 0.0,
                     spread_ewma_halflife_ms: 0.0,
                     sigma_k_floor: 1e-6,
-                    vol_ewma_halflife_ms: None,
-                    vol_floor_ann: None,
-                    vol_init_ann: None,
                 },
                 FairPriceGroupConfig {
                     name: "ETH".to_string(),
                     members: vec![],
-                    h_per_ms: 1e-14,
                     sigma_mode: SigmaMode::Static,
                     model: FairPriceModel::Kalman,
                     bias_ewma_halflife_ms: 0.0,
                     spread_ewma_halflife_ms: 0.0,
                     sigma_k_floor: 1e-6,
-                    vol_ewma_halflife_ms: None,
-                    vol_floor_ann: None,
-                    vol_init_ann: None,
                 },
             ],
         };
@@ -1222,21 +1122,15 @@ mod tests {
         let config = FairPriceConfig {
             interval_ms: 100,
             buffer_capacity: 1024,
-            vol_ewma_halflife_ms: 0.0,
-            vol_floor_ann: 0.50,
-            vol_init_ann: 0.0,
+            vol_provider: crate::vol_provider::VolProvider::new_static(vec![1e-2]),
             groups: vec![FairPriceGroupConfig {
                 name: "TEST".to_string(),
                 members: vec![],
-                h_per_ms: 1e-14,
                 sigma_mode: SigmaMode::Static,
                 model: FairPriceModel::Kalman,
                 bias_ewma_halflife_ms: 0.0,
                 spread_ewma_halflife_ms: 0.0,
                 sigma_k_floor: 1e-6,
-                vol_ewma_halflife_ms: None,
-                vol_floor_ann: None,
-                vol_init_ann: None,
             }],
         };
 

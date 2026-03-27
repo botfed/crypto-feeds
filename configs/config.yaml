@@ -35,6 +35,23 @@ perp:
   nado:     ['BTC_USDT', 'ETH_USDT', 'UNI_USDT']
   hyperliquid: ['BTC_USDC', 'ETH_USDC', 'UNI_USDC', 'AIXBT_USDC', 'SPX_USDC']
 
+fair_price:
+  vol_engine:
+    type: "gk_ewma"
+    default_init_ann_vol: 1.0
+    halflife_s: 3600
+    floor_ann: 1.0
+    BTC:
+      init_ann_vol: 1.0
+      floor_ann: 0.30
+    ETH:
+      init_ann_vol: 1.27
+      floor_ann: 0.30
+    VIRTUAL:
+      init_ann_vol: 2.50
+    AIXBT:
+      init_ann_vol: 3.16
+
 vol_models:
   params_dir: "../botfed-params/vol"
   bar_data_dir: "../data/binance_ohlcv/perps/1m"

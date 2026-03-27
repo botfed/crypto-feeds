@@ -12,13 +12,11 @@ use tokio::time::{self, MissedTickBehavior};
 use crypto_feeds::app_config::{load_config, load_onchain, load_perp, load_spot, AppConfig};
 use crypto_feeds::fair_price::{
     DiagWriter, FairPriceConfig, FairPriceGroupConfig, FairPriceModel, FairPriceOutputs, GroupMember,
-    SigmaMode, load_beacon, run_fair_price_task,
+    SigmaMode, run_fair_price_task,
 };
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType, MarketDataCollection};
 use crypto_feeds::symbol_registry::{REGISTRY, SymbolId};
-
-const BEACON_PATH: &str = "configs/beacon.yaml";
-const DEFAULT_H_PER_MS: f64 = 1.0 / (365.25 * 24.0 * 3600.0 * 1000.0);
+use crypto_feeds::vol_provider::VolProvider;
 
 /// One entry in our sampling plan: which exchange + symbol to read each tick.
 struct SampleTarget {
@@ -149,15 +147,11 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
             groups.push(FairPriceGroupConfig {
                 name: base.clone(),
                 members,
-                h_per_ms: DEFAULT_H_PER_MS,
                 sigma_mode: SigmaMode::InstantSpread,
                 model: FairPriceModel::Kalman,
                 bias_ewma_halflife_ms: 3000.0,
                 spread_ewma_halflife_ms: 3000.0,
                 sigma_k_floor: 1e-6,
-                vol_ewma_halflife_ms: None,
-                vol_floor_ann: None,
-                vol_init_ann: None,
             });
         }
     }
@@ -166,7 +160,6 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
 
 struct Args {
     config_path: String,
-    beacon_path: String,
     output_dir: String,
     interval_ms: Option<u64>,
     tick_dump: bool,
@@ -177,7 +170,6 @@ struct Args {
 fn parse_args() -> Args {
     let mut args = Args {
         config_path: "configs/config.yaml".to_string(),
-        beacon_path: BEACON_PATH.to_string(),
         output_dir: "data/capture".to_string(),
         interval_ms: None,
         tick_dump: false,
@@ -189,21 +181,19 @@ fn parse_args() -> Args {
     while i < argv.len() {
         match argv[i].as_str() {
             "--config" if i + 1 < argv.len() => { args.config_path = argv[i + 1].clone(); i += 2; }
-            "--beacon" if i + 1 < argv.len() => { args.beacon_path = argv[i + 1].clone(); i += 2; }
             "--output-dir" if i + 1 < argv.len() => { args.output_dir = argv[i + 1].clone(); i += 2; }
             "--interval-ms" if i + 1 < argv.len() => { args.interval_ms = argv[i + 1].parse().ok(); i += 2; }
             "--tick-dump" => { args.tick_dump = true; i += 1; }
             "--with-fp" => { args.with_fp = true; i += 1; }
             "--warmup-secs" if i + 1 < argv.len() => { args.warmup_secs = argv[i + 1].parse().unwrap_or(5); i += 2; }
             "--help" | "-h" => {
-                eprintln!("Usage: capture [--interval-ms N] [--tick-dump] [--with-fp] [--output-dir DIR] [--config PATH] [--beacon PATH] [--warmup-secs N]");
+                eprintln!("Usage: capture [--interval-ms N] [--tick-dump] [--with-fp] [--output-dir DIR] [--config PATH] [--warmup-secs N]");
                 eprintln!();
                 eprintln!("  --interval-ms N   Snap BBOs at N ms interval (e.g. 10)");
                 eprintln!("  --tick-dump        Full tick-level Kalman diagnostics (requires FP engine)");
                 eprintln!("  --with-fp          Add fair price columns (starts FP engine)");
                 eprintln!("  --output-dir DIR   Output directory (default: data/capture)");
                 eprintln!("  --config PATH      Exchange/symbol config (default: configs/config.yaml)");
-                eprintln!("  --beacon PATH      FP beacon config (default: configs/beacon.yaml)");
                 eprintln!("  --warmup-secs N    Wait N seconds before capturing (default: 5)");
                 std::process::exit(0);
             }
@@ -249,20 +239,16 @@ async fn main() -> Result<()> {
             eprintln!("Warning: no FP groups discovered, --with-fp will have no effect");
             None
         } else {
-            let mut fp_config = FairPriceConfig {
+            let vol_provider = VolProvider::new_static(groups.iter().map(|_| 1.0).collect());
+            let fp_config = FairPriceConfig {
                 interval_ms: 100,
                 buffer_capacity: 65536,
                 groups,
-                vol_ewma_halflife_ms: 0.0,
-                vol_floor_ann: 0.50,
-                vol_init_ann: 0.0,
+                vol_provider,
             };
-            let beacon = std::path::Path::new(&args.beacon_path);
-            let mut beacon_mtime = std::time::UNIX_EPOCH;
-            load_beacon(beacon, &mut beacon_mtime, &mut fp_config);
 
             for g in &fp_config.groups {
-                eprintln!("FP group '{}': {} members, h_per_ms={:.2e}", g.name, g.members.len(), g.h_per_ms);
+                eprintln!("FP group '{}': {} members", g.name, g.members.len());
             }
 
             let out = Arc::new(FairPriceOutputs::new(&fp_config));

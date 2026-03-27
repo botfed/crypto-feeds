@@ -15,6 +15,7 @@ pub mod bar_manager;
 pub mod historical_bars;
 pub mod vol_engine;
 pub mod vol_params;
+pub mod vol_provider;
 
 #[cfg(feature = "python")]
 pub mod python;
