@@ -20,7 +20,8 @@ use std::path::Path;
 
 const BEACON_PATH: &str = "configs/beacon.yaml";
 /// Default h_per_ms from 100% annualized vol
-const DEFAULT_H_PER_MS: f64 = 1.0 / (365.25 * 24.0 * 3600.0 * 1000.0);
+const MS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0 * 1000.0;
+const DEFAULT_H_PER_MS: f64 = 1.0 / MS_PER_YEAR;
 
 const ALT_SCREEN_ON: &str = "\x1B[?1049h";
 const ALT_SCREEN_OFF: &str = "\x1B[?1049l";
@@ -432,11 +433,13 @@ async fn main() -> Result<()> {
     load_beacon(beacon, &mut beacon_mtime, &mut fp_config);
 
     for g in &fp_config.groups {
+        let vol_hl = g.vol_ewma_halflife_ms.unwrap_or(fp_config.vol_ewma_halflife_ms);
+        let vol_floor = g.vol_floor_ann.unwrap_or(fp_config.vol_floor_ann);
+        let vol_init = g.vol_init_ann.unwrap_or(fp_config.vol_init_ann);
+        let ann_vol_pct = (g.h_per_ms * MS_PER_YEAR).sqrt() * 100.0;
         log::info!(
-            "Group '{}': {} members, h_per_ms={:.2e}",
-            g.name,
-            g.members.len(),
-            g.h_per_ms,
+            "Group '{}': {} members, ann_vol={:.1}%, vol_ewma_hl={}ms, floor={:.0}%, init={:.0}%",
+            g.name, g.members.len(), ann_vol_pct, vol_hl, vol_floor * 100.0, vol_init * 100.0,
         );
     }
 
