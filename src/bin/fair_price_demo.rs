@@ -333,7 +333,7 @@ async fn run_display(
                                         let color_on = if edge_exceeds { GREEN } else { "" };
                                         let color_off = if edge_exceeds { RESET } else { "" };
 
-                                        let age_str = format!("{:.0}", age_ms);
+                                        let age_str = format!("{:.2}", age_ms);
                                         let _ = write!(buf, "{}", color_on);
                                         let _ = row!(buf,
                                             ex_name,

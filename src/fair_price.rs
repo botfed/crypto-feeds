@@ -399,6 +399,7 @@ impl FairPriceOutputs {
             ask_qty,
             exchange_ts_ns: md
                 .exchange_ts
+                .or(md.received_ts)
                 .and_then(|t| t.timestamp_nanos_opt())
                 .unwrap_or(0),
             edge_bid_bps: edge_bid,
