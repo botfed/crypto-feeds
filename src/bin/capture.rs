@@ -166,6 +166,7 @@ struct Args {
     interval_ms: Option<u64>,
     tick_dump: bool,
     with_fp: bool,
+    display: bool,
     warmup_secs: u64,
 }
 
@@ -176,6 +177,7 @@ fn parse_args() -> Args {
         interval_ms: None,
         tick_dump: false,
         with_fp: false,
+        display: false,
         warmup_secs: 5,
     };
     let argv: Vec<String> = std::env::args().collect();
@@ -187,13 +189,15 @@ fn parse_args() -> Args {
             "--interval-ms" if i + 1 < argv.len() => { args.interval_ms = argv[i + 1].parse().ok(); i += 2; }
             "--tick-dump" => { args.tick_dump = true; i += 1; }
             "--with-fp" => { args.with_fp = true; i += 1; }
+            "--display" => { args.display = true; i += 1; }
             "--warmup-secs" if i + 1 < argv.len() => { args.warmup_secs = argv[i + 1].parse().unwrap_or(5); i += 2; }
             "--help" | "-h" => {
-                eprintln!("Usage: capture [--interval-ms N] [--tick-dump] [--with-fp] [--output-dir DIR] [--config PATH] [--warmup-secs N]");
+                eprintln!("Usage: capture [--interval-ms N] [--tick-dump] [--with-fp] [--display] [--output-dir DIR] [--config PATH] [--warmup-secs N]");
                 eprintln!();
                 eprintln!("  --interval-ms N   Snap BBOs at N ms interval (e.g. 10)");
                 eprintln!("  --tick-dump        Full tick-level Kalman diagnostics (requires FP engine)");
                 eprintln!("  --with-fp          Add fair price columns (starts FP engine)");
+                eprintln!("  --display          Live fair price TUI display (starts FP engine)");
                 eprintln!("  --output-dir DIR   Output directory (default: data/capture)");
                 eprintln!("  --config PATH      Exchange/symbol config (default: configs/capture.yaml)");
                 eprintln!("  --warmup-secs N    Wait N seconds before capturing (default: 5)");
@@ -202,8 +206,8 @@ fn parse_args() -> Args {
             _ => { i += 1; }
         }
     }
-    if args.interval_ms.is_none() && !args.tick_dump {
-        eprintln!("Error: at least one of --interval-ms or --tick-dump is required");
+    if args.interval_ms.is_none() && !args.tick_dump && !args.display {
+        eprintln!("Error: at least one of --interval-ms, --tick-dump, or --display is required");
         std::process::exit(1);
     }
     args
@@ -214,7 +218,7 @@ async fn main() -> Result<()> {
     env_logger::init();
 
     let args = parse_args();
-    let needs_fp = args.with_fp || args.tick_dump;
+    let needs_fp = args.with_fp || args.tick_dump || args.display;
 
     let cfg: AppConfig = load_config(&args.config_path)
         .with_context(|| format!("loading {}", args.config_path))?;
@@ -267,6 +271,20 @@ async fn main() -> Result<()> {
             let out_clone = Arc::clone(&out);
             let sd = Arc::clone(&shutdown);
             handles.push(tokio::spawn(run_fair_price_task(tick, out_clone, fp_config, sd, diag)));
+
+            if args.display {
+                let md = Arc::clone(&market_data);
+                let out_display = Arc::clone(&out);
+                let sd = Arc::clone(&shutdown);
+                let model_str = format!("{}_{}", cfg.fair_price.model, cfg.fair_price.sigma_mode);
+                let ve = &cfg.fair_price.vol_engine;
+                let ve_str = format!("{} hl={}s", ve.engine_type, ve.halflife_s);
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = crypto_feeds::fp_display::run_display(md, out_display, sd, model_str, ve_str).await {
+                        log::error!("display error: {:?}", e);
+                    }
+                }));
+            }
 
             Some(out)
         }

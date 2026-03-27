@@ -1,19 +1,22 @@
 spot:
-  binance:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
-  okx:      ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
+  binance:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
   bybit:    ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
+  okx:      ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
   coinbase: ["BTC_USD", "ETH_USD"]
   mexc:     ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
 
 perp:
   binance:     ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
-  okx:         ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT"]
-  bybit:       ["BTC_USDT"]
+  okx:         ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
+  bybit:       ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
+  kucoin:      ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
+  bingx:       ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
+  apex:        ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
+  hyperliquid: ["BTC_USDC", "ETH_USDC", "AIXBT_USDC", "SPX_USDC", "VIRTUAL_USDC"]
+  nado:        ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
+  extended:    ["BTC_USD", "ETH_USD", "AIXBT_USD", "SPX_USD", "VIRTUAL_USD"]
+  apex:        ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   coinbase:    ["BTC_USD", "ETH_USD"]
-  kucoin:      ["BTC_USDT", "AIXBT_USDT", "SPX_USDT"]
-  bingx:       ["BTC_USDT", "ETH_USDT", "SPX_USDT"]
-  apex:        ["BTC_USDT", "ETH_USDT", "SPX_USDT"]
-  hyperliquid: ["BTC_USDC", "ETH_USDC", "AIXBT_USDC", "SPX_USDC"]
 
 fair_price:
   model: "kalman"
