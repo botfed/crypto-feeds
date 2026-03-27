@@ -872,11 +872,10 @@ pub async fn run_fair_price_task(
                     let r2_gk = if state.y_high.is_finite() && state.y_low.is_finite() {
                         let hl = state.y_high - state.y_low;
                         let cc = state.y - state.y_prev;
-                        let gk = 0.5 * hl * hl - (2.0 * ln2 - 1.0) * cc * cc;
-                        (gk - state.p).max(0.0) // bias-correct by subtracting estimation noise
+                        (0.5 * hl * hl - (2.0 * ln2 - 1.0) * cc * cc).max(0.0)
                     } else {
                         let r = state.y - state.y_prev;
-                        (r * r - state.p).max(0.0)
+                        (r * r).max(0.0)
                     };
 
                     let d = ewma_decay(tau_ms, vol_hl);
