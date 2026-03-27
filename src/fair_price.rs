@@ -543,6 +543,10 @@ pub async fn run_fair_price_task(
         let hl = g.vol_ewma_halflife_ms.unwrap_or(config.vol_ewma_halflife_ms);
         let floor = g.vol_floor_ann.unwrap_or(config.vol_floor_ann);
         let init = g.vol_init_ann.unwrap_or(config.vol_init_ann);
+        log::info!(
+            "Group '{}': vol_ewma_hl={}ms, vol_floor={:.0}%, vol_init={:.0}%, h_per_ms={:.2e}",
+            g.name, hl, floor * 100.0, init * 100.0, g.h_per_ms,
+        );
         (hl, floor, init)
     }).collect();
 
