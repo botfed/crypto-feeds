@@ -235,7 +235,9 @@ async fn main() -> Result<()> {
 
     load_spot(&mut handles, &cfg, &market_data, &shutdown)?;
     load_perp(&mut handles, &cfg, &market_data, &shutdown)?;
-    let _ = load_onchain(&mut handles, &cfg, &market_data, &shutdown);
+    if let Err(e) = load_onchain(&mut handles, &cfg, &market_data, &shutdown) {
+        log::warn!("Onchain feeds not started: {}", e);
+    }
 
     let targets = build_targets(&cfg, &market_data);
     eprintln!("Discovered {} sample targets", targets.len());

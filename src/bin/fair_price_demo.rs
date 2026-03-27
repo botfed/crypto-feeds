@@ -407,7 +407,9 @@ async fn main() -> Result<()> {
     // Start feeds
     let _ = load_spot(&mut handles, &cfg, &market_data, &shutdown);
     let _ = load_perp(&mut handles, &cfg, &market_data, &shutdown);
-    let _ = load_onchain(&mut handles, &cfg, &market_data, &shutdown);
+    if let Err(e) = load_onchain(&mut handles, &cfg, &market_data, &shutdown) {
+        log::warn!("Onchain feeds not started: {}", e);
+    }
 
     // Auto-discover fair price groups from config
     let groups = auto_discover_groups(&cfg);
