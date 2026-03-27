@@ -32,6 +32,8 @@ const ERASE_EOL: &str = "\x1B[K";
 const GREEN: &str = "\x1B[32m";
 const RESET: &str = "\x1B[0m";
 const BPS: f64 = 1e4;
+/// Minimum edge (bps) to highlight a row green. Rough proxy for fees + slippage.
+const EDGE_HIGHLIGHT_HURDLE_BPS: f64 = 5.0;
 
 fn term_size() -> (usize, usize) {
     #[cfg(unix)]
@@ -277,14 +279,14 @@ async fn run_display(
                         // Header
                         macro_rules! row {
                             ($buf:expr, $($arg:expr),* $(,)?) => {
-                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>7} {:>7}", $($arg),*)
+                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>7} {:>7}", $($arg),*)
                             }
                         }
                         let _ = row!(buf,
                             "Xchg", "Symbol", "Mid@Ex", "Fair@Ex",
                             "EdgMid",
                             "HSprd",
-                            "EdgBid", "EdgAsk",
+                            "TrdEdge",
                             "BidQty", "AskQty",
                             "m_k", "sigma_k",
                             "P_unc0", "P_unc1", "Age",
@@ -293,7 +295,7 @@ async fn run_display(
                             "", "", "", "",
                             "(bps)",
                             "(bps)",
-                            "(bps)", "(bps)",
+                            "(bps)",
                             "", "",
                             "(bps)", "(bps)",
                             "(bps)", "(bps)", "(ms)",
@@ -327,10 +329,10 @@ async fn run_display(
                                         let lcu0 = (q.noise_var + h_ms * age_ms).sqrt() * BPS;
                                         let lcu1 = (q.noise_var + h_ms * (age_ms + 100.0)).sqrt() * BPS;
 
-                                        // Highlight if edge > half spread
-                                        let edge_exceeds = q.edge_mid_bps.abs() > hspread_bps;
-                                        let color_on = if edge_exceeds { GREEN } else { "" };
-                                        let color_off = if edge_exceeds { RESET } else { "" };
+                                        let trd_edge = (q.edge_mid_bps.abs() - hspread_bps).max(0.0);
+                                        let highlight = trd_edge > EDGE_HIGHLIGHT_HURDLE_BPS;
+                                        let color_on = if highlight { GREEN } else { "" };
+                                        let color_off = if highlight { RESET } else { "" };
 
                                         let age_str = format!("{:.2}", age_ms);
                                         let _ = write!(buf, "{}", color_on);
@@ -341,8 +343,7 @@ async fn run_display(
                                             fmt_price(q.fair_at_exchange),
                                             fmt_bps(q.edge_mid_bps),
                                             fmt_bps(hspread_bps),
-                                            fmt_bps(q.edge_bid_bps),
-                                            fmt_bps(q.edge_ask_bps),
+                                            fmt_bps(trd_edge),
                                             fmt_qty(q.bid_qty),
                                             fmt_qty(q.ask_qty),
                                             fmt_bps(mk_bps),
@@ -364,7 +365,7 @@ async fn run_display(
                                             "-", "-",
                                             "-",
                                             "-",
-                                            "-", "-",
+                                            "-",
                                             "-", "-",
                                             fmt_bps(mk_bps),
                                             fmt_bps(sk_bps),
