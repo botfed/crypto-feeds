@@ -11,12 +11,11 @@ use tokio::time::{self, MissedTickBehavior};
 
 use crypto_feeds::app_config::{load_config, load_onchain, load_perp, load_spot, AppConfig};
 use crypto_feeds::fair_price::{
-    DiagWriter, FairPriceConfig, FairPriceGroupConfig, FairPriceModel, FairPriceOutputs, GroupMember,
-    SigmaMode, run_fair_price_task,
+    DiagWriter, FairPriceConfig, FairPriceGroupConfig, FairPriceOutputs, GroupMember,
+    run_fair_price_task,
 };
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType, MarketDataCollection};
 use crypto_feeds::symbol_registry::{REGISTRY, SymbolId};
-use crypto_feeds::vol_provider::VolProvider;
 
 /// One entry in our sampling plan: which exchange + symbol to read each tick.
 struct SampleTarget {
@@ -71,6 +70,9 @@ fn format_ts(ts: Option<chrono::DateTime<Utc>>) -> String {
 
 fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
     use std::collections::HashMap;
+    let fp = &cfg.fair_price;
+    let model = fp.parse_model();
+    let sigma_mode = fp.parse_sigma_mode();
     type Entry = (String, String, InstrumentType, Option<String>);
     let mut base_map: HashMap<String, Vec<Entry>> = HashMap::new();
 
@@ -147,11 +149,11 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
             groups.push(FairPriceGroupConfig {
                 name: base.clone(),
                 members,
-                sigma_mode: SigmaMode::InstantSpread,
-                model: FairPriceModel::Kalman,
-                bias_ewma_halflife_ms: 3000.0,
-                spread_ewma_halflife_ms: 3000.0,
-                sigma_k_floor: 1e-6,
+                sigma_mode: sigma_mode,
+                model: model,
+                bias_ewma_halflife_ms: fp.bias_ewma_halflife_s * 1000.0,
+                spread_ewma_halflife_ms: fp.spread_ewma_halflife_s * 1000.0,
+                sigma_k_floor: fp.sigma_k_floor,
             });
         }
     }
@@ -169,7 +171,7 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut args = Args {
-        config_path: "configs/config.yaml".to_string(),
+        config_path: "configs/capture.yaml".to_string(),
         output_dir: "data/capture".to_string(),
         interval_ms: None,
         tick_dump: false,
@@ -193,7 +195,7 @@ fn parse_args() -> Args {
                 eprintln!("  --tick-dump        Full tick-level Kalman diagnostics (requires FP engine)");
                 eprintln!("  --with-fp          Add fair price columns (starts FP engine)");
                 eprintln!("  --output-dir DIR   Output directory (default: data/capture)");
-                eprintln!("  --config PATH      Exchange/symbol config (default: configs/config.yaml)");
+                eprintln!("  --config PATH      Exchange/symbol config (default: configs/capture.yaml)");
                 eprintln!("  --warmup-secs N    Wait N seconds before capturing (default: 5)");
                 std::process::exit(0);
             }
@@ -239,7 +241,8 @@ async fn main() -> Result<()> {
             eprintln!("Warning: no FP groups discovered, --with-fp will have no effect");
             None
         } else {
-            let vol_provider = VolProvider::new_static(groups.iter().map(|_| 1.0).collect());
+            let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
+            let vol_provider = cfg.fair_price.to_vol_provider(&group_names);
             let fp_config = FairPriceConfig {
                 interval_ms: 100,
                 buffer_capacity: 65536,

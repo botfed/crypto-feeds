@@ -127,7 +127,7 @@ async fn run_feed(
                 }
             }
             Err(e) => {
-                error!("Aerodrome poll error at block {}: {}", block_number, e);
+                error!("Aerodrome poll error at block {}: {:#}", block_number, e);
             }
         }
     }
@@ -164,7 +164,7 @@ pub async fn listen_aerodrome(
                 match result {
                     Ok(()) => break,
                     Err(e) => {
-                        error!("Aerodrome feed error: {}. Reconnecting in {:?}", e, backoff);
+                        error!("Aerodrome feed error: {:#}. Reconnecting in {:?}", e, backoff);
                         tokio::select! {
                             _ = tokio::time::sleep(backoff) => {}
                             _ = shutdown.notified() => {
