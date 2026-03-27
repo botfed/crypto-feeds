@@ -32,7 +32,17 @@ pub async fn connect(url: &str) -> Result<WsStream> {
         false,
     )
     .await
-    .context("websocket connect with deflate")?;
+    .map_err(|e| {
+        use tokio_tungstenite::tungstenite::Error;
+        let detail = match &e {
+            Error::Http(resp) => format!("HTTP {}", resp.status()),
+            Error::ConnectionClosed => "connection closed".into(),
+            Error::Io(io) => format!("IO: {}", io),
+            Error::Tls(tls) => format!("TLS: {}", tls),
+            other => format!("{}", other),
+        };
+        anyhow::anyhow!("ws connect to {url} failed: {detail}")
+    })?;
 
     Ok(stream)
 }
