@@ -128,7 +128,6 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
             }
         }
     }
-
     let mut groups: Vec<FairPriceGroupConfig> = Vec::new();
 
     // Sort base assets for stable ordering
