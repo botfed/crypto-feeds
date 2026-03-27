@@ -7,14 +7,14 @@ use tokio::sync::Notify;
 
 use crypto_feeds::app_config::{AppConfig, load_config, load_onchain, load_perp, load_spot};
 use crypto_feeds::fair_price::{
-    DiagWriter, FairPriceConfig, FairPriceGroupConfig, FairPriceOutputs, GroupMember,
+    DiagWriter, FairPriceConfig, FairPriceGroupConfig, FairPriceModel, FairPriceOutputs, GroupMember,
     SigmaMode, load_beacon, run_fair_price_task,
 };
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType};
 use crypto_feeds::symbol_registry::REGISTRY;
 use std::path::Path;
 
-const BEACON_PATH: &str = "configs/beacon.json";
+const BEACON_PATH: &str = "configs/beacon.yaml";
 /// Default h_per_ms from 100% annualized vol
 const DEFAULT_H_PER_MS: f64 = 1.0 / (365.25 * 24.0 * 3600.0 * 1000.0);
 
@@ -95,6 +95,7 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 symbol_id,
                 bias: 0.0,
                 noise_var: 4e-8,
+                gg_weight: 0.0,
                 reprice_group: reprice.clone(),
                 invert_reprice: reprice.is_some(),
             });
@@ -106,8 +107,13 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 members,
                 h_per_ms: DEFAULT_H_PER_MS,
                 sigma_mode: SigmaMode::InstantSpread,
-                bias_ewma_halflife: 3000,
+                model: FairPriceModel::Kalman,
+                bias_ewma_halflife_ms: 3000.0,
+                spread_ewma_halflife_ms: 3000.0,
                 sigma_k_floor: 1e-6,
+                vol_ewma_halflife_ms: None,
+                vol_floor_ann: None,
+                vol_init_ann: None,
             });
         }
     }
@@ -188,6 +194,9 @@ async fn main() -> Result<()> {
         interval_ms: 100,
         buffer_capacity: 65536,
         groups,
+        vol_ewma_halflife_ms: 0.0,
+        vol_floor_ann: 0.50,
+        vol_init_ann: 0.0,
     };
     let mut beacon_mtime = std::time::UNIX_EPOCH;
     load_beacon(beacon, &mut beacon_mtime, &mut fp_config);

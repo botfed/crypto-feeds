@@ -2,7 +2,7 @@ use crate::analytics::{Analytics, QuoteSide, RangeStat, SnapshotField};
 use crate::app_config::{AppConfig, load_config, load_perp, load_spot};
 use crate::bar_manager::{BarManager, BarSymbol};
 use crate::fair_price::{
-    FairPriceConfig, FairPriceGroupConfig, FairPriceOutput, FairPriceOutputs,
+    FairPriceConfig, FairPriceGroupConfig, FairPriceModel, FairPriceOutput, FairPriceOutputs,
     GroupMember, SigmaMode, run_fair_price_task,
 };
 use crate::historical_bars::{aggregate_bars, load_1m_bars_with_backfill};
@@ -760,20 +760,37 @@ fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
                 .transpose()?
                 .unwrap_or(false);
 
+            let gg_weight: f64 = md
+                .get_item("gg_weight")?
+                .map(|v| v.extract())
+                .transpose()?
+                .unwrap_or(0.0);
+
             members.push(GroupMember {
                 exchange,
                 symbol_id,
                 bias,
                 noise_var,
+                gg_weight,
                 reprice_group,
                 invert_reprice,
             });
         }
 
-        let h_per_ms: f64 = gd
-            .get_item("h_per_ms")?
-            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("Missing 'h_per_ms'"))?
-            .extract()?;
+        let h_per_ms_opt: Option<f64> = gd.get_item("h_per_ms")?.map(|v| v.extract()).transpose()?;
+        let ann_vol_opt: Option<f64> = gd.get_item("ann_vol")?.map(|v| v.extract()).transpose()?;
+        let h_per_ms: f64 = match (h_per_ms_opt, ann_vol_opt) {
+            (_, Some(av)) => {
+                if h_per_ms_opt.is_some() {
+                    log::warn!("Group config: both h_per_ms and ann_vol specified, using ann_vol");
+                }
+                av * av / (365.25 * 24.0 * 3600.0 * 1000.0)
+            }
+            (Some(h), None) => h,
+            (None, None) => return Err(pyo3::exceptions::PyKeyError::new_err(
+                "Missing 'h_per_ms' or 'ann_vol'"
+            )),
+        };
 
         let sigma_mode: SigmaMode = match gd
             .get_item("sigma_mode")?
@@ -794,11 +811,34 @@ fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
             None => SigmaMode::InstantSpread,
         };
 
-        let bias_ewma_halflife: u32 = gd
-            .get_item("bias_ewma_halflife")?
+        let bias_ewma_halflife_ms: f64 = gd
+            .get_item("bias_ewma_halflife_ms")?
             .map(|v| v.extract())
             .transpose()?
-            .unwrap_or(3000);
+            .unwrap_or(3000.0);
+
+        let spread_ewma_halflife_ms: f64 = gd
+            .get_item("spread_ewma_halflife_ms")?
+            .map(|v| v.extract())
+            .transpose()?
+            .unwrap_or(3000.0);
+
+        let model: FairPriceModel = match gd
+            .get_item("model")?
+            .map(|v| v.extract::<String>())
+            .transpose()?
+        {
+            Some(s) => match s.as_str() {
+                "kalman" => FairPriceModel::Kalman,
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "Unknown model '{}'. Valid: kalman",
+                        other
+                    )));
+                }
+            },
+            None => FairPriceModel::Kalman,
+        };
 
         let sigma_k_floor: f64 = gd
             .get_item("sigma_k_floor")?
@@ -806,20 +846,64 @@ fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
             .transpose()?
             .unwrap_or(1e-6);
 
+        let group_vol_ewma_halflife_ms: Option<f64> = gd
+            .get_item("vol_ewma_halflife_ms")?
+            .filter(|v| !v.is_none())
+            .map(|v| v.extract())
+            .transpose()?;
+
+        let group_vol_floor_ann: Option<f64> = gd
+            .get_item("vol_floor_ann")?
+            .filter(|v| !v.is_none())
+            .map(|v| v.extract())
+            .transpose()?;
+
+        let group_vol_init_ann: Option<f64> = gd
+            .get_item("vol_init_ann")?
+            .filter(|v| !v.is_none())
+            .map(|v| v.extract())
+            .transpose()?;
+
         groups.push(FairPriceGroupConfig {
             name,
             members,
             h_per_ms,
             sigma_mode,
-            bias_ewma_halflife,
+            model,
+            bias_ewma_halflife_ms,
+            spread_ewma_halflife_ms,
             sigma_k_floor,
+            vol_ewma_halflife_ms: group_vol_ewma_halflife_ms,
+            vol_floor_ann: group_vol_floor_ann,
+            vol_init_ann: group_vol_init_ann,
         });
     }
+
+    let vol_ewma_halflife_ms: f64 = dict
+        .get_item("vol_ewma_halflife_ms")?
+        .map(|v| v.extract())
+        .transpose()?
+        .unwrap_or(0.0);
+
+    let vol_floor_ann: f64 = dict
+        .get_item("vol_floor_ann")?
+        .map(|v| v.extract())
+        .transpose()?
+        .unwrap_or(0.50);
+
+    let vol_init_ann: f64 = dict
+        .get_item("vol_init_ann")?
+        .map(|v| v.extract())
+        .transpose()?
+        .unwrap_or(0.0);
 
     Ok(FairPriceConfig {
         interval_ms,
         buffer_capacity,
         groups,
+        vol_ewma_halflife_ms,
+        vol_floor_ann,
+        vol_init_ann,
     })
 }
 

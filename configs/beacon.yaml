@@ -1,0 +1,21 @@
+version: 1
+
+# Global vol defaults
+vol_ewma_halflife_ms: 60_000
+vol_floor_ann: 0.50
+vol_init_ann: 1.00
+
+groups:
+  BTC:
+    ann_vol: 1.0
+
+  ETH:
+    ann_vol: 1.27
+
+  VIRTUAL:
+    ann_vol: 2.50
+    vol_floor_ann: 0.80
+
+  AIXBT:
+    ann_vol: 3.16
+    vol_floor_ann: 1.00

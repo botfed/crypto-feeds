@@ -67,6 +67,8 @@ pub struct GroupMember {
     pub symbol_id: SymbolId,
     pub bias: f64,
     pub noise_var: f64,
+    /// GG weight (alpha_perp). Only used in GonzaloGranger mode.
+    pub gg_weight: f64,
     /// If set, reprice this member's ticks using the named group's fair price.
     /// E.g. "ETH" converts AIXBT_ETH → AIXBT_USD via ETH group's fair price.
     pub reprice_group: Option<String>,
@@ -87,18 +89,42 @@ pub enum SigmaMode {
     Static,
 }
 
+/// Which fair price model to use.
+#[derive(Debug, Clone, Copy)]
+pub enum FairPriceModel {
+    /// Tau-based Kalman filter (sequential state estimation).
+    Kalman,
+    /// Gonzalo-Granger weighted average of exchange log-mids.
+    GonzaloGranger {
+        /// Max age in ms before an exchange is excluded. 0 = no cutoff.
+        max_latency_ms: f64,
+        /// Exp decay half-life in ms. 0 = no decay.
+        decay_halflife_ms: f64,
+    },
+}
+
 /// Configuration for one pricing group.
 pub struct FairPriceGroupConfig {
     pub name: String,
     pub members: Vec<GroupMember>,
     /// Per-millisecond transition variance: h_per_ms = ann_vol² / ms_per_year.
     pub h_per_ms: f64,
+    /// Which fair price model to use. Default: Kalman.
+    pub model: FairPriceModel,
     /// How sigma_k is determined. Default: InstantSpread.
     pub sigma_mode: SigmaMode,
-    /// EWMA halflife in ticks for online m_k bias estimation. 0 = no online bias estimation.
-    pub bias_ewma_halflife: u32,
+    /// EWMA halflife in ms for online m_k bias estimation. 0 = no online bias.
+    pub bias_ewma_halflife_ms: f64,
+    /// EWMA halflife in ms for spread smoothing (EwmaSpread mode). 0 = same as bias.
+    pub spread_ewma_halflife_ms: f64,
     /// Floor for sigma_k in log-price units. Default 1e-6 (≈ 0.01 bps).
     pub sigma_k_floor: f64,
+    /// Per-group override for vol EWMA halflife. None = use global.
+    pub vol_ewma_halflife_ms: Option<f64>,
+    /// Per-group override for vol floor (annualized). None = use global.
+    pub vol_floor_ann: Option<f64>,
+    /// Per-group override for vol init seed (annualized). None = use global.
+    pub vol_init_ann: Option<f64>,
 }
 
 /// Top-level configuration for the fair price task.
@@ -106,6 +132,12 @@ pub struct FairPriceConfig {
     pub interval_ms: u64,
     pub buffer_capacity: usize,
     pub groups: Vec<FairPriceGroupConfig>,
+    /// Global default: EWMA halflife in ms for vol adaptation. 0 = static.
+    pub vol_ewma_halflife_ms: f64,
+    /// Global default: hard floor as annualized vol fraction. Default 0.10.
+    pub vol_floor_ann: f64,
+    /// Global default: initial vol seed as annualized fraction. 0 = use beacon h_per_ms.
+    pub vol_init_ann: f64,
 }
 
 /// Per-member mutable state tracked between snapshots.
@@ -117,6 +149,10 @@ struct MemberState {
     noise_var: f64,
     /// EWMA of log half-spread (for EwmaSpread mode).
     ewma_half_spread: f64,
+    /// Most recent log mid from this exchange (for GG mode).
+    latest_log_mid: f64,
+    /// Timestamp of most recent tick in nanoseconds (for GG staleness).
+    latest_ts_ns: i64,
 }
 
 /// Per-group Kalman filter state.
@@ -127,6 +163,16 @@ struct GroupState {
     prev_ts_ns: i64,
     initialized: bool,
     member_states: Vec<MemberState>,
+    /// Live h_per_ms (mutable, adapted online via EWMA+GK).
+    h_per_ms: f64,
+    /// Previous snapshot's y (for return / GK computation).
+    y_prev: f64,
+    /// Previous snapshot's timestamp.
+    snap_ts_prev_ns: i64,
+    /// GK: max y seen during current snapshot's tick loop.
+    y_high: f64,
+    /// GK: min y seen during current snapshot's tick loop.
+    y_low: f64,
 }
 
 /// A tick observation collected from a raw ring buffer.
@@ -491,24 +537,48 @@ pub async fn run_fair_price_task(
         })
         .collect();
 
+    // Resolve vol params: per-group override or global default
+    let resolved_vol: Vec<(f64, f64, f64)> = config.groups.iter().map(|g| {
+        let hl = g.vol_ewma_halflife_ms.unwrap_or(config.vol_ewma_halflife_ms);
+        let floor = g.vol_floor_ann.unwrap_or(config.vol_floor_ann);
+        let init = g.vol_init_ann.unwrap_or(config.vol_init_ann);
+        (hl, floor, init)
+    }).collect();
+
     let mut states: Vec<GroupState> = config
         .groups
         .iter()
-        .map(|g| GroupState {
-            y: 0.0,
-            p: 0.0,
-            prev_ts_ns: 0,
-            initialized: false,
-            member_states: g
-                .members
-                .iter()
-                .map(|m| MemberState {
-                    prev_tick_pos: 0,
-                    bias: m.bias,
-                    noise_var: m.noise_var,
-                    ewma_half_spread: m.noise_var.sqrt(),
-                })
-                .collect(),
+        .enumerate()
+        .map(|(gi, g)| {
+            let (_, _, vol_init) = resolved_vol[gi];
+            let h_init = if vol_init > 0.0 {
+                vol_init * vol_init / MS_PER_YEAR
+            } else {
+                g.h_per_ms
+            };
+            GroupState {
+                y: 0.0,
+                p: 0.0,
+                prev_ts_ns: 0,
+                initialized: false,
+                member_states: g
+                    .members
+                    .iter()
+                    .map(|m| MemberState {
+                        prev_tick_pos: 0,
+                        bias: m.bias,
+                        noise_var: m.noise_var,
+                        ewma_half_spread: m.noise_var.sqrt(),
+                        latest_log_mid: f64::NAN,
+                        latest_ts_ns: 0,
+                    })
+                    .collect(),
+                h_per_ms: h_init,
+                y_prev: f64::NAN,
+                snap_ts_prev_ns: 0,
+                y_high: f64::NAN,
+                y_low: f64::NAN,
+            }
         })
         .collect();
 
@@ -520,12 +590,7 @@ pub async fn run_fair_price_task(
 
     let mut tick_scratch: Vec<TickObs> = Vec::with_capacity(256);
 
-    // Compute annualized vol per group (constant from h_per_ms)
-    let vol_ann_pct: Vec<f64> = config
-        .groups
-        .iter()
-        .map(|g| (g.h_per_ms * MS_PER_YEAR).sqrt() * 100.0)
-        .collect();
+    // (vol_ann_pct now computed per-snapshot from live state.h_per_ms)
 
     loop {
         tokio::select! {
@@ -543,7 +608,7 @@ pub async fn run_fair_price_task(
 
         for (group_idx, group_cfg) in config.groups.iter().enumerate() {
             let state = &mut states[group_idx];
-            let h_per_ms = group_cfg.h_per_ms;
+            let h_per_ms = state.h_per_ms;
             tick_scratch.clear();
 
             // ── 1. Collect new ticks from all members ──────────────────
@@ -603,133 +668,233 @@ pub async fn run_fair_price_task(
 
             let n_ticks = tick_scratch.len();
 
-            // ── 3. Initialize from first observation if needed ─────────
-            if !state.initialized {
-                if let Some(first) = tick_scratch.first() {
-                    let ms = &state.member_states[first.member_idx];
-                    state.y = first.log_mid - ms.bias;
-                    state.p = ms.noise_var;
-                    state.prev_ts_ns = first.ts_ns;
-                    state.initialized = true;
+            let sigma_floor_sq = group_cfg.sigma_k_floor * group_cfg.sigma_k_floor;
+            let ln2 = std::f64::consts::LN_2;
+
+            // Helper: compute time-weighted EWMA decay for a given halflife and tau
+            #[inline]
+            fn ewma_decay(tau_ms: f64, halflife_ms: f64) -> f64 {
+                if halflife_ms <= 0.0 { return 1.0; }
+                (-tau_ms * std::f64::consts::LN_2 / halflife_ms).exp()
+            }
+
+            // Update latest_log_mid / latest_ts_ns and spread EWMA for all ticks
+            // (shared between Kalman and GG)
+            for obs in &tick_scratch {
+                let ms = &mut state.member_states[obs.member_idx];
+                ms.latest_log_mid = obs.log_mid;
+                ms.latest_ts_ns = obs.ts_ns;
+
+                // Update spread EWMA (time-weighted)
+                if group_cfg.spread_ewma_halflife_ms > 0.0 && ms.latest_ts_ns > 0 {
+                    let tau = (obs.ts_ns - ms.latest_ts_ns).max(0) as f64 / 1e6;
+                    let d = ewma_decay(tau, group_cfg.spread_ewma_halflife_ms);
+                    ms.ewma_half_spread = (1.0 - d) * obs.log_half_spread + d * ms.ewma_half_spread;
                 } else {
-                    continue;
+                    ms.ewma_half_spread = obs.log_half_spread;
                 }
             }
 
-            // EWMA decay/alpha for bias estimation
-            let (bias_decay, bias_alpha) = if group_cfg.bias_ewma_halflife > 0 {
-                let d = (-1.0 / group_cfg.bias_ewma_halflife as f64).exp();
-                (d, 1.0 - d)
-            } else {
-                (1.0, 0.0) // no update
-            };
+            // ── 3. Model-specific processing ────────────────────────────
+            match group_cfg.model {
 
-            // EWMA decay/alpha for spread smoothing (reuse same halflife)
-            let (spread_decay, spread_alpha) = (bias_decay, bias_alpha);
+            FairPriceModel::Kalman => {
+                // Initialize from first observation if needed
+                if !state.initialized {
+                    if let Some(first) = tick_scratch.first() {
+                        let ms = &state.member_states[first.member_idx];
+                        state.y = first.log_mid - ms.bias;
+                        state.p = ms.noise_var;
+                        state.prev_ts_ns = first.ts_ns;
+                        state.initialized = true;
+                    } else {
+                        continue;
+                    }
+                }
 
-            let sigma_floor_sq = group_cfg.sigma_k_floor * group_cfg.sigma_k_floor;
+                if n_ticks == 0 {
+                    let tau_ms = (snap_ts_ns - state.prev_ts_ns) as f64 / 1e6;
+                    state.p += h_per_ms * tau_ms;
+                    state.prev_ts_ns = snap_ts_ns;
+                } else {
+                    for obs in &tick_scratch {
+                        let ms = &mut state.member_states[obs.member_idx];
 
-            // ── 4. Kalman filter: tau-based predict + update per tick ───
-            if n_ticks == 0 {
-                // No observations — forward-propagate uncertainty to snap boundary
-                let tau_ms = (snap_ts_ns - state.prev_ts_ns) as f64 / 1_000_000.0;
-                state.p += h_per_ms * tau_ms;
-                state.prev_ts_ns = snap_ts_ns;
-            } else {
-                for obs in &tick_scratch {
-                    let ms = &mut state.member_states[obs.member_idx];
+                        let tau_ms = (obs.ts_ns - state.prev_ts_ns) as f64 / 1e6;
+                        let q = h_per_ms * tau_ms.max(0.0);
+                        state.p += q;
 
-                    // Tau-based process noise
-                    let tau_ms = (obs.ts_ns - state.prev_ts_ns) as f64 / 1_000_000.0;
-                    let q = h_per_ms * tau_ms.max(0.0);
+                        // Determine noise_var based on sigma mode
+                        let noise_var = match group_cfg.sigma_mode {
+                            SigmaMode::InstantSpread => {
+                                obs.log_half_spread.powi(2).max(sigma_floor_sq)
+                            }
+                            SigmaMode::EwmaSpread => {
+                                ms.ewma_half_spread.powi(2).max(sigma_floor_sq)
+                            }
+                            SigmaMode::Static => ms.noise_var,
+                        };
 
-                    // Predict
-                    state.p += q;
+                        // Pre-update residual for bias EWMA
+                        let residual = obs.log_mid - state.y;
 
-                    // Determine noise_var based on sigma mode
-                    let noise_var = match group_cfg.sigma_mode {
-                        SigmaMode::InstantSpread => {
-                            obs.log_half_spread.powi(2).max(sigma_floor_sq)
+                        let p_pre = state.p;
+                        let innovation = obs.log_mid - ms.bias - state.y;
+                        let s = state.p + noise_var;
+                        let gain = state.p / s;
+
+                        state.y += gain * innovation;
+                        state.p *= 1.0 - gain;
+
+                        // Track GK high/low
+                        if state.y > state.y_high || state.y_high.is_nan() { state.y_high = state.y; }
+                        if state.y < state.y_low || state.y_low.is_nan() { state.y_low = state.y; }
+
+                        // Time-weighted bias EWMA
+                        if group_cfg.bias_ewma_halflife_ms > 0.0 {
+                            let d = ewma_decay(tau_ms.max(0.0), group_cfg.bias_ewma_halflife_ms);
+                            ms.bias = (1.0 - d) * residual + d * ms.bias;
                         }
-                        SigmaMode::EwmaSpread => {
-                            // Update EWMA of half-spread
-                            ms.ewma_half_spread = spread_alpha * obs.log_half_spread
-                                + spread_decay * ms.ewma_half_spread;
+
+                        ms.noise_var = noise_var;
+
+                        if let Some(ref mut dw) = diag {
+                            dw.write_tick(
+                                snap_ts_ns, obs.ts_ns, group_idx, obs.member_idx,
+                                obs.log_mid, tau_ms, q, p_pre, innovation, s, gain,
+                                state.y, state.p,
+                            );
+                        }
+
+                        state.prev_ts_ns = obs.ts_ns;
+                    }
+
+                    // Forward-propagate to snapshot boundary
+                    let tau_fwd_ms = (snap_ts_ns - state.prev_ts_ns) as f64 / 1e6;
+                    let p_pre_fwd = state.p;
+                    if tau_fwd_ms > 0.0 {
+                        state.p += h_per_ms * tau_fwd_ms;
+                    }
+
+                    if let Some(ref mut dw) = diag {
+                        dw.write_group(
+                            snap_ts_ns, group_idx, state.y, state.p,
+                            p_pre_fwd, tau_fwd_ms, n_ticks, state.prev_ts_ns,
+                        );
+                    }
+
+                    state.prev_ts_ns = snap_ts_ns;
+                }
+            }
+
+            FairPriceModel::GonzaloGranger { max_latency_ms, decay_halflife_ms } => {
+                // Update bias EWMA for all observed ticks
+                if group_cfg.bias_ewma_halflife_ms > 0.0 && state.initialized {
+                    for obs in &tick_scratch {
+                        let ms = &mut state.member_states[obs.member_idx];
+                        let residual = obs.log_mid - state.y;
+                        let tau_ms = if ms.latest_ts_ns > 0 {
+                            (obs.ts_ns - ms.latest_ts_ns).max(0) as f64 / 1e6
+                        } else {
+                            0.0
+                        };
+                        let d = ewma_decay(tau_ms, group_cfg.bias_ewma_halflife_ms);
+                        ms.bias = (1.0 - d) * residual + d * ms.bias;
+                    }
+                }
+
+                // Compute GG weighted average
+                let mut w_sum = 0.0f64;
+                let mut y = 0.0f64;
+                let mut p = 0.0f64;
+                let mut freshest_ts_ns: i64 = 0;
+                let mut n_active = 0u32;
+
+                for (k, member) in group_cfg.members.iter().enumerate() {
+                    let ms = &state.member_states[k];
+                    if ms.latest_ts_ns == 0 || ms.latest_log_mid.is_nan() { continue; }
+
+                    let elapsed_ms = (snap_ts_ns - ms.latest_ts_ns) as f64 / 1e6;
+                    if max_latency_ms > 0.0 && elapsed_ms > max_latency_ms { continue; }
+
+                    let decay = if decay_halflife_ms > 0.0 {
+                        (-elapsed_ms * ln2 / decay_halflife_ms).exp()
+                    } else {
+                        1.0
+                    };
+
+                    let w = member.gg_weight * decay;
+
+                    // sigma_k for uncertainty
+                    let noise_var = match group_cfg.sigma_mode {
+                        SigmaMode::InstantSpread | SigmaMode::EwmaSpread => {
                             ms.ewma_half_spread.powi(2).max(sigma_floor_sq)
                         }
                         SigmaMode::Static => ms.noise_var,
                     };
 
-                    // Pre-update residual for bias EWMA
-                    let residual = obs.log_mid - state.y;
+                    y += w * (ms.latest_log_mid - ms.bias);
+                    p += w * w * noise_var;
+                    w_sum += w;
+                    n_active += 1;
 
-                    // Update
-                    let p_pre = state.p;
-                    let innovation = obs.log_mid - ms.bias - state.y;
-                    let s = state.p + noise_var;
-                    let gain = state.p / s;
+                    if ms.latest_ts_ns > freshest_ts_ns {
+                        freshest_ts_ns = ms.latest_ts_ns;
+                    }
+                }
 
-                    state.y += gain * innovation;
-                    state.p *= 1.0 - gain;
+                if w_sum.abs() > 1e-30 && n_active > 0 {
+                    state.y = y / w_sum;
+                    state.p = p / (w_sum * w_sum);
 
-                    // Online bias estimation (EWMA of pre-update residuals)
-                    if bias_alpha > 0.0 {
-                        ms.bias = bias_alpha * residual + bias_decay * ms.bias;
+                    // Add process noise for time since freshest tick
+                    let staleness_ms = (snap_ts_ns - freshest_ts_ns) as f64 / 1e6;
+                    if staleness_ms > 0.0 {
+                        state.p += h_per_ms * staleness_ms;
                     }
 
-                    // Track noise_var for output/display
-                    ms.noise_var = noise_var;
-
-                    if let Some(ref mut dw) = diag {
-                        dw.write_tick(
-                            snap_ts_ns,
-                            obs.ts_ns,
-                            group_idx,
-                            obs.member_idx,
-                            obs.log_mid,
-                            tau_ms,
-                            q,
-                            p_pre,
-                            innovation,
-                            s,
-                            gain,
-                            state.y,
-                            state.p,
-                        );
-                    }
-
-                    state.prev_ts_ns = obs.ts_ns;
+                    state.prev_ts_ns = snap_ts_ns;
+                    state.initialized = true;
                 }
-
-                // Forward-propagate to snapshot boundary
-                let tau_fwd_ms = (snap_ts_ns - state.prev_ts_ns) as f64 / 1_000_000.0;
-                let p_pre_fwd = state.p;
-                if tau_fwd_ms > 0.0 {
-                    state.p += h_per_ms * tau_fwd_ms;
-                }
-
-                // Diagnostic: group-level snapshot
-                if let Some(ref mut dw) = diag {
-                    dw.write_group(
-                        snap_ts_ns,
-                        group_idx,
-                        state.y,
-                        state.p,
-                        p_pre_fwd,
-                        tau_fwd_ms,
-                        n_ticks,
-                        state.prev_ts_ns,
-                    );
-                }
-
-                state.prev_ts_ns = snap_ts_ns;
             }
+
+            } // match model
+
+            // ── 4. Online vol adaptation (GK + EWMA) ────────────────────
+            let (vol_hl, vol_floor, _) = resolved_vol[group_idx];
+            let h_floor = vol_floor * vol_floor / MS_PER_YEAR;
+
+            if vol_hl > 0.0 && state.y_prev.is_finite() && state.snap_ts_prev_ns > 0 {
+                let tau_ms = (snap_ts_ns - state.snap_ts_prev_ns) as f64 / 1e6;
+                if tau_ms > 0.0 {
+                    // Garman-Klass variance estimator (if we have high/low)
+                    let r2_gk = if state.y_high.is_finite() && state.y_low.is_finite() {
+                        let hl = state.y_high - state.y_low;
+                        let cc = state.y - state.y_prev;
+                        let gk = 0.5 * hl * hl - (2.0 * ln2 - 1.0) * cc * cc;
+                        (gk - state.p).max(0.0) // bias-correct by subtracting estimation noise
+                    } else {
+                        let r = state.y - state.y_prev;
+                        (r * r - state.p).max(0.0)
+                    };
+
+                    let d = ewma_decay(tau_ms, vol_hl);
+                    state.h_per_ms = d * state.h_per_ms + (1.0 - d) * (r2_gk / tau_ms);
+                    state.h_per_ms = state.h_per_ms.max(h_floor);
+                }
+            }
+            state.y_prev = state.y;
+            state.snap_ts_prev_ns = snap_ts_ns;
+            state.y_high = state.y;
+            state.y_low = state.y;
 
             // ── 5. Sync live params to outputs ──────────────────────────
             for (k, ms) in state.member_states.iter().enumerate() {
                 outputs.set_bias(group_idx, k, ms.bias);
                 outputs.set_noise_var(group_idx, k, ms.noise_var);
             }
+
+            let vol_ann_pct = (state.h_per_ms * MS_PER_YEAR).sqrt() * 100.0;
 
             // ── 6. Push output ─────────────────────────────────────────
             outputs.push(
@@ -738,7 +903,7 @@ pub async fn run_fair_price_task(
                     fair_price: state.y.exp(),
                     log_fair_price: state.y,
                     uncertainty_bps: state.p.sqrt() * BPS,
-                    vol_ann_pct: vol_ann_pct[group_idx],
+                    vol_ann_pct,
                     snap_ts_ns,
                     n_ticks_used: n_ticks as u32,
                     _pad: [0; 4],
@@ -775,13 +940,32 @@ pub fn load_beacon(
             return false;
         }
     };
-    let beacon: serde_json::Value = match serde_json::from_str(&data) {
+    // Parse YAML, then convert to serde_json::Value for uniform access
+    let yaml_val: serde_yaml::Value = match serde_yaml::from_str(&data) {
         Ok(v) => v,
         Err(e) => {
             log::warn!("Failed to parse beacon file {}: {}", path.display(), e);
             return false;
         }
     };
+    let beacon: serde_json::Value = match serde_json::to_value(&yaml_val) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("Failed to convert beacon YAML: {}", e);
+            return false;
+        }
+    };
+
+    // Global vol params
+    if let Some(v) = beacon.get("vol_ewma_halflife_ms").and_then(|v| v.as_f64()) {
+        config.vol_ewma_halflife_ms = v;
+    }
+    if let Some(v) = beacon.get("vol_floor_ann").and_then(|v| v.as_f64()) {
+        config.vol_floor_ann = v;
+    }
+    if let Some(v) = beacon.get("vol_init_ann").and_then(|v| v.as_f64()) {
+        config.vol_init_ann = v;
+    }
 
     let groups = match beacon.get("groups").and_then(|g| g.as_object()) {
         Some(g) => g,
@@ -791,9 +975,61 @@ pub fn load_beacon(
     let mut applied = 0;
     for group in config.groups.iter_mut() {
         if let Some(params) = groups.get(&group.name).and_then(|p| p.as_object()) {
-            if let Some(v) = params.get("h_per_ms").and_then(|v| v.as_f64()) {
-                group.h_per_ms = v;
+            // h_per_ms vs ann_vol (prefer ann_vol, warn if both)
+            let has_h = params.get("h_per_ms").and_then(|v| v.as_f64());
+            let has_ann = params.get("ann_vol").and_then(|v| v.as_f64());
+            match (has_h, has_ann) {
+                (_, Some(av)) => {
+                    group.h_per_ms = av * av / MS_PER_YEAR;
+                    if has_h.is_some() {
+                        log::warn!(
+                            "Group '{}': both h_per_ms and ann_vol specified, using ann_vol",
+                            group.name
+                        );
+                    }
+                }
+                (Some(h), None) => { group.h_per_ms = h; }
+                _ => {}
             }
+
+            // Model selection
+            if let Some(model_str) = params.get("model").and_then(|v| v.as_str()) {
+                match model_str {
+                    "kalman" => group.model = FairPriceModel::Kalman,
+                    "gonzalo_granger" | "gg" => {
+                        let max_lat = params.get("max_latency_ms")
+                            .and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let decay_hl = params.get("decay_halflife_ms")
+                            .and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        group.model = FairPriceModel::GonzaloGranger {
+                            max_latency_ms: max_lat,
+                            decay_halflife_ms: decay_hl,
+                        };
+                    }
+                    _ => log::warn!("Unknown model '{}', keeping current", model_str),
+                }
+            }
+
+            // EWMA params
+            if let Some(v) = params.get("bias_ewma_halflife_ms").and_then(|v| v.as_f64()) {
+                group.bias_ewma_halflife_ms = v;
+            }
+            if let Some(v) = params.get("spread_ewma_halflife_ms").and_then(|v| v.as_f64()) {
+                group.spread_ewma_halflife_ms = v;
+            }
+            if let Some(v) = params.get("sigma_k_floor").and_then(|v| v.as_f64()) {
+                group.sigma_k_floor = v;
+            }
+            if let Some(v) = params.get("vol_ewma_halflife_ms").and_then(|v| v.as_f64()) {
+                group.vol_ewma_halflife_ms = Some(v);
+            }
+            if let Some(v) = params.get("vol_floor_ann").and_then(|v| v.as_f64()) {
+                group.vol_floor_ann = Some(v);
+            }
+            if let Some(v) = params.get("vol_init_ann").and_then(|v| v.as_f64()) {
+                group.vol_init_ann = Some(v);
+            }
+
             if let Some(members) = params.get("members").and_then(|m| m.as_object()) {
                 for member in group.members.iter_mut() {
                     let key = format!(
@@ -809,6 +1045,9 @@ pub fn load_beacon(
                         }
                         if let Some(v) = mp.get("noise_var").and_then(|v| v.as_f64()) {
                             member.noise_var = v;
+                        }
+                        if let Some(v) = mp.get("gg_weight").and_then(|v| v.as_f64()) {
+                            member.gg_weight = v;
                         }
                     }
                 }
@@ -844,6 +1083,9 @@ mod tests {
         let config = FairPriceConfig {
             interval_ms: 10,
             buffer_capacity: 1024,
+            vol_ewma_halflife_ms: 0.0,
+            vol_floor_ann: 0.50,
+            vol_init_ann: 0.0,
             groups: vec![FairPriceGroupConfig {
                 name: "TEST".to_string(),
                 members: vec![
@@ -852,6 +1094,7 @@ mod tests {
                         symbol_id: 0,
                         bias: 0.0,
                         noise_var: 1e-8,
+                        gg_weight: 0.0,
                         reprice_group: None,
                         invert_reprice: false,
                     },
@@ -860,14 +1103,20 @@ mod tests {
                         symbol_id: 0,
                         bias: 0.0,
                         noise_var: 2e-8,
+                        gg_weight: 0.0,
                         reprice_group: None,
                         invert_reprice: false,
                     },
                 ],
                 h_per_ms,
                 sigma_mode: SigmaMode::Static,
-                bias_ewma_halflife: 0,
+                model: FairPriceModel::Kalman,
+                bias_ewma_halflife_ms: 0.0,
+                spread_ewma_halflife_ms: 0.0,
                 sigma_k_floor: 1e-6,
+                vol_ewma_halflife_ms: None,
+                vol_floor_ann: None,
+                vol_init_ann: None,
             }],
         };
 
@@ -928,22 +1177,35 @@ mod tests {
         let config = FairPriceConfig {
             interval_ms: 100,
             buffer_capacity: 1024,
+            vol_ewma_halflife_ms: 0.0,
+            vol_floor_ann: 0.50,
+            vol_init_ann: 0.0,
             groups: vec![
                 FairPriceGroupConfig {
                     name: "BTC".to_string(),
                     members: vec![],
                     h_per_ms: 1e-14,
                     sigma_mode: SigmaMode::Static,
-                    bias_ewma_halflife: 0,
+                    model: FairPriceModel::Kalman,
+                    bias_ewma_halflife_ms: 0.0,
+                    spread_ewma_halflife_ms: 0.0,
                     sigma_k_floor: 1e-6,
+                    vol_ewma_halflife_ms: None,
+                    vol_floor_ann: None,
+                    vol_init_ann: None,
                 },
                 FairPriceGroupConfig {
                     name: "ETH".to_string(),
                     members: vec![],
                     h_per_ms: 1e-14,
                     sigma_mode: SigmaMode::Static,
-                    bias_ewma_halflife: 0,
+                    model: FairPriceModel::Kalman,
+                    bias_ewma_halflife_ms: 0.0,
+                    spread_ewma_halflife_ms: 0.0,
                     sigma_k_floor: 1e-6,
+                    vol_ewma_halflife_ms: None,
+                    vol_floor_ann: None,
+                    vol_init_ann: None,
                 },
             ],
         };
@@ -960,13 +1222,21 @@ mod tests {
         let config = FairPriceConfig {
             interval_ms: 100,
             buffer_capacity: 1024,
+            vol_ewma_halflife_ms: 0.0,
+            vol_floor_ann: 0.50,
+            vol_init_ann: 0.0,
             groups: vec![FairPriceGroupConfig {
                 name: "TEST".to_string(),
                 members: vec![],
                 h_per_ms: 1e-14,
                 sigma_mode: SigmaMode::Static,
-                bias_ewma_halflife: 0,
+                model: FairPriceModel::Kalman,
+                bias_ewma_halflife_ms: 0.0,
+                spread_ewma_halflife_ms: 0.0,
                 sigma_k_floor: 1e-6,
+                vol_ewma_halflife_ms: None,
+                vol_floor_ann: None,
+                vol_init_ann: None,
             }],
         };
 
