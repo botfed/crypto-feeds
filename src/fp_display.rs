@@ -155,7 +155,7 @@ pub async fn run_display(
                         // Header
                         macro_rules! row {
                             ($buf:expr, $($arg:expr),* $(,)?) => {
-                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>7} {:>7}", $($arg),*)
+                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>7} {:>7} {:>7}", $($arg),*)
                             }
                         }
                         let _ = row!(buf,
@@ -165,7 +165,7 @@ pub async fn run_display(
                             "TrdEdge",
                             "BidQty", "AskQty",
                             "m_k", "sigma_k",
-                            "P_unc0", "P_unc1", "Age",
+                            "P_unc0", "P_unc1", "Age", "ClkAdj",
                         );
                         let _ = row!(buf,
                             "", "", "", "",
@@ -174,7 +174,7 @@ pub async fn run_display(
                             "(bps)",
                             "", "",
                             "(bps)", "(bps)",
-                            "(bps)", "(bps)", "(ms)",
+                            "(bps)", "(bps)", "(ms)", "(ms)",
                         );
 
                         if let Some(members) = out.group_members(group_idx) {
@@ -203,6 +203,10 @@ pub async fn run_display(
 
                                 match quote {
                                     Some(q) => {
+                                        let clk_adj_str = if q.exchange_ts_raw_ns > 0 && q.exchange_ts_ns > 0 {
+                                            let adj_ms = (q.exchange_ts_ns - q.exchange_ts_raw_ns) as f64 / 1e6;
+                                            format!("{:.1}", adj_ms)
+                                        } else { "-".to_string() };
                                         let hspread_bps = (q.ask - q.bid) / q.mid_at_exchange * BPS / 2.0;
                                         let mk_bps = q.bias * BPS;
                                         let sk_bps = q.noise_var.sqrt() * BPS;
@@ -237,6 +241,7 @@ pub async fn run_display(
                                             fmt_bps(lcu0),
                                             fmt_bps(lcu1),
                                             age_str,
+                                            clk_adj_str,
                                         );
                                         let _ = write!(buf, "{}", color_off);
                                     }
@@ -255,7 +260,7 @@ pub async fn run_display(
                                             "-", "-",
                                             fmt_bps(mk_bps),
                                             fmt_bps(sk_bps),
-                                            "-", "-", "-",
+                                            "-", "-", "-", "-",
                                         );
                                     }
                                 }

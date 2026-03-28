@@ -50,6 +50,7 @@ pub struct FairQuote {
     pub bid_qty: f64,
     pub ask_qty: f64,
     pub exchange_ts_ns: i64,
+    pub exchange_ts_raw_ns: i64,
 
     pub edge_bid_bps: f64,
     pub edge_ask_bps: f64,
@@ -385,6 +386,10 @@ impl FairPriceOutputs {
             exchange_ts_ns: md
                 .exchange_ts
                 .or(md.received_ts)
+                .and_then(|t| t.timestamp_nanos_opt())
+                .unwrap_or(0),
+            exchange_ts_raw_ns: md
+                .exchange_ts_raw
                 .and_then(|t| t.timestamp_nanos_opt())
                 .unwrap_or(0),
             edge_bid_bps: edge_bid,
