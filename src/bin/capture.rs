@@ -215,9 +215,13 @@ fn parse_args() -> Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
-
     let args = parse_args();
+
+    if args.display {
+        crypto_feeds::display::init_display_logger(log::LevelFilter::Info);
+    } else {
+        env_logger::init();
+    }
     let needs_fp = args.with_fp || args.tick_dump || args.display;
 
     let cfg: AppConfig = load_config(&args.config_path)
