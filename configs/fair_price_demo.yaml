@@ -46,6 +46,8 @@ fair_price:
     default_init_ann_vol: 1.0
     halflife_s: 600.0
     floor_ann: 1.0
+    bar_min: 1
+    max_bars: 1440
     BTC:
       init_ann_vol: 1.0
       floor_ann: 0.30

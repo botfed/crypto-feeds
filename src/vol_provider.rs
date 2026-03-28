@@ -72,7 +72,7 @@ impl VolProvider {
     }
 
     /// Build a GK+EWMA provider from per-group (ann_vol, halflife_ms, floor_ann) and bar length.
-    pub fn new_gk_ewma(groups: &[(f64, f64, f64)], target_min: usize) -> Self {
+    pub fn new_gk_ewma(groups: &[(f64, f64, f64)], target_min: usize, max_bars: usize) -> Self {
         let bars_per_year = MINUTES_PER_YEAR / target_min as f64;
         let states = groups
             .iter()
@@ -87,7 +87,7 @@ impl VolProvider {
                     halflife_ms,
                     h_floor,
                     log_gk_floor,
-                    bar_builder: BarBuilder::new(target_min, 64),
+                    bar_builder: BarBuilder::new(target_min, max_bars),
                     bars_processed: 0,
                     target_min,
                     ewma_log_gk: log_gk_seed,
@@ -316,12 +316,7 @@ mod tests {
         let max_bars = 4;
         let target_min = 1;
         let halflife_ms = 120_000.0; // 2 min
-        let mut vp = VolProvider::new_gk_ewma(&[(0.5, halflife_ms, 0.1)], target_min);
-
-        // Override bar_builder to use small max_bars
-        if let VolProvider::GkEwma { states } = &mut vp {
-            states[0].bar_builder = crate::bar_manager::BarBuilder::new(target_min, max_bars);
-        }
+        let mut vp = VolProvider::new_gk_ewma(&[(0.5, halflife_ms, 0.1)], target_min, max_bars);
 
         let mut ts_ns: i64 = 0;
         let one_min_ns: i64 = 60_000_000_000;

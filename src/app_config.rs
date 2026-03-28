@@ -52,12 +52,18 @@ pub struct VolEngineConfig {
     pub floor_ann: f64,
     #[serde(default = "default_bar_min")]
     pub bar_min: usize,
+    #[serde(default = "default_max_bars")]
+    pub max_bars: usize,
     #[serde(flatten)]
     pub assets: HashMap<String, AssetVolConfig>,
 }
 
 fn default_bar_min() -> usize {
     1
+}
+
+fn default_max_bars() -> usize {
+    1440
 }
 
 fn default_vol_engine_type() -> String {
@@ -80,6 +86,7 @@ impl Default for VolEngineConfig {
             halflife_s: 0.0,
             floor_ann: default_floor_ann(),
             bar_min: default_bar_min(),
+            max_bars: default_max_bars(),
             assets: HashMap::new(),
         }
     }
@@ -179,7 +186,7 @@ impl FairPriceParamsConfig {
                 crate::vol_provider::VolProvider::new_ewma(&groups)
             }
             "gk_ewma" => {
-                crate::vol_provider::VolProvider::new_gk_ewma(&groups, ve.bar_min)
+                crate::vol_provider::VolProvider::new_gk_ewma(&groups, ve.bar_min, ve.max_bars)
             }
             _ => {
                 let ann_vols = group_names.iter().map(|n| ve.init_ann_vol(n)).collect();

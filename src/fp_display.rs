@@ -149,7 +149,7 @@ pub async fn run_display(
                         let _ = writeln!(buf);
                         let _ = writeln!(
                             buf,
-                            "--- {} --- fair: {}  P_unc: {} bps  vol: {} ann  ticks: {}  snap_age: {}",
+                            "--- {} --- fair: {}  P_unc: {} bps  vol_ann: {}  ticks: {}  snap_age: {}",
                             group_name, fair_str, unc_str, vol_ann_str, ticks_str, age_str
                         );
 
