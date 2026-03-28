@@ -156,7 +156,7 @@ pub async fn run_display(
                         // Header
                         macro_rules! row {
                             ($buf:expr, $($arg:expr),* $(,)?) => {
-                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>7} {:>7} {:>7}", $($arg),*)
+                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>8} {:>7}", $($arg),*)
                             }
                         }
                         let _ = row!(buf,
@@ -166,7 +166,7 @@ pub async fn run_display(
                             "TrdEdge",
                             "BidQty", "AskQty",
                             "m_k", "sigma_k",
-                            "P_unc0", "P_unc1", "Age", "ClkAdj",
+                            "P_unc", "Age", "ClkAdj",
                         );
                         let _ = row!(buf,
                             "", "", "", "",
@@ -175,7 +175,7 @@ pub async fn run_display(
                             "(bps)",
                             "", "",
                             "(bps)", "(bps)",
-                            "(bps)", "(bps)", "(ms)", "(ms)",
+                            "(bps)", "(ms)", "(ms)",
                         );
 
                         if let Some(members) = out.group_members(group_idx) {
@@ -218,7 +218,6 @@ pub async fn run_display(
                                             0.0
                                         };
                                         let lcu0 = (q.noise_var + h_ms * age_ms).sqrt() * BPS;
-                                        let lcu1 = (q.noise_var + h_ms * (age_ms + 100.0)).sqrt() * BPS;
 
                                         let trd_edge = (q.edge_mid_bps.abs() - hspread_bps).max(0.0);
                                         let highlight = trd_edge > EDGE_HIGHLIGHT_HURDLE_BPS;
@@ -240,7 +239,6 @@ pub async fn run_display(
                                             fmt_bps(mk_bps),
                                             fmt_bps(sk_bps),
                                             fmt_bps(lcu0),
-                                            fmt_bps(lcu1),
                                             age_str,
                                             clk_adj_str,
                                         );
@@ -261,7 +259,7 @@ pub async fn run_display(
                                             "-", "-",
                                             fmt_bps(mk_bps),
                                             fmt_bps(sk_bps),
-                                            "-", "-", "-", "-",
+                                            "-", "-", "-",
                                         );
                                     }
                                 }

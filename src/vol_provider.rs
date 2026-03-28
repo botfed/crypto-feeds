@@ -1,5 +1,7 @@
 use crate::bar_manager::BarBuilder;
+use crate::historical_bars::Bar;
 use crate::vol_engine::raw_gk;
+use std::collections::VecDeque;
 
 const MS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0 * 1000.0;
 const LN2: f64 = std::f64::consts::LN_2;
@@ -41,6 +43,8 @@ pub struct GkEwmaVolState {
     target_min: usize,
     ewma_log_gk: f64,
     ewma_log_gk_sq: f64,
+    /// Rolling buffer of (price, ts_ms) for virtual head — covers target_min minutes.
+    snap_buf: VecDeque<(f64, i64)>,
 }
 
 impl VolProvider {
@@ -81,6 +85,7 @@ impl VolProvider {
                     target_min,
                     ewma_log_gk: log_gk_seed,
                     ewma_log_gk_sq: if log_gk_seed.is_finite() { log_gk_seed * log_gk_seed } else { f64::NAN },
+                    snap_buf: VecDeque::new(),
                     }
             })
             .collect();
@@ -166,11 +171,25 @@ impl VolProvider {
                     s.bars_processed = total;
                 }
 
-                // Virtual step: what would h_per_ms be if the current partial bar closed now?
-                if let Some(head) = s.bar_builder.virtual_head(fair_price) {
-                    let gk = raw_gk(&head);
+                // Virtual step: rolling snap buffer covers target_min minutes.
+                let window_ms = s.target_min as i64 * 60_000;
+                s.snap_buf.push_back((fair_price, ts_ms));
+                while let Some(&(_, t)) = s.snap_buf.front() {
+                    if ts_ms - t > window_ms { s.snap_buf.pop_front(); } else { break; }
+                }
+                if s.snap_buf.len() >= 2 {
+                    let (open, _) = s.snap_buf[0];
+                    let mut high = open;
+                    let mut low = open;
+                    for &(p, _) in &s.snap_buf {
+                        if p > high { high = p; }
+                        if p < low { low = p; }
+                    }
+                    let close = fair_price;
+                    let vbar = Bar { open_time_ms: 0, open, high, low, close, volume: 0.0 };
+                    let gk = raw_gk(&vbar);
                     if gk > 0.0 {
-                        let bar_ms = s.target_min as f64 * 60_000.0;
+                        let bar_ms = window_ms as f64;
                         let log_gk = gk.ln();
                         let d = (-bar_ms * LN2 / s.halflife_ms).exp();
                         let virt_ewma = d * s.ewma_log_gk + (1.0 - d) * log_gk;
