@@ -53,7 +53,6 @@ async fn fetch_pairs(client: &Client) -> Result<Vec<PairRow>> {
 
 struct NadoFeed {
     id_to_config: HashMap<u32, String>,
-    config_to_id: HashMap<String, u32>,
     itype: InstrumentType,
 }
 
@@ -70,7 +69,6 @@ impl NadoFeed {
             .collect();
 
         let mut id_to_config = HashMap::new();
-        let mut config_to_id = HashMap::new();
 
         for &sym in normalized_symbols {
             let native_base = match mapper.denormalize(sym, itype) {
@@ -88,7 +86,6 @@ impl NadoFeed {
                 }
             };
             id_to_config.insert(pid, sym.to_string());
-            config_to_id.insert(sym.to_string(), pid);
         }
 
         if id_to_config.is_empty() {
@@ -97,7 +94,6 @@ impl NadoFeed {
 
         Ok(Self {
             id_to_config,
-            config_to_id,
             itype,
         })
     }
@@ -169,7 +165,6 @@ fn parse_bbo(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>) -> Option<
 async fn connect_and_stream(
     data: &Arc<MarketDataCollection>,
     feed: &NadoFeed,
-    symbols: &[&str],
     config: &ConnectionConfig,
 ) -> Result<bool> {
     let ws_stream = match tokio::time::timeout(
@@ -193,11 +188,8 @@ async fn connect_and_stream(
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Send subscriptions
-    for (i, sym) in symbols.iter().enumerate() {
-        let pid = feed.config_to_id.get(*sym)
-            .ok_or_else(|| anyhow!("No product_id for {}", sym))?;
-
+    // Send subscriptions — iterate only resolved symbols
+    for (i, (&pid, sym)) in feed.id_to_config.iter().enumerate() {
         let msg = json!({
             "method": "subscribe",
             "stream": {
@@ -211,7 +203,7 @@ async fn connect_and_stream(
             .send(Message::Text(msg.to_string().into()))
             .await
         {
-            error!("Failed to subscribe to Nado product {}: {}", pid, e);
+            error!("Failed to subscribe to Nado {} (product {}): {}", sym, pid, e);
             close_nado(write, read).await;
             return Ok(false);
         }
@@ -318,7 +310,7 @@ pub async fn listen_perp_bbo(
                 break;
             }
 
-            res = connect_and_stream(&data, &feed, symbols, &config) => {
+            res = connect_and_stream(&data, &feed, &config) => {
                 // Reset backoff only if the connection was stable for >60s
                 let was_long_lived = attempt_start.elapsed() > Duration::from_secs(60);
 
