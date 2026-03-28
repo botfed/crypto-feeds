@@ -73,12 +73,26 @@ impl NadoFeed {
         let mut config_to_id = HashMap::new();
 
         for &sym in normalized_symbols {
-            let native_base = mapper.denormalize(sym, itype)?;
-            let pid = *api_map
-                .get(&native_base)
-                .ok_or_else(|| anyhow!("Nado symbol '{}' not found in pairs", native_base))?;
+            let native_base = match mapper.denormalize(sym, itype) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!("Nado: skipping symbol '{}': {}", sym, e);
+                    continue;
+                }
+            };
+            let pid = match api_map.get(&native_base) {
+                Some(&id) => id,
+                None => {
+                    warn!("Nado: symbol '{}' (native '{}') not found in pairs, skipping", sym, native_base);
+                    continue;
+                }
+            };
             id_to_config.insert(pid, sym.to_string());
             config_to_id.insert(sym.to_string(), pid);
+        }
+
+        if id_to_config.is_empty() {
+            return Err(anyhow!("Nado: no valid symbols resolved, nothing to subscribe"));
         }
 
         Ok(Self {
