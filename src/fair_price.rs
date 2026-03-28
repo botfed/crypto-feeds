@@ -370,7 +370,7 @@ impl FairPriceOutputs {
 
         let edge_bid = (fair_at_exchange - bid) / fair_at_exchange * BPS;
         let edge_ask = (ask - fair_at_exchange) / fair_at_exchange * BPS;
-        let edge_mid = (fair_at_exchange - mid) / fair_at_exchange * BPS;
+        let edge_mid = (mid - fair_at_exchange) / fair_at_exchange * BPS;
 
         Some(FairQuote {
             fair_price: fp.fair_price,
