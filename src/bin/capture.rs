@@ -307,7 +307,8 @@ async fn main() -> Result<()> {
         let outputs_clone = outputs.clone();
 
         Some(tokio::spawn(async move {
-            let output_path = format!("{}/snapshots.csv.gz", output_dir);
+            let ts = Utc::now().format("%Y%m%d_%H%M%S");
+            let output_path = format!("{}/snapshots_{}.csv.gz", output_dir, ts);
             let file = std::fs::File::create(&output_path).expect("create snapshot file");
             let gz = GzEncoder::new(file, Compression::fast());
             let mut wtr = BufWriter::new(gz);
