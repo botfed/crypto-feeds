@@ -284,7 +284,7 @@ async fn main() -> Result<()> {
                 let ve = &cfg.fair_price.vol_engine;
                 let ve_str = format!("{} hl={}s", ve.engine_type, ve.halflife_s);
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = crypto_feeds::fp_display::run_display(md, out_display, sd, model_str, ve_str).await {
+                    if let Err(e) = crypto_feeds::fp_display::run_display(md, out_display, sd, model_str, ve_str, 100).await {
                         log::error!("display error: {:?}", e);
                     }
                 }));

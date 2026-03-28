@@ -86,6 +86,7 @@ pub async fn run_display(
     shutdown: Arc<Notify>,
     fp_model_str: String,
     vol_engine_str: String,
+    snap_interval_ms: u64,
 ) -> Result<()> {
     let shutdown_fut = shutdown.notified();
     tokio::pin!(shutdown_fut);
@@ -117,8 +118,8 @@ pub async fn run_display(
 
                     let _ = writeln!(
                         buf,
-                        "========== Fair Price Engine ({} + {}) ==========  uptime: {:02}:{:02}:{:02}",
-                        ms, vs, h, m, sec,
+                        "========== Fair Price Engine ({} + {})  snap: {}ms ==========  uptime: {:02}:{:02}:{:02}",
+                        ms, vs, snap_interval_ms, h, m, sec,
                     );
 
                     for (group_idx, group_name) in out.group_names().iter().enumerate() {
@@ -148,7 +149,7 @@ pub async fn run_display(
                         let _ = writeln!(buf);
                         let _ = writeln!(
                             buf,
-                            "--- {} --- fair: {}  P_unc: {} bps  vol: {} ann  ticks: {}  age: {}",
+                            "--- {} --- fair: {}  P_unc: {} bps  vol: {} ann  ticks: {}  snap_age: {}",
                             group_name, fair_str, unc_str, vol_ann_str, ticks_str, age_str
                         );
 
@@ -268,7 +269,10 @@ pub async fn run_display(
                         }
                     }
 
-                    write_log_section(&mut buf, 10);
+                    let (_, rows) = term_size();
+                    let used = buf.lines().count();
+                    let remaining = rows.saturating_sub(used);
+                    write_log_section(&mut buf, remaining);
                     let frame = prepare_frame(&buf);
                     format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW)
                 }).await?;
