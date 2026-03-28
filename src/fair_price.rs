@@ -722,8 +722,11 @@ pub async fn run_fair_price_task(
                         // Bayesian-weighted bias EWMA (weight ramps on same timescale as halflife)
                         if group_cfg.bias_ewma_halflife_ms > 0.0 {
                             let d = ewma_decay(tau_ms.max(0.0), group_cfg.bias_ewma_halflife_ms);
-                            ms.bias_wt = (1.0 - d) + d * ms.bias_wt;
-                            ms.bias += (1.0 - d) / ms.bias_wt * (residual - ms.bias);
+                            let alpha = 1.0 - d;
+                            if alpha > 0.0 {
+                                ms.bias_wt = alpha + d * ms.bias_wt;
+                                ms.bias += alpha / ms.bias_wt * (residual - ms.bias);
+                            }
                         }
 
                         ms.noise_var = noise_var;
@@ -769,8 +772,11 @@ pub async fn run_fair_price_task(
                             0.0
                         };
                         let d = ewma_decay(tau_ms, group_cfg.bias_ewma_halflife_ms);
-                        ms.bias_wt = (1.0 - d) + d * ms.bias_wt;
-                        ms.bias += (1.0 - d) / ms.bias_wt * (residual - ms.bias);
+                        let alpha = 1.0 - d;
+                        if alpha > 0.0 {
+                            ms.bias_wt = alpha + d * ms.bias_wt;
+                            ms.bias += alpha / ms.bias_wt * (residual - ms.bias);
+                        }
                     }
                 }
 

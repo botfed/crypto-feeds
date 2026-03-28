@@ -38,7 +38,7 @@ perp:
 fair_price:
   model: "kalman"
   sigma_mode: "instant_spread"
-  bias_ewma_halflife_s: 3.0
+  bias_ewma_halflife_s: 3600.0
   spread_ewma_halflife_s: 3.0
   sigma_k_floor: 1e-6
   vol_engine:
