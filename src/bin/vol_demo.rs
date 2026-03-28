@@ -268,7 +268,7 @@ async fn main() -> Result<()> {
         .max()
         .unwrap_or(288) + 16;
 
-    let market_data = Arc::new(AllMarketData::new());
+    let market_data = Arc::new(AllMarketData::with_clock_correction(cfg.clock_correction.clone()));
     let shutdown = Arc::new(Notify::new());
     let mut handles = Vec::new();
 

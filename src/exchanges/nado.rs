@@ -144,7 +144,8 @@ fn parse_bbo(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>) -> Option<
         ask,
         bid_qty,
         ask_qty,
-        exchange_ts,
+        exchange_ts_raw: exchange_ts,
+        exchange_ts: None,
         received_ts: Some(received_ts),
     };
 
@@ -229,11 +230,11 @@ async fn connect_and_stream(
                     Some(Ok(Message::Text(text))) => {
                         if let Some((sym, md)) = parse_bbo(feed, text.as_str(), received_ts) {
                             if let Some(&id) = REGISTRY.lookup(&sym, &feed.itype) {
-                                let stale = md.exchange_ts.map_or(false, |ts| {
+                                let stale = md.exchange_ts_raw.map_or(false, |ts| {
                                     last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
                                 });
                                 if !stale {
-                                    if let Some(ts) = md.exchange_ts {
+                                    if let Some(ts) = md.exchange_ts_raw {
                                         last_exchange_ts.insert(id, ts);
                                     }
                                     data.push(&id, md);

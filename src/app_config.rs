@@ -1,5 +1,5 @@
 use crate::exchanges::*;
-use crate::market_data::AllMarketData;
+use crate::market_data::{AllMarketData, ClockCorrectionConfig};
 use crate::onchain::OnchainConfig;
 use anyhow::{Context, Result};
 use log::error;
@@ -208,6 +208,9 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub vol_models: Option<VolModelConfig>,
+
+    #[serde(default)]
+    pub clock_correction: ClockCorrectionConfig,
 }
 
 fn default_sample_interval_ms() -> u64 {

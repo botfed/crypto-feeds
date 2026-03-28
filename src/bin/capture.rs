@@ -225,7 +225,7 @@ async fn main() -> Result<()> {
 
     std::fs::create_dir_all(&args.output_dir)?;
 
-    let market_data = Arc::new(AllMarketData::new());
+    let market_data = Arc::new(AllMarketData::with_clock_correction(cfg.clock_correction.clone()));
     let shutdown = Arc::new(Notify::new());
     let mut handles = Vec::new();
 
@@ -315,9 +315,9 @@ async fn main() -> Result<()> {
 
             // Header
             if with_fp {
-                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,received_ts,group,fair_price,y,p,vol_ann_pct,bias,sigma_k").unwrap();
+                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,exchange_ts_raw,received_ts,group,fair_price,y,p,vol_ann_pct,bias,sigma_k").unwrap();
             } else {
-                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,received_ts").unwrap();
+                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,exchange_ts_raw,received_ts").unwrap();
             }
 
             let mut interval = time::interval(Duration::from_millis(interval_ms));
@@ -352,6 +352,7 @@ async fn main() -> Result<()> {
                     let bid_qty = md.bid_qty.map_or(String::new(), |v| v.to_string());
                     let ask_qty = md.ask_qty.map_or(String::new(), |v| v.to_string());
                     let exchange_ts = format_ts(md.exchange_ts);
+                    let exchange_ts_raw = format_ts(md.exchange_ts_raw);
                     let received_ts = format_ts(md.received_ts);
 
                     if with_fp {
@@ -384,14 +385,14 @@ async fn main() -> Result<()> {
                             (String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new())
                         };
 
-                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                             sample_ts, t.canonical, t.exchange_name,
-                            bid, ask, bid_qty, ask_qty, exchange_ts, received_ts,
+                            bid, ask, bid_qty, ask_qty, exchange_ts, exchange_ts_raw, received_ts,
                             group, fp, y, p, vol, bias, sigma_k);
                     } else {
-                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{}",
+                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{},{}",
                             sample_ts, t.canonical, t.exchange_name,
-                            bid, ask, bid_qty, ask_qty, exchange_ts, received_ts);
+                            bid, ask, bid_qty, ask_qty, exchange_ts, exchange_ts_raw, received_ts);
                     }
 
                     row_count += 1;

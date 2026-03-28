@@ -1167,6 +1167,7 @@ mod tests {
                     ask: Some(102.0 + i as f64),
                     bid_qty: Some(1.0),
                     ask_qty: Some(1.0),
+                    exchange_ts_raw: None,
                     exchange_ts: None,
                     received_ts: None,
                 },

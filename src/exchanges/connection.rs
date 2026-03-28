@@ -284,12 +284,12 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                         match feed.parse_message(WireMessage::Text(text.as_str()), received_ts) {
                             Ok(Some((sym, md))) => {
                                 if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
-                                    let stale = do_ts_dedup && md.exchange_ts.map_or(false, |ts| {
+                                    let stale = do_ts_dedup && md.exchange_ts_raw.map_or(false, |ts| {
                                         last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
                                     });
                                     if !stale {
                                         if do_ts_dedup {
-                                            if let Some(ts) = md.exchange_ts {
+                                            if let Some(ts) = md.exchange_ts_raw {
                                                 last_exchange_ts.insert(id, ts);
                                             }
                                         }
@@ -315,12 +315,12 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                         match feed.parse_message(WireMessage::Binary(&bytes), received_ts) {
                             Ok(Some((sym, md))) => {
                                 if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
-                                    let stale = do_ts_dedup && md.exchange_ts.map_or(false, |ts| {
+                                    let stale = do_ts_dedup && md.exchange_ts_raw.map_or(false, |ts| {
                                         last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
                                     });
                                     if !stale {
                                         if do_ts_dedup {
-                                            if let Some(ts) = md.exchange_ts {
+                                            if let Some(ts) = md.exchange_ts_raw {
                                                 last_exchange_ts.insert(id, ts);
                                             }
                                         }

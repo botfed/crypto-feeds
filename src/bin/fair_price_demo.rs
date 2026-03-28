@@ -142,7 +142,7 @@ async fn main() -> Result<()> {
 
     let cfg: AppConfig = load_config(&config_path).context("loading config")?;
 
-    let market_data = Arc::new(AllMarketData::new());
+    let market_data = Arc::new(AllMarketData::with_clock_correction(cfg.clock_correction.clone()));
     let shutdown = Arc::new(Notify::new());
     let mut handles = Vec::new();
 

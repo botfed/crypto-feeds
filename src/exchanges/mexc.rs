@@ -238,6 +238,7 @@ impl ExchangeFeed for MexcFeed {
                             ask: Some(ask),
                             bid_qty: Some(bid_qty),
                             ask_qty: Some(ask_qty),
+                            exchange_ts_raw: None,
                             exchange_ts: None,
                             received_ts: Some(received_ts),
                         };
@@ -318,7 +319,8 @@ impl ExchangeFeed for MexcFeed {
                     ask: Some(ask),
                     bid_qty: Some(bid_qty),
                     ask_qty: Some(ask_qty),
-                    exchange_ts,
+                    exchange_ts_raw: exchange_ts,
+                    exchange_ts: None,
                     received_ts: Some(received_ts),
                 };
 

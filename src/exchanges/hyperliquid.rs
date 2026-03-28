@@ -144,7 +144,8 @@ impl ExchangeFeed for HyperliquidFeed {
                     ask,
                     bid_qty,
                     ask_qty,
-                    exchange_ts,
+                    exchange_ts_raw: exchange_ts,
+                    exchange_ts: None,
                     received_ts: Some(received_ts),
                 };
 

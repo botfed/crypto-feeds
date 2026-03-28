@@ -248,6 +248,7 @@ mod tests {
             ask: Some(bid + 1.0),
             bid_qty: Some(1.0),
             ask_qty: Some(1.0),
+            exchange_ts_raw: None,
             exchange_ts: None,
             received_ts: Some(Utc::now()),
         }

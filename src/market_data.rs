@@ -1,8 +1,10 @@
 use crate::ring_buffer::RingBuffer;
 use crate::symbol_registry::{MAX_SYMBOLS, SymbolId};
 use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 #[derive(Debug, Default, Copy, Clone)]
 pub struct MarketData {
@@ -10,8 +12,39 @@ pub struct MarketData {
     pub ask: Option<f64>,
     pub bid_qty: Option<f64>,
     pub ask_qty: Option<f64>,
+    pub exchange_ts_raw: Option<DateTime<Utc>>,
     pub exchange_ts: Option<DateTime<Utc>>,
     pub received_ts: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClockCorrectionConfig {
+    #[serde(default = "default_cc_method")]
+    pub method: String,
+    #[serde(default = "default_min_latency_ms")]
+    pub min_latency_ms: f64,
+    #[serde(default = "default_ewma_decay")]
+    pub ewma_decay: f64,
+}
+
+fn default_cc_method() -> String { "ewma".to_string() }
+fn default_min_latency_ms() -> f64 { 1.0 }
+fn default_ewma_decay() -> f64 { 0.999 }
+
+impl Default for ClockCorrectionConfig {
+    fn default() -> Self {
+        Self {
+            method: default_cc_method(),
+            min_latency_ms: default_min_latency_ms(),
+            ewma_decay: default_ewma_decay(),
+        }
+    }
+}
+
+impl ClockCorrectionConfig {
+    pub fn min_latency_ns(&self) -> i64 {
+        (self.min_latency_ms * 1_000_000.0) as i64
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -39,15 +72,22 @@ impl MarketData {
     }
 }
 
+struct SymbolSlot {
+    ring: OnceLock<Box<RingBuffer<MarketData>>>,
+    clock_offset_ewma_ns: AtomicI64,
+    clock_offset_max_ns: AtomicI64,
+}
+
 pub struct MarketDataCollection {
-    buffers: Box<[OnceLock<Box<RingBuffer<MarketData>>>]>,
+    slots: Box<[SymbolSlot]>,
+    clock_config: ClockCorrectionConfig,
 }
 
 // Debug impl since OnceLock<Box<RingBuffer>> doesn't derive Debug
 impl std::fmt::Debug for MarketDataCollection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MarketDataCollection")
-            .field("capacity", &self.buffers.len())
+            .field("capacity", &self.slots.len())
             .finish()
     }
 }
@@ -185,7 +225,11 @@ impl AllMarketData {
 
 impl AllMarketData {
     pub fn new() -> Self {
-        let new_coll = || Arc::new(MarketDataCollection::new());
+        Self::with_clock_correction(ClockCorrectionConfig::default())
+    }
+
+    pub fn with_clock_correction(clock_config: ClockCorrectionConfig) -> Self {
+        let new_coll = || Arc::new(MarketDataCollection::new(clock_config.clone()));
         Self {
             binance: new_coll(),
             bybit: new_coll(),
@@ -207,30 +251,63 @@ impl AllMarketData {
 }
 
 impl MarketDataCollection {
-    pub fn new() -> Self {
-        let mut buffers = Vec::with_capacity(MAX_SYMBOLS);
+    pub fn new(clock_config: ClockCorrectionConfig) -> Self {
+        let mut slots = Vec::with_capacity(MAX_SYMBOLS);
         for _ in 0..MAX_SYMBOLS {
-            buffers.push(OnceLock::new());
+            slots.push(SymbolSlot {
+                ring: OnceLock::new(),
+                clock_offset_ewma_ns: AtomicI64::new(0),
+                clock_offset_max_ns: AtomicI64::new(0),
+            });
         }
         Self {
-            buffers: buffers.into_boxed_slice(),
+            slots: slots.into_boxed_slice(),
+            clock_config,
         }
     }
 
     /// Push a new tick for the given symbol (interior-mutable, no &mut self needed).
-    pub fn push(&self, id: &SymbolId, market_data: MarketData) {
-        let ring = self.buffers[*id].get_or_init(|| Box::new(RingBuffer::new()));
+    pub fn push(&self, id: &SymbolId, mut market_data: MarketData) {
+        let slot = &self.slots[*id];
+
+        // Clock correction: track per-symbol offset
+        let min_latency_ns = self.clock_config.min_latency_ns();
+        if let (Some(exch), Some(recv)) = (market_data.exchange_ts_raw, market_data.received_ts) {
+            let delta_ns = (recv - exch).num_nanoseconds().unwrap_or(0) - min_latency_ns;
+            if delta_ns < 0 {
+                let prev = slot.clock_offset_ewma_ns.load(Ordering::Relaxed);
+                let new = (self.clock_config.ewma_decay * prev as f64
+                    + (1.0 - self.clock_config.ewma_decay) * delta_ns as f64)
+                    as i64;
+                slot.clock_offset_ewma_ns.store(new, Ordering::Relaxed);
+                let cur_max = slot.clock_offset_max_ns.load(Ordering::Relaxed);
+                if delta_ns < cur_max {
+                    slot.clock_offset_max_ns.store(delta_ns, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let offset = match self.clock_config.method.as_str() {
+            "ewma" => slot.clock_offset_ewma_ns.load(Ordering::Relaxed).min(0),
+            "max" => slot.clock_offset_max_ns.load(Ordering::Relaxed).min(0),
+            _ => 0,
+        };
+        market_data.exchange_ts = market_data
+            .exchange_ts_raw
+            .map(|t| t + chrono::Duration::nanoseconds(offset));
+
+        let ring = slot.ring.get_or_init(|| Box::new(RingBuffer::new()));
         ring.push(market_data);
     }
 
     /// Get the latest tick for a symbol (owned copy via seqlock read).
     pub fn latest(&self, id: &SymbolId) -> Option<MarketData> {
-        self.buffers[*id].get()?.latest()
+        self.slots[*id].ring.get()?.latest()
     }
 
     /// Direct access to the underlying ring buffer for a symbol.
     pub fn get_buffer(&self, id: &SymbolId) -> Option<&RingBuffer<MarketData>> {
-        self.buffers[*id].get().map(|b| b.as_ref())
+        self.slots[*id].ring.get().map(|b| b.as_ref())
     }
 
     pub fn get_midquote(&self, id: &SymbolId) -> Option<f64> {

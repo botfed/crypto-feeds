@@ -137,7 +137,8 @@ impl ExchangeFeed for KrakenFeed {
                                                     ask,
                                                     bid_qty,
                                                     ask_qty,
-                                                    exchange_ts,
+                                                    exchange_ts_raw: exchange_ts,
+                                                    exchange_ts: None,
                                                     received_ts: Some(received_ts),
                                                 };
                                                 return Ok(Some((symbol.to_string(), market_data)));
@@ -272,7 +273,8 @@ impl ExchangeFeed for KrakenFuturesFeed {
                     ask: Some(ticker.ask),
                     bid_qty: Some(ticker.bid_size),
                     ask_qty: Some(ticker.ask_size),
-                    exchange_ts,
+                    exchange_ts_raw: exchange_ts,
+                    exchange_ts: None,
                     received_ts: Some(received_ts),
                 };
 

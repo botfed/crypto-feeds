@@ -160,7 +160,8 @@ impl PoolState {
             ask: Some(price * (1.0 + fee_frac)),
             bid_qty: Some(bid_qty),
             ask_qty: Some(ask_qty),
-            exchange_ts: Some(self.block_ts),
+            exchange_ts_raw: Some(self.block_ts),
+            exchange_ts: None,
             received_ts: Some(received_ts),
         }
     }
