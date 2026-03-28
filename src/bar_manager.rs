@@ -26,6 +26,7 @@ pub struct BarBuilder {
     target_min: usize,
     max_bars: usize,
     max_1m: usize,
+    total_produced: usize,
 }
 
 impl BarBuilder {
@@ -38,6 +39,7 @@ impl BarBuilder {
             target_min,
             max_bars,
             max_1m,
+            total_produced: 0,
         }
     }
 
@@ -88,6 +90,7 @@ impl BarBuilder {
                     self.completed_1m.range(slice_start..).copied().collect();
                 if let Some(target_bar) = aggregate_1m_to_target(&slice) {
                     self.completed.push_back(target_bar);
+                    self.total_produced += 1;
                     while self.completed.len() > self.max_bars {
                         self.completed.pop_front();
                     }
@@ -121,6 +124,11 @@ impl BarBuilder {
 
     pub fn n_completed(&self) -> usize {
         self.completed.len()
+    }
+
+    /// Monotonically increasing count of target bars ever produced.
+    pub fn total_produced(&self) -> usize {
+        self.total_produced
     }
 
     pub fn target_min(&self) -> usize {
@@ -305,6 +313,7 @@ impl BarManager {
             for bar in &target_bars[start..] {
                 state.builder.completed.push_back(*bar);
             }
+            state.builder.total_produced = state.builder.completed.len();
 
             let keep_1m = state.builder.max_1m;
             let start_1m = bars_1m.len().saturating_sub(keep_1m);

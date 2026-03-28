@@ -143,11 +143,13 @@ impl VolProvider {
                 s.bar_builder.feed(fair_price, ts_ms);
 
                 // Process any newly completed bars
-                let n = s.bar_builder.n_completed();
-                if n > s.bars_processed {
+                let total = s.bar_builder.total_produced();
+                if total > s.bars_processed {
                     let completed = s.bar_builder.completed();
+                    let n = completed.len();
+                    let new_count = (total - s.bars_processed).min(n);
                     let bar_ms = s.target_min as f64 * 60_000.0;
-                    for i in s.bars_processed..n {
+                    for i in (n - new_count)..n {
                         let bar = &completed[i];
                         let gk = raw_gk(bar);
                         if gk > 0.0 {
@@ -161,7 +163,7 @@ impl VolProvider {
                             s.h_per_ms = s.h_per_ms.max(s.h_floor);
                         }
                     }
-                    s.bars_processed = n;
+                    s.bars_processed = total;
                 }
 
                 // Virtual step: what would h_per_ms be if the current partial bar closed now?
@@ -273,6 +275,56 @@ mod tests {
             "h_per_ms should be floored: {} vs {}",
             vp.h_per_ms(0),
             h_floor,
+        );
+    }
+
+    #[test]
+    fn test_gk_ewma_survives_ring_wrap() {
+        // Regression: after max_bars target bars, the EWMA must keep updating.
+        // target_min=1, max_bars=4 (small to hit wrap quickly).
+        let max_bars = 4;
+        let target_min = 1;
+        let halflife_ms = 120_000.0; // 2 min
+        let mut vp = VolProvider::new_gk_ewma(&[(0.5, halflife_ms, 0.1)], target_min);
+
+        // Override bar_builder to use small max_bars
+        if let VolProvider::GkEwma { states } = &mut vp {
+            states[0].bar_builder = crate::bar_manager::BarBuilder::new(target_min, max_bars);
+        }
+
+        let mut ts_ns: i64 = 0;
+        let one_min_ns: i64 = 60_000_000_000;
+
+        // Generate 10 bars (well past max_bars=4) with oscillating prices
+        // to ensure non-zero GK on every bar.
+        for bar_i in 0..10u64 {
+            // Feed ticks within the minute: open, high, low, close
+            let base = 100.0 + (bar_i as f64) * 0.1;
+            let prices = [base, base + 0.5, base - 0.3, base + 0.2];
+            for &p in prices.iter() {
+                ts_ns += one_min_ns / 4;
+                vp.update(0, p, ts_ns);
+            }
+        }
+
+        let h_after_10 = vp.h_per_ms(0);
+
+        // Now feed 5 more bars with much larger moves → vol should increase
+        for bar_i in 10..15u64 {
+            let base = 100.0 + (bar_i as f64) * 0.1;
+            let prices = [base, base + 3.0, base - 2.0, base + 1.0];
+            for &p in prices.iter() {
+                ts_ns += one_min_ns / 4;
+                vp.update(0, p, ts_ns);
+            }
+        }
+
+        let h_after_15 = vp.h_per_ms(0);
+        assert!(
+            h_after_15 > h_after_10 * 1.5,
+            "EWMA must keep adapting past ring wrap: h@10={:.2e}, h@15={:.2e}",
+            h_after_10,
+            h_after_15,
         );
     }
 }
