@@ -38,6 +38,9 @@ pub struct GkEwmaVolState {
     h_per_ms: f64,
     halflife_ms: f64,
     h_floor: f64,
+    /// ln(h_floor * bar_ms) — floor for ewma_log_gk to prevent state from sinking
+    /// into an unrecoverable hole during quiet periods.
+    log_gk_floor: f64,
     bar_builder: BarBuilder,
     bars_processed: usize,
     target_min: usize,
@@ -76,10 +79,14 @@ impl VolProvider {
             .map(|&(ann_vol, halflife_ms, floor_ann)| {
                 let var_per_bar = ann_vol * ann_vol / bars_per_year;
                 let log_gk_seed = if var_per_bar > 0.0 { var_per_bar.ln() } else { f64::NAN };
+                let h_floor = floor_ann * floor_ann / MS_PER_YEAR;
+                let bar_ms = target_min as f64 * 60_000.0;
+                let log_gk_floor = (h_floor * bar_ms).ln();
                 GkEwmaVolState {
                     h_per_ms: ann_vol * ann_vol / MS_PER_YEAR,
                     halflife_ms,
-                    h_floor: floor_ann * floor_ann / MS_PER_YEAR,
+                    h_floor,
+                    log_gk_floor,
                     bar_builder: BarBuilder::new(target_min, 64),
                     bars_processed: 0,
                     target_min,
@@ -162,6 +169,11 @@ impl VolProvider {
                             let d = (-bar_ms * LN2 / s.halflife_ms).exp();
                             s.ewma_log_gk = d * s.ewma_log_gk + (1.0 - d) * log_gk;
                             s.ewma_log_gk_sq = d * s.ewma_log_gk_sq + (1.0 - d) * log_gk * log_gk;
+                            // Floor the EWMA state to prevent sinking into an unrecoverable hole
+                            if s.ewma_log_gk < s.log_gk_floor {
+                                s.ewma_log_gk = s.log_gk_floor;
+                                s.ewma_log_gk_sq = s.log_gk_floor * s.log_gk_floor;
+                            }
                             // Bias-corrected: E[GK] = exp(μ + σ²/2)
                             let var_log = (s.ewma_log_gk_sq - s.ewma_log_gk * s.ewma_log_gk).max(0.0);
                             s.h_per_ms = (s.ewma_log_gk + var_log / 2.0).exp() / bar_ms;

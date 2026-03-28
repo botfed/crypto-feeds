@@ -31,16 +31,16 @@ fair_price:
     floor_ann: 0.50
     BTC:
       init_ann_vol: 0.80
-      floor_ann: 0.00
+      floor_ann: 0.30
     ETH:
       init_ann_vol: 1.27
-      floor_ann: 0.00
+      floor_ann: 0.30
     VIRTUAL:
       init_ann_vol: 2.50
-      floor_ann: 0.00
+      floor_ann: 0.80
     AIXBT:
       init_ann_vol: 3.16
-      floor_ann: 0.00
+      floor_ann: 1.00
     SPX:
       init_ann_vol: 2.00
-      floor_ann: 0.00
+      floor_ann: 0.80
