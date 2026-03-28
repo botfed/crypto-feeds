@@ -179,14 +179,16 @@ pub async fn run_display(
                         );
 
                         if let Some(members) = out.group_members(group_idx) {
-                            // Sort by canonical symbol (PERP before SPOT), then by exchange
+                            // Sort by first 4 chars of symbol (PERP before SPOT), then by exchange
                             let mut sorted_indices: Vec<usize> = (0..members.len()).collect();
                             sorted_indices.sort_by(|&a, &b| {
                                 let sa = members[a].display_name.as_deref()
                                     .unwrap_or_else(|| REGISTRY.get_symbol(members[a].symbol_id).unwrap_or("?"));
                                 let sb = members[b].display_name.as_deref()
                                     .unwrap_or_else(|| REGISTRY.get_symbol(members[b].symbol_id).unwrap_or("?"));
-                                sa.cmp(sb).then(members[a].exchange.as_str().cmp(members[b].exchange.as_str()))
+                                let prefix_a = &sa[..sa.len().min(4)];
+                                let prefix_b = &sb[..sb.len().min(4)];
+                                prefix_a.cmp(prefix_b).then(members[a].exchange.as_str().cmp(members[b].exchange.as_str()))
                             });
                             for &mem_idx in &sorted_indices {
                                 let member = &members[mem_idx];
