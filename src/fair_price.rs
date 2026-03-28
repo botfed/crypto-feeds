@@ -131,10 +131,10 @@ pub struct FairPriceConfig {
 /// Per-member mutable state tracked between snapshots.
 struct MemberState {
     prev_tick_pos: u64,
-    /// Running bias estimate (raw EWMA of residuals).
+    /// Bias estimate m_k (log-space), always the debiased best estimate.
     bias: f64,
-    /// Cumulative EWMA weight for bias (0→1). Dividing bias by this
-    /// debiases the estimate so the zero-prior has no influence.
+    /// Cumulative EWMA weight (0→1). Ramps up on the same timescale as
+    /// the halflife so the zero-prior has no influence on early estimates.
     bias_wt: f64,
     /// Running noise variance estimate.
     noise_var: f64,
@@ -144,14 +144,6 @@ struct MemberState {
     latest_log_mid: f64,
     /// Timestamp of most recent tick in nanoseconds (for GG staleness).
     latest_ts_ns: i64,
-}
-
-impl MemberState {
-    /// Debiased bias estimate. Returns 0 when no evidence has accumulated.
-    #[inline]
-    fn effective_bias(&self) -> f64 {
-        if self.bias_wt > 1e-12 { self.bias / self.bias_wt } else { 0.0 }
-    }
 }
 
 /// Per-group Kalman filter state.
@@ -684,7 +676,7 @@ pub async fn run_fair_price_task(
                 if !state.initialized {
                     if let Some(first) = tick_scratch.first() {
                         let ms = &state.member_states[first.member_idx];
-                        state.y = first.log_mid - ms.effective_bias();
+                        state.y = first.log_mid - ms.bias;
                         state.p = ms.noise_var;
                         state.prev_ts_ns = first.ts_ns;
                         state.initialized = true;
@@ -720,18 +712,18 @@ pub async fn run_fair_price_task(
                         let residual = obs.log_mid - state.y;
 
                         let p_pre = state.p;
-                        let innovation = obs.log_mid - ms.effective_bias() - state.y;
+                        let innovation = obs.log_mid - ms.bias - state.y;
                         let s = state.p + noise_var;
                         let gain = state.p / s;
 
                         state.y += gain * innovation;
                         state.p *= 1.0 - gain;
 
-                        // Time-weighted bias EWMA with cumulative weight debiasing
+                        // Bayesian-weighted bias EWMA (weight ramps on same timescale as halflife)
                         if group_cfg.bias_ewma_halflife_ms > 0.0 {
                             let d = ewma_decay(tau_ms.max(0.0), group_cfg.bias_ewma_halflife_ms);
-                            ms.bias = (1.0 - d) * residual + d * ms.bias;
                             ms.bias_wt = (1.0 - d) + d * ms.bias_wt;
+                            ms.bias += (1.0 - d) / ms.bias_wt * (residual - ms.bias);
                         }
 
                         ms.noise_var = noise_var;
@@ -777,8 +769,8 @@ pub async fn run_fair_price_task(
                             0.0
                         };
                         let d = ewma_decay(tau_ms, group_cfg.bias_ewma_halflife_ms);
-                        ms.bias = (1.0 - d) * residual + d * ms.bias;
                         ms.bias_wt = (1.0 - d) + d * ms.bias_wt;
+                        ms.bias += (1.0 - d) / ms.bias_wt * (residual - ms.bias);
                     }
                 }
 
@@ -812,7 +804,7 @@ pub async fn run_fair_price_task(
                         SigmaMode::Static => ms.noise_var,
                     };
 
-                    y += w * (ms.latest_log_mid - ms.effective_bias());
+                    y += w * (ms.latest_log_mid - ms.bias);
                     p += w * w * noise_var;
                     w_sum += w;
                     n_active += 1;
@@ -847,7 +839,7 @@ pub async fn run_fair_price_task(
             outputs.set_h_per_ms(group_idx, h_per_ms);
 
             for (k, ms) in state.member_states.iter().enumerate() {
-                outputs.set_bias(group_idx, k, ms.effective_bias());
+                outputs.set_bias(group_idx, k, ms.bias);
                 outputs.set_noise_var(group_idx, k, ms.noise_var);
             }
 
