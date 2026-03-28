@@ -178,7 +178,17 @@ pub async fn run_display(
                         );
 
                         if let Some(members) = out.group_members(group_idx) {
-                            for (mem_idx, member) in members.iter().enumerate() {
+                            // Sort by canonical symbol (PERP before SPOT), then by exchange
+                            let mut sorted_indices: Vec<usize> = (0..members.len()).collect();
+                            sorted_indices.sort_by(|&a, &b| {
+                                let sa = members[a].display_name.as_deref()
+                                    .unwrap_or_else(|| REGISTRY.get_symbol(members[a].symbol_id).unwrap_or("?"));
+                                let sb = members[b].display_name.as_deref()
+                                    .unwrap_or_else(|| REGISTRY.get_symbol(members[b].symbol_id).unwrap_or("?"));
+                                sa.cmp(sb).then(members[a].exchange.as_str().cmp(members[b].exchange.as_str()))
+                            });
+                            for &mem_idx in &sorted_indices {
+                                let member = &members[mem_idx];
                                 let ex_name = &member.exchange.as_str()[..member.exchange.as_str().len().min(5)];
                                 let sym_full = member.display_name.as_deref()
                                     .unwrap_or_else(|| REGISTRY.get_symbol(member.symbol_id).unwrap_or("?"));
