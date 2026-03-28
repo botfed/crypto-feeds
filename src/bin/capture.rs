@@ -314,7 +314,7 @@ async fn main() -> Result<()> {
 
             // Header
             if with_fp {
-                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,received_ts,group,fair_price,y,p").unwrap();
+                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,received_ts,group,fair_price,y,p,vol_ann_pct,bias,sigma_k").unwrap();
             } else {
                 writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,received_ts").unwrap();
             }
@@ -354,29 +354,39 @@ async fn main() -> Result<()> {
                     let received_ts = format_ts(md.received_ts);
 
                     if with_fp {
-                        // Find FP for this symbol's group
-                        let (group, fp, y, p) = if let Some(ref out) = outputs_clone {
-                            // Try to find group by base asset
+                        // Find FP + per-member params for this symbol's group
+                        let (group, fp, y, p, vol, bias, sigma_k) = if let Some(ref out) = outputs_clone {
                             let base = t.canonical.split('-').nth(1).unwrap_or("");
                             if let Some(gi) = out.find_group(base) {
-                                if let Some(fp_out) = out.latest(gi) {
-                                    (base.to_string(), fp_out.fair_price.to_string(),
+                                let fp_cols = if let Some(fp_out) = out.latest(gi) {
+                                    (fp_out.fair_price.to_string(),
                                      fp_out.log_fair_price.to_string(),
-                                     format!("{:.16e}", (fp_out.uncertainty_bps / 1e4).powi(2)))
+                                     format!("{:.16e}", (fp_out.uncertainty_bps / 1e4).powi(2)),
+                                     format!("{:.4}", fp_out.vol_ann_pct))
                                 } else {
-                                    (base.to_string(), String::new(), String::new(), String::new())
-                                }
+                                    (String::new(), String::new(), String::new(), String::new())
+                                };
+                                // Per-member bias and sigma_k
+                                let ex = Exchange::from_str(t.exchange_name);
+                                let (bias_s, sk_s) = if let Some(ex) = ex {
+                                    if let Some(mi) = out.find_member(gi, &ex, t.symbol_id) {
+                                        if let Some((b, nv)) = out.get_member_params(gi, mi) {
+                                            (format!("{:.10e}", b), format!("{:.10e}", nv.sqrt()))
+                                        } else { (String::new(), String::new()) }
+                                    } else { (String::new(), String::new()) }
+                                } else { (String::new(), String::new()) };
+                                (base.to_string(), fp_cols.0, fp_cols.1, fp_cols.2, fp_cols.3, bias_s, sk_s)
                             } else {
-                                (String::new(), String::new(), String::new(), String::new())
+                                (String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new())
                             }
                         } else {
-                            (String::new(), String::new(), String::new(), String::new())
+                            (String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new())
                         };
 
-                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                             sample_ts, t.canonical, t.exchange_name,
                             bid, ask, bid_qty, ask_qty, exchange_ts, received_ts,
-                            group, fp, y, p);
+                            group, fp, y, p, vol, bias, sigma_k);
                     } else {
                         let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{}",
                             sample_ts, t.canonical, t.exchange_name,
