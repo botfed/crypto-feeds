@@ -21,6 +21,9 @@ pub const RESET: &str = "\x1B[0m";
 pub const BPS: f64 = 1e4;
 /// Minimum edge (bps) to highlight a row green. Rough proxy for fees + slippage.
 pub const EDGE_HIGHLIGHT_HURDLE_BPS: f64 = 5.0;
+/// When true, displayed m_k biases are anchored to the mean of SPOT members
+/// so that perp biases read as premium/discount vs spot consensus.
+const ANCHOR_BIAS_TO_SPOT: bool = true;
 
 pub fn term_size() -> (usize, usize) {
     #[cfg(unix)]
@@ -156,7 +159,7 @@ pub async fn run_display(
                         // Header
                         macro_rules! row {
                             ($buf:expr, $($arg:expr),* $(,)?) => {
-                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>8} {:>7}", $($arg),*)
+                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>9} {:>7}", $($arg),*)
                             }
                         }
                         let _ = row!(buf,
@@ -190,6 +193,25 @@ pub async fn run_display(
                                 let prefix_b = &sb[..sb.len().min(4)];
                                 prefix_a.cmp(prefix_b).then(members[a].exchange.as_str().cmp(members[b].exchange.as_str()))
                             });
+                            // Compute spot bias anchor for display
+                            let bias_anchor_bps = if ANCHOR_BIAS_TO_SPOT {
+                                let mut spot_sum = 0.0;
+                                let mut spot_n = 0usize;
+                                for (i, m) in members.iter().enumerate() {
+                                    let name = m.display_name.as_deref()
+                                        .unwrap_or_else(|| REGISTRY.get_symbol(m.symbol_id).unwrap_or("?"));
+                                    if name.starts_with("SPOT") {
+                                        if let Some((mk, _)) = out.get_member_params(group_idx, i) {
+                                            spot_sum += mk * BPS;
+                                            spot_n += 1;
+                                        }
+                                    }
+                                }
+                                if spot_n > 0 { spot_sum / spot_n as f64 } else { 0.0 }
+                            } else {
+                                0.0
+                            };
+
                             for &mem_idx in &sorted_indices {
                                 let member = &members[mem_idx];
                                 let ex_name = &member.exchange.as_str()[..member.exchange.as_str().len().min(5)];
@@ -211,7 +233,7 @@ pub async fn run_display(
                                             format!("{:.1}", adj_ms)
                                         } else { "-".to_string() };
                                         let hspread_bps = (q.ask - q.bid) / q.mid_at_exchange * BPS / 2.0;
-                                        let mk_bps = q.bias * BPS;
+                                        let mk_bps = q.bias * BPS - bias_anchor_bps;
                                         let sk_bps = q.noise_var.sqrt() * BPS;
                                         let h_ms = out.h_per_ms(group_idx);
                                         let age_ms = if q.exchange_ts_ns > 0 {
@@ -249,7 +271,7 @@ pub async fn run_display(
                                     None => {
                                         let params = out.get_member_params(group_idx, mem_idx);
                                         let (mk, sk) = params.unwrap_or((0.0, 0.0));
-                                        let mk_bps = mk * BPS;
+                                        let mk_bps = mk * BPS - bias_anchor_bps;
                                         let sk_bps = sk.sqrt() * BPS;
                                         let _ = row!(buf,
                                             ex_name,

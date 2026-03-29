@@ -1,13 +1,14 @@
 spot:
   binance:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
-  bybit:    ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
+  bybit:    ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
+  kucoin:   ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   okx:      ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
-  coinbase: ["BTC_USD", "ETH_USD"]
-  mexc:     ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
+  coinbase: ["BTC_USD",  "ETH_USD",  "SPX_USD"]
+  mexc:     ["BTC_USDT", "ETH_USDT", "SPX_USDT", "AIXBT_USDT"]
 
 perp:
   binance:     ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
-  okx:         ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
+  okx:         ["BTC_USDT", "ETH_kSDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   bybit:       ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   kucoin:      ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   bingx:       ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]

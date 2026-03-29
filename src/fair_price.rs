@@ -364,11 +364,11 @@ impl FairPriceOutputs {
             )
         };
 
-        let fair_at_exchange = (fp.log_fair_price + bias).exp();
+        let p = (fp.uncertainty_bps / BPS).powi(2);
+        let fair_at_exchange = (fp.log_fair_price + bias + p / 2.0).exp();
         let mid = (bid + ask) / 2.0;
 
         // Horizon projection: P_horizon = P + h_per_ms * horizon_ms
-        let p = (fp.uncertainty_bps / BPS).powi(2);
         let h_ms = load_f64(&self.h_per_ms[group_idx]);
         let p_horizon = p + h_ms * horizon_ms;
 
@@ -855,7 +855,7 @@ pub async fn run_fair_price_task(
             outputs.push(
                 group_idx,
                 FairPriceOutput {
-                    fair_price: state.y.exp(),
+                    fair_price: (state.y + state.p / 2.0).exp(),
                     log_fair_price: state.y,
                     uncertainty_bps: state.p.sqrt() * BPS,
                     vol_ann_pct,
