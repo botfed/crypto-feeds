@@ -39,45 +39,54 @@ EXCHANGES = {
         "url": "https://api.kucoin.com/api/v1/timestamp",
         "method": "GET",
     },
+    "apex": {
+        "url": "https://pro.apex.exchange/api/v3/time",
+        "method": "GET",
+    },
 }
 
 SAMPLES = 1000
 WARMUP = 10
+TIMEOUT = 5.0  # seconds per request
+CONCURRENCY = 50  # max in-flight requests per exchange
 
 
 async def measure(name: str, cfg: dict) -> dict:
     url = cfg["url"]
     method = cfg["method"]
     body = cfg.get("body")
-    latencies = []
+    sem = asyncio.Semaphore(CONCURRENCY)
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         req_kw = {"url": url}
         if method == "POST" and body is not None:
             req_kw["json"] = body
 
+        async def fire():
+            if method == "POST":
+                return await client.post(**req_kw)
+            return await client.get(**req_kw)
+
+        async def timed_request():
+            async with sem:
+                t0 = time.perf_counter()
+                try:
+                    await fire()
+                except Exception:
+                    return None
+                t1 = time.perf_counter()
+                return (t1 - t0) * 1000
+
         print(f"  {name}: warming up ({WARMUP})...")
-        for _ in range(WARMUP):
-            try:
-                if method == "POST":
-                    await client.post(**req_kw)
-                else:
-                    await client.get(**req_kw)
-            except Exception:
-                pass
+        await asyncio.gather(*[fire() for _ in range(WARMUP)], return_exceptions=True)
 
         print(f"  {name}: measuring ({SAMPLES})...")
-        for _ in range(SAMPLES):
-            t0 = time.perf_counter()
-            try:
-                if method == "POST":
-                    await client.post(**req_kw)
-                else:
-                    await client.get(**req_kw)
-            except Exception:
-                continue
-            t1 = time.perf_counter()
-            latencies.append((t1 - t0) * 1000)
+        results = await asyncio.gather(*[timed_request() for _ in range(SAMPLES)])
+        latencies = [r for r in results if r is not None]
+        errors = SAMPLES - len(latencies)
+
+    if errors:
+        print(f"  {name}: {errors} errors out of {SAMPLES}")
 
     if not latencies:
         return {"name": name, "error": "all requests failed", "raw_rtt": []}
