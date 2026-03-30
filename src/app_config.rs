@@ -337,34 +337,19 @@ pub fn load_onchain(
     if let Some(ref onchain_cfg) = cfg.onchain {
         let rpc_url = onchain_cfg.rpc_url()?;
 
-        if let Some(ref aero) = onchain_cfg.aerodrome {
-            let data = Arc::clone(&market_data.aerodrome);
-            let shutdown = shutdown.clone();
-            let rpc_url = rpc_url.clone();
-            let pools = aero.pools.clone();
-            handles.push(tokio::spawn(async move {
-                if let Err(e) =
-                    crate::onchain::aerodrome::listen_aerodrome(data, rpc_url, pools, shutdown)
-                        .await
-                {
-                    error!("Aerodrome listener exited with error {:?}", e);
-                }
-            }));
-        }
+        let aero_data = onchain_cfg.aerodrome.as_ref().map(|_| Arc::clone(&market_data.aerodrome));
+        let aero_pools = onchain_cfg.aerodrome.as_ref().map(|a| a.pools.clone()).unwrap_or_default();
+        let uni_data = onchain_cfg.uniswap.as_ref().map(|_| Arc::clone(&market_data.uniswap));
+        let uni_pools = onchain_cfg.uniswap.as_ref().map(|u| u.pools.clone()).unwrap_or_default();
 
-        if let Some(ref uni) = onchain_cfg.uniswap {
-            let data = Arc::clone(&market_data.uniswap);
-            let shutdown = shutdown.clone();
-            let rpc_url = rpc_url.clone();
-            let pools = uni.pools.clone();
-            handles.push(tokio::spawn(async move {
-                if let Err(e) =
-                    crate::onchain::uniswap::listen_uniswap(data, rpc_url, pools, shutdown).await
-                {
-                    error!("Uniswap listener exited with error {:?}", e);
-                }
-            }));
-        }
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = crate::onchain::listener::listen_onchain(
+                aero_data, aero_pools, uni_data, uni_pools, rpc_url, shutdown,
+            ).await {
+                error!("Onchain listener exited with error {:?}", e);
+            }
+        }));
     }
     Ok(())
 }
