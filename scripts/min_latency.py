@@ -48,7 +48,7 @@ EXCHANGES = {
 SAMPLES = 1000
 WARMUP = 10
 TIMEOUT = 5.0  # seconds per request
-CONCURRENCY = 50  # max in-flight requests per exchange
+CONCURRENCY = 10  # max in-flight requests per exchange
 
 
 async def measure(name: str, cfg: dict) -> dict:
@@ -112,7 +112,7 @@ async def main():
     results = await asyncio.gather(*tasks)
 
     # summary table
-    hdr = f"{'Exchange':<15} {'Min RTT':>10} {'One-Way Floor':>14} {'Mean RTT':>10} {'Median RTT':>11} {'p95 RTT':>10} {'p99 RTT':>10} {'Samples':>8}"
+    hdr = f"{'Exchange':<15} {'One-Way Floor':>14} {'Min RTT':>10} {'Mean RTT':>10} {'Median RTT':>11} {'p95 RTT':>10} {'p99 RTT':>10} {'Samples':>8}"
     sep = "─" * len(hdr)
     print(f"\n{hdr}")
     print(sep)
@@ -123,7 +123,7 @@ async def main():
             continue
         s = r["stats"]
         print(
-            f"{name:<15} {s['min_rtt']:>8.2f}ms {s['floor']:>12.2f}ms "
+            f"{name:<15} {s['floor']:>12.2f}ms {s['min_rtt']:>8.2f}ms "
             f"{s['mean']:>8.2f}ms {s['median']:>9.2f}ms "
             f"{s['p95']:>8.2f}ms {s['p99']:>8.2f}ms {s['samples']:>8}"
         )
