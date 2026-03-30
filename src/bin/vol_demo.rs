@@ -18,8 +18,6 @@ use crypto_feeds::symbol_registry::REGISTRY;
 use crypto_feeds::vol_engine::VolEngine;
 use crypto_feeds::vol_params;
 
-const ALT_SCREEN_ON: &str = "\x1B[?1049h";
-const ALT_SCREEN_OFF: &str = "\x1B[?1049l";
 const CURSOR_HOME: &str = "\x1B[H";
 const CLEAR_BELOW: &str = "\x1B[J";
 const CURSOR_HIDE: &str = "\x1B[?25l";
@@ -131,7 +129,7 @@ async fn run_display(
     let shutdown_fut = shutdown.notified();
     tokio::pin!(shutdown_fut);
 
-    flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
+    flush_str(format!("{}", CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
@@ -154,7 +152,7 @@ async fn run_display(
         }
     };
 
-    flush_str(format!("{}{}", CURSOR_SHOW, ALT_SCREEN_OFF)).await?;
+    flush_str(format!("{}\n", CURSOR_SHOW)).await?;
     result
 }
 

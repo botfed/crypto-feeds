@@ -9,8 +9,6 @@ use std::io::{Write, stdout};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-const ALT_SCREEN_ON: &str = "\x1B[?1049h";
-const ALT_SCREEN_OFF: &str = "\x1B[?1049l";
 const CURSOR_HOME: &str = "\x1B[H";
 const CLEAR_BELOW: &str = "\x1B[J";
 const CURSOR_HIDE: &str = "\x1B[?25l";
@@ -127,7 +125,7 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
     let shutdown_fut = shutdown.notified();
     tokio::pin!(shutdown_fut);
 
-    flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
+    flush_str(format!("{}", CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
     let mut state: Option<([Vec<SymbolId>; NUM_EXCHANGES], AnalyticsScratch)> =
@@ -178,7 +176,7 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
         }
     };
 
-    flush_str(format!("{}{}", CURSOR_SHOW, ALT_SCREEN_OFF)).await?;
+    flush_str(format!("{}\n", CURSOR_SHOW)).await?;
     result
 }
 
@@ -190,7 +188,7 @@ pub async fn print_bbo_with_analytics(
     let shutdown_fut = shutdown.notified();
     tokio::pin!(shutdown_fut);
 
-    flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
+    flush_str(format!("{}", CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
     let mut tick_count: u64 = 0;
@@ -273,7 +271,7 @@ pub async fn print_bbo_with_analytics(
         }
     };
 
-    flush_str(format!("{}{}", CURSOR_SHOW, ALT_SCREEN_OFF)).await?;
+    flush_str(format!("{}\n", CURSOR_SHOW)).await?;
     result
 }
 

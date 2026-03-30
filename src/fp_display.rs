@@ -9,8 +9,6 @@ use crate::fair_price::FairPriceOutputs;
 use crate::market_data::AllMarketData;
 use crate::symbol_registry::REGISTRY;
 
-pub const ALT_SCREEN_ON: &str = "\x1B[?1049h";
-pub const ALT_SCREEN_OFF: &str = "\x1B[?1049l";
 pub const CURSOR_HOME: &str = "\x1B[H";
 pub const CLEAR_BELOW: &str = "\x1B[J";
 pub const CURSOR_HIDE: &str = "\x1B[?25l";
@@ -94,7 +92,7 @@ pub async fn run_display(
     let shutdown_fut = shutdown.notified();
     tokio::pin!(shutdown_fut);
 
-    flush_str(format!("{}{}", ALT_SCREEN_ON, CURSOR_HIDE)).await?;
+    flush_str(format!("{}", CURSOR_HIDE)).await?;
 
     let start = std::time::Instant::now();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
@@ -159,7 +157,7 @@ pub async fn run_display(
                         // Header
                         macro_rules! row {
                             ($buf:expr, $($arg:expr),* $(,)?) => {
-                                writeln!($buf, "  {:<5} {:<16} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>9} {:>7}", $($arg),*)
+                                writeln!($buf, "  {:<5} {:<17} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>9} {:>7}", $($arg),*)
                             }
                         }
                         let _ = row!(buf,
@@ -217,7 +215,7 @@ pub async fn run_display(
                                 let ex_name = &member.exchange.as_str()[..member.exchange.as_str().len().min(5)];
                                 let sym_full = member.display_name.as_deref()
                                     .unwrap_or_else(|| REGISTRY.get_symbol(member.symbol_id).unwrap_or("?"));
-                                let sym_name = &sym_full[..sym_full.len().min(16)];
+                                let sym_name = &sym_full[..sym_full.len().min(17)];
                                 let quote = out.get_fair_quote(
                                     &md,
                                     group_name,
@@ -303,6 +301,6 @@ pub async fn run_display(
         }
     };
 
-    flush_str(format!("{}{}", CURSOR_SHOW, ALT_SCREEN_OFF)).await?;
+    flush_str(format!("{}\n", CURSOR_SHOW)).await?;
     result
 }
