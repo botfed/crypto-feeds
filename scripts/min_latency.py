@@ -60,39 +60,45 @@ def measure(name: str, cfg: dict, samples: int) -> dict:
     method = cfg["method"]
     body = cfg.get("body")
 
-    client = httpx.Client(timeout=TIMEOUT)
+    def make_client():
+        return httpx.Client(timeout=TIMEOUT)
 
-    def fire():
-        if method == "POST":
-            return client.post(url, json=body)
-        return client.get(url)
-
-    def timed_fire():
+    def timed_fire(client):
         t0 = time.perf_counter()
         try:
-            fire()
+            if method == "POST":
+                client.post(url, json=body)
+            else:
+                client.get(url)
         except Exception:
             return None
         t1 = time.perf_counter()
         return (t1 - t0) * 1000
 
+    # warmup: establish connections
     print(f"  {name}: warming up ({WARMUP})...")
-    for _ in range(WARMUP):
+    clients = [make_client() for _ in range(WORKERS_PER_EXCHANGE)]
+    for c in clients:
         try:
-            fire()
+            if method == "POST":
+                c.post(url, json=body)
+            else:
+                c.get(url)
         except Exception:
             pass
 
+    # each worker gets its own client — no pool contention
     print(f"  {name}: measuring ({samples})...")
     latencies = []
     with ThreadPoolExecutor(max_workers=WORKERS_PER_EXCHANGE) as pool:
-        futures = [pool.submit(timed_fire) for _ in range(samples)]
+        futures = [pool.submit(timed_fire, clients[i % WORKERS_PER_EXCHANGE]) for i in range(samples)]
         for f in as_completed(futures):
             r = f.result()
             if r is not None:
                 latencies.append(r)
 
-    client.close()
+    for c in clients:
+        c.close()
 
     errors = samples - len(latencies)
     if errors:
