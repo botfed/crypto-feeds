@@ -267,6 +267,14 @@ pub async fn fetch_pool_configs(
         token_set.insert(addr, TokenInfo { decimals, symbol: sym });
     }
 
+    fn normalize_token(sym: &str) -> &str {
+        match sym {
+            "WETH" => "ETH",
+            "WBTC" | "cbBTC" => "BTC",
+            other => other,
+        }
+    }
+
     let configs = entries
         .iter()
         .zip(raw_infos.iter())
@@ -281,6 +289,27 @@ pub async fn fetch_pool_configs(
                     dex_name, entry.address, entry.symbol
                 );
             }
+
+            // Auto-detect invert_price from on-chain token ordering.
+            // sqrtPriceX96² = token1/token0.  We want price = QUOTE/BASE.
+            // If token0 matches the quote side, non-inverted gives BASE/QUOTE → need invert.
+            let invert_price = {
+                let parts: Vec<&str> = entry.symbol.split('_').collect();
+                if parts.len() == 2 {
+                    let t0_norm = normalize_token(&t0_info.symbol);
+                    let invert = t0_norm.eq_ignore_ascii_case(parts[1]);
+                    if !invert && !normalize_token(&t1_info.symbol).eq_ignore_ascii_case(parts[1]) {
+                        warn!(
+                            "{} pool {} ({}/{}): neither token matches quote '{}', defaulting invert=false",
+                            dex_name, entry.address, t0_info.symbol, t1_info.symbol, parts[1]
+                        );
+                    }
+                    invert
+                } else {
+                    entry.invert_price
+                }
+            };
+
             PoolConfig {
                 address: addr,
                 token0: raw.token0,
@@ -291,7 +320,7 @@ pub async fn fetch_pool_configs(
                 decimals1: t1_info.decimals,
                 tick_spacing: raw.tick_spacing,
                 fee: raw.fee,
-                invert_price: entry.invert_price,
+                invert_price,
                 symbol_id,
                 label: entry.symbol.clone(),
             }

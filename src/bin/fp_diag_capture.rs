@@ -93,7 +93,7 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 noise_var: 4e-8,
                 gg_weight: 0.0,
                 reprice_group: reprice.clone(),
-                invert_reprice: reprice.is_some(),
+                invert_reprice: false,
             });
         }
 
