@@ -1,3 +1,4 @@
+import argparse
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -45,13 +46,12 @@ EXCHANGES = {
     },
 }
 
-SAMPLES = 1000
 WARMUP = 10
 TIMEOUT = 5.0
 WORKERS_PER_EXCHANGE = 20
 
 
-def measure(name: str, cfg: dict) -> dict:
+def measure(name: str, cfg: dict, samples: int) -> dict:
     url = cfg["url"]
     method = cfg["method"]
     body = cfg.get("body")
@@ -79,10 +79,10 @@ def measure(name: str, cfg: dict) -> dict:
         except Exception:
             pass
 
-    print(f"  {name}: measuring ({SAMPLES})...")
+    print(f"  {name}: measuring ({samples})...")
     latencies = []
     with ThreadPoolExecutor(max_workers=WORKERS_PER_EXCHANGE) as pool:
-        futures = [pool.submit(timed_fire) for _ in range(SAMPLES)]
+        futures = [pool.submit(timed_fire) for _ in range(samples)]
         for f in as_completed(futures):
             r = f.result()
             if r is not None:
@@ -90,9 +90,9 @@ def measure(name: str, cfg: dict) -> dict:
 
     client.close()
 
-    errors = SAMPLES - len(latencies)
+    errors = samples - len(latencies)
     if errors:
-        print(f"  {name}: {errors} errors out of {SAMPLES}")
+        print(f"  {name}: {errors} errors out of {samples}")
 
     if not latencies:
         return {"name": name, "error": "all requests failed", "raw_rtt": []}
@@ -112,13 +112,18 @@ def measure(name: str, cfg: dict) -> dict:
 
 
 def main():
-    print(f"Latency floor measurement — {len(EXCHANGES)} exchanges, {SAMPLES} samples each\n")
+    parser = argparse.ArgumentParser(description="Measure latency floor to crypto exchanges")
+    parser.add_argument("-n", "--samples", type=int, default=1000, help="number of requests per exchange (default: 1000)")
+    args = parser.parse_args()
+    samples = args.samples
+
+    print(f"Latency floor measurement — {len(EXCHANGES)} exchanges, {samples} samples each\n")
 
     # run all exchanges concurrently, each with its own thread pool
     results = []
     with ThreadPoolExecutor(max_workers=len(EXCHANGES)) as pool:
         futures = {
-            pool.submit(measure, name, cfg): name
+            pool.submit(measure, name, cfg, samples): name
             for name, cfg in EXCHANGES.items()
         }
         for f in as_completed(futures):
@@ -145,7 +150,7 @@ def main():
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = {
         "timestamp": ts,
-        "config": {"samples": SAMPLES, "warmup": WARMUP},
+        "config": {"samples": samples, "warmup": WARMUP},
         "exchanges": {},
     }
     for r in results:
