@@ -112,7 +112,7 @@ async def main():
     results = await asyncio.gather(*tasks)
 
     # summary table
-    hdr = f"{'Exchange':<15} {'Min RTT':>8} {'Floor':>8} {'Mean':>8} {'Median':>8} {'p95':>8} {'p99':>8} {'N':>6}"
+    hdr = f"{'Exchange':<15} {'Min RTT':>10} {'One-Way Floor':>14} {'Mean RTT':>10} {'Median RTT':>11} {'p95 RTT':>10} {'p99 RTT':>10} {'Samples':>8}"
     sep = "─" * len(hdr)
     print(f"\n{hdr}")
     print(sep)
@@ -123,9 +123,9 @@ async def main():
             continue
         s = r["stats"]
         print(
-            f"{name:<15} {s['min_rtt']:>7.2f}ms {s['floor']:>7.2f}ms "
-            f"{s['mean']:>7.2f}ms {s['median']:>7.2f}ms "
-            f"{s['p95']:>7.2f}ms {s['p99']:>7.2f}ms {s['samples']:>6}"
+            f"{name:<15} {s['min_rtt']:>8.2f}ms {s['floor']:>12.2f}ms "
+            f"{s['mean']:>8.2f}ms {s['median']:>9.2f}ms "
+            f"{s['p95']:>8.2f}ms {s['p99']:>8.2f}ms {s['samples']:>8}"
         )
 
     # json dump
