@@ -39,7 +39,7 @@ onchain:
         symbol: "ETH_USDC"
       - address: "0xf1Fdc83c3A336bdbDC9fB06e318B08EadDC82FF4"
         symbol: "AIXBT_USDC"
-      - address: "0x9c087Eb773291e50CF6c6a90ef0F4500e349B903"
+      - address: "0x9c087Eb773291e50CF6c6a90ef0F4500e349B90"
         symbol: "VIRTUAL_ETH"
       - address: "0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef"
         symbol: "BTC_USDC"
@@ -53,7 +53,7 @@ fair_price:
   vol_engine:
     type: "gk_ewma"
     default_init_ann_vol: 1.0
-    halflife_s: 600.0
+    halflife_s: 3600.0
     floor_ann: 0.50
     bar_min: 1
     max_bars: 1440
