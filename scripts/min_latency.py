@@ -44,6 +44,10 @@ EXCHANGES = {
         "url": "https://pro.apex.exchange/api/v3/time",
         "method": "GET",
     },
+    "kraken": {
+        "url": "https://api.kraken.com/0/public/Time",
+        "method": "GET",
+    },
 }
 
 WARMUP = 10
