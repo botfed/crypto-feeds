@@ -110,6 +110,7 @@ def measure(name: str, cfg: dict, samples: int) -> dict:
         "median": latencies_sorted[n // 2],
         "p95": latencies_sorted[int(n * 0.95)],
         "p99": latencies_sorted[int(n * 0.99)],
+        "p999": latencies_sorted[min(int(n * 0.999), n - 1)],
         "samples": n,
     }
     return {"name": name, "stats": stats, "raw_rtt": latencies}
@@ -134,7 +135,7 @@ def main():
             results.append(f.result())
 
     # summary table
-    hdr = f"{'Exchange':<15} {'One-Way Floor':>14} {'Min RTT':>10} {'Mean RTT':>10} {'Median RTT':>11} {'p95 RTT':>10} {'p99 RTT':>10} {'Samples':>8}"
+    hdr = f"{'Exchange':<15} {'One-Way Floor':>14} {'Min RTT':>10} {'Mean RTT':>10} {'Median RTT':>11} {'p95 RTT':>10} {'p99 RTT':>10} {'p99.9 RTT':>11} {'Samples':>8}"
     sep = "─" * len(hdr)
     print(f"\n{hdr}")
     print(sep)
@@ -147,7 +148,7 @@ def main():
         print(
             f"{name:<15} {s['floor']:>12.2f}ms {s['min_rtt']:>8.2f}ms "
             f"{s['mean']:>8.2f}ms {s['median']:>9.2f}ms "
-            f"{s['p95']:>8.2f}ms {s['p99']:>8.2f}ms {s['samples']:>8}"
+            f"{s['p95']:>8.2f}ms {s['p99']:>8.2f}ms {s['p999']:>9.2f}ms {s['samples']:>8}"
         )
 
     # json dump
