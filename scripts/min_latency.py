@@ -1,6 +1,6 @@
-import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import httpx
@@ -47,44 +47,50 @@ EXCHANGES = {
 
 SAMPLES = 1000
 WARMUP = 10
-TIMEOUT = 5.0  # seconds per request
-CONCURRENCY = 10  # max in-flight requests per exchange
+TIMEOUT = 5.0
+WORKERS_PER_EXCHANGE = 20
 
 
-async def measure(name: str, cfg: dict) -> dict:
+def measure(name: str, cfg: dict) -> dict:
     url = cfg["url"]
     method = cfg["method"]
     body = cfg.get("body")
-    sem = asyncio.Semaphore(CONCURRENCY)
 
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        req_kw = {"url": url}
-        if method == "POST" and body is not None:
-            req_kw["json"] = body
+    client = httpx.Client(timeout=TIMEOUT)
 
-        async def fire():
-            if method == "POST":
-                return await client.post(**req_kw)
-            return await client.get(**req_kw)
+    def fire():
+        if method == "POST":
+            return client.post(url, json=body)
+        return client.get(url)
 
-        async def timed_request():
-            async with sem:
-                t0 = time.perf_counter()
-                try:
-                    await fire()
-                except Exception:
-                    return None
-                t1 = time.perf_counter()
-                return (t1 - t0) * 1000
+    def timed_fire():
+        t0 = time.perf_counter()
+        try:
+            fire()
+        except Exception:
+            return None
+        t1 = time.perf_counter()
+        return (t1 - t0) * 1000
 
-        print(f"  {name}: warming up ({WARMUP})...")
-        await asyncio.gather(*[fire() for _ in range(WARMUP)], return_exceptions=True)
+    print(f"  {name}: warming up ({WARMUP})...")
+    for _ in range(WARMUP):
+        try:
+            fire()
+        except Exception:
+            pass
 
-        print(f"  {name}: measuring ({SAMPLES})...")
-        results = await asyncio.gather(*[timed_request() for _ in range(SAMPLES)])
-        latencies = [r for r in results if r is not None]
-        errors = SAMPLES - len(latencies)
+    print(f"  {name}: measuring ({SAMPLES})...")
+    latencies = []
+    with ThreadPoolExecutor(max_workers=WORKERS_PER_EXCHANGE) as pool:
+        futures = [pool.submit(timed_fire) for _ in range(SAMPLES)]
+        for f in as_completed(futures):
+            r = f.result()
+            if r is not None:
+                latencies.append(r)
 
+    client.close()
+
+    errors = SAMPLES - len(latencies)
     if errors:
         print(f"  {name}: {errors} errors out of {SAMPLES}")
 
@@ -105,11 +111,18 @@ async def measure(name: str, cfg: dict) -> dict:
     return {"name": name, "stats": stats, "raw_rtt": latencies}
 
 
-async def main():
+def main():
     print(f"Latency floor measurement — {len(EXCHANGES)} exchanges, {SAMPLES} samples each\n")
 
-    tasks = [measure(name, cfg) for name, cfg in EXCHANGES.items()]
-    results = await asyncio.gather(*tasks)
+    # run all exchanges concurrently, each with its own thread pool
+    results = []
+    with ThreadPoolExecutor(max_workers=len(EXCHANGES)) as pool:
+        futures = {
+            pool.submit(measure, name, cfg): name
+            for name, cfg in EXCHANGES.items()
+        }
+        for f in as_completed(futures):
+            results.append(f.result())
 
     # summary table
     hdr = f"{'Exchange':<15} {'One-Way Floor':>14} {'Min RTT':>10} {'Mean RTT':>10} {'Median RTT':>11} {'p95 RTT':>10} {'p99 RTT':>10} {'Samples':>8}"
@@ -151,4 +164,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
