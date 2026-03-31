@@ -338,9 +338,9 @@ pub fn load_onchain(
         let rpc_url = onchain_cfg.rpc_url()?;
 
         let aero_data = onchain_cfg.aerodrome.as_ref().map(|_| Arc::clone(&market_data.aerodrome));
-        let aero_pools = onchain_cfg.aerodrome.as_ref().map(|a| a.pools.clone()).unwrap_or_default();
+        let aero_pools = onchain_cfg.aerodrome.as_ref().map(|a| a.validated_pools("Aerodrome")).unwrap_or_default();
         let uni_data = onchain_cfg.uniswap.as_ref().map(|_| Arc::clone(&market_data.uniswap));
-        let uni_pools = onchain_cfg.uniswap.as_ref().map(|u| u.pools.clone()).unwrap_or_default();
+        let uni_pools = onchain_cfg.uniswap.as_ref().map(|u| u.validated_pools("Uniswap")).unwrap_or_default();
 
         let shutdown = shutdown.clone();
         handles.push(tokio::spawn(async move {

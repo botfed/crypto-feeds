@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use log::warn;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use crate::market_data::{InstrumentType, MarketData};
 use crate::symbol_registry::{REGISTRY, SymbolId};
@@ -24,7 +25,19 @@ sol! {
         bytes callData;
     }
 
+    struct Call3 {
+        address target;
+        bool allowFailure;
+        bytes callData;
+    }
+
+    struct McResult {
+        bool success;
+        bytes returnData;
+    }
+
     function aggregate(Multicall3Call[] calls) external payable returns (uint256 blockNumber, bytes[] returnData);
+    function aggregate3(Call3[] calls) external payable returns (McResult[] returnData);
 
     // CL pool config (one-time)
     function token0() external view returns (address);
@@ -62,6 +75,28 @@ impl OnchainConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DexPoolsConfig {
     pub pools: Vec<PoolEntry>,
+}
+
+impl DexPoolsConfig {
+    /// Return only pools whose address parses as a valid EVM address,
+    /// logging a warning for each rejected entry.
+    pub fn validated_pools(&self, dex_name: &str) -> Vec<PoolEntry> {
+        self.pools
+            .iter()
+            .filter(|e| {
+                if e.address.parse::<Address>().is_ok() {
+                    true
+                } else {
+                    warn!(
+                        "{} pool '{}': invalid address '{}', skipping",
+                        dex_name, e.symbol, e.address,
+                    );
+                    false
+                }
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -183,6 +218,19 @@ pub async fn do_multicall(provider: &impl Provider, calls: Vec<Multicall3Call>) 
     Ok(decoded.returnData)
 }
 
+/// Like `do_multicall` but uses `aggregate3` with `allowFailure=true`,
+/// so a single reverted sub-call does not kill the entire batch.
+pub async fn do_try_multicall(provider: &impl Provider, calls: Vec<Call3>) -> Result<Vec<McResult>> {
+    let calldata = aggregate3Call { calls }.abi_encode();
+    let tx = TransactionRequest::default()
+        .to(MULTICALL3)
+        .input(calldata.into());
+    let result = provider.call(tx).await.context("try_multicall eth_call failed")?;
+    let decoded = aggregate3Call::abi_decode_returns(&result)
+        .context("try_multicall abi decode failed")?;
+    Ok(decoded)
+}
+
 // ---------------------------------------------------------------------------
 // Init: fetch static pool config via multicall
 // ---------------------------------------------------------------------------
@@ -192,26 +240,41 @@ pub async fn fetch_pool_configs(
     entries: &[PoolEntry],
     dex_name: &str,
 ) -> Result<Vec<PoolConfig>> {
-    let pool_addrs: Vec<Address> = entries
-        .iter()
-        .map(|e| e.address.parse::<Address>().context("invalid pool address"))
-        .collect::<Result<_>>()?;
+    // Entries reaching here should already be validated by validated_pools(),
+    // but guard again so fetch_pool_configs is safe to call directly.
+    let mut valid: Vec<(usize, Address)> = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        match e.address.parse::<Address>() {
+            Ok(addr) => valid.push((i, addr)),
+            Err(err) => {
+                warn!("{} pool '{}' ({}): invalid address, skipping: {}", dex_name, e.symbol, e.address, err);
+            }
+        }
+    }
+    if valid.is_empty() {
+        warn!("{}: no valid pool addresses", dex_name);
+        return Ok(Vec::new());
+    }
 
-    // Step 1: token0, token1, fee, tickSpacing for each pool
-    let config_calls_per_pool = 4;
-    let mut calls = Vec::with_capacity(entries.len() * config_calls_per_pool);
+    // Step 1: token0, token1, fee, tickSpacing — allow individual failures
+    let calls_per_pool = 4;
     let t0_cd: Bytes = token0Call {}.abi_encode().into();
     let t1_cd: Bytes = token1Call {}.abi_encode().into();
     let fee_cd: Bytes = feeCall {}.abi_encode().into();
     let ts_cd: Bytes = tickSpacingCall {}.abi_encode().into();
 
-    for &addr in &pool_addrs {
-        for cd in [&t0_cd, &t1_cd, &fee_cd, &ts_cd] {
-            calls.push(Multicall3Call { target: addr, callData: cd.clone() });
-        }
-    }
+    let calls: Vec<Call3> = valid
+        .iter()
+        .flat_map(|&(_, addr)| {
+            [&t0_cd, &t1_cd, &fee_cd, &ts_cd].into_iter().map(move |cd| Call3 {
+                target: addr,
+                allowFailure: true,
+                callData: cd.clone(),
+            })
+        })
+        .collect();
 
-    let results = do_multicall(provider, calls).await.context("init pool info multicall")?;
+    let results = do_try_multicall(provider, calls).await.context("init pool info multicall")?;
 
     struct RawPoolInfo {
         token0: Address,
@@ -226,45 +289,80 @@ pub async fn fetch_pool_configs(
         symbol: String,
     }
 
-    let mut raw_infos = Vec::with_capacity(entries.len());
+    let mut resolved: Vec<(usize, Address, RawPoolInfo)> = Vec::new();
     let mut token_set: HashMap<Address, TokenInfo> = HashMap::new();
 
-    for i in 0..entries.len() {
-        let off = i * config_calls_per_pool;
-        let t0: Address = token0Call::abi_decode_returns(&results[off])?;
-        let t1: Address = token1Call::abi_decode_returns(&results[off + 1])?;
-        let f = feeCall::abi_decode_returns(&results[off + 2])?;
-        let ts = tickSpacingCall::abi_decode_returns(&results[off + 3])?;
+    for (vi, &(ei, addr)) in valid.iter().enumerate() {
+        let off = vi * calls_per_pool;
+        let slot = &results[off..off + calls_per_pool];
 
-        token_set.entry(t0).or_insert(TokenInfo { decimals: 18, symbol: "???".into() });
-        token_set.entry(t1).or_insert(TokenInfo { decimals: 18, symbol: "???".into() });
-        raw_infos.push(RawPoolInfo {
-            token0: t0,
-            token1: t1,
-            fee: f.to::<u32>(),
-            tick_spacing: ts.as_i32(),
-        });
+        // Check all 4 sub-calls succeeded on-chain
+        if let Some(pos) = slot.iter().position(|r| !r.success) {
+            let call_name = ["token0", "token1", "fee", "tickSpacing"][pos];
+            warn!(
+                "{} pool '{}' ({}): {}() reverted on-chain, skipping",
+                dex_name, entries[ei].symbol, entries[ei].address, call_name,
+            );
+            continue;
+        }
+
+        // Try ABI-decode; a valid address pointing at the wrong contract may
+        // return garbage that doesn't decode.
+        let decoded = (|| -> Result<RawPoolInfo> {
+            Ok(RawPoolInfo {
+                token0: token0Call::abi_decode_returns(&slot[0].returnData)?,
+                token1: token1Call::abi_decode_returns(&slot[1].returnData)?,
+                fee: feeCall::abi_decode_returns(&slot[2].returnData)?.to::<u32>(),
+                tick_spacing: tickSpacingCall::abi_decode_returns(&slot[3].returnData)?.as_i32(),
+            })
+        })();
+
+        match decoded {
+            Ok(info) => {
+                token_set.entry(info.token0).or_insert(TokenInfo { decimals: 18, symbol: "???".into() });
+                token_set.entry(info.token1).or_insert(TokenInfo { decimals: 18, symbol: "???".into() });
+                resolved.push((ei, addr, info));
+            }
+            Err(err) => {
+                warn!(
+                    "{} pool '{}' ({}): metadata decode failed, skipping: {}",
+                    dex_name, entries[ei].symbol, entries[ei].address, err,
+                );
+            }
+        }
+    }
+
+    if resolved.is_empty() {
+        warn!("{}: no pools resolved successfully", dex_name);
+        return Ok(Vec::new());
     }
 
     // Step 2: fetch decimals + symbol for all unique tokens
     let unique_tokens: Vec<Address> = token_set.keys().copied().collect();
     let dec_cd: Bytes = decimalsCall {}.abi_encode().into();
     let sym_cd: Bytes = symbolCall {}.abi_encode().into();
-    let token_calls: Vec<Multicall3Call> = unique_tokens
+    let token_calls: Vec<Call3> = unique_tokens
         .iter()
         .flat_map(|&addr| [
-            Multicall3Call { target: addr, callData: dec_cd.clone() },
-            Multicall3Call { target: addr, callData: sym_cd.clone() },
+            Call3 { target: addr, allowFailure: true, callData: dec_cd.clone() },
+            Call3 { target: addr, allowFailure: true, callData: sym_cd.clone() },
         ])
         .collect();
 
-    let token_results = do_multicall(provider, token_calls).await.context("init token info multicall")?;
+    let token_results = do_try_multicall(provider, token_calls).await.context("init token info multicall")?;
 
     for (i, &addr) in unique_tokens.iter().enumerate() {
         let off = i * 2;
-        let decimals = decimalsCall::abi_decode_returns(&token_results[off]).unwrap_or(18);
-        let sym = symbolCall::abi_decode_returns(&token_results[off + 1])
-            .unwrap_or_else(|_| "???".into());
+        let decimals = token_results[off]
+            .success
+            .then(|| decimalsCall::abi_decode_returns(&token_results[off].returnData).ok())
+            .flatten()
+            .unwrap_or(18);
+        let sym = token_results[off + 1]
+            .success
+            .then(|| symbolCall::abi_decode_returns(&token_results[off + 1].returnData).ok())
+            .flatten()
+            .unwrap_or_else(|| "???".into());
         token_set.insert(addr, TokenInfo { decimals, symbol: sym });
     }
 
@@ -276,11 +374,22 @@ pub async fn fetch_pool_configs(
         }
     }
 
-    let configs = entries
+    // Log a single summary of skipped pools (if any)
+    let skipped = entries.len() - resolved.len();
+    if skipped > 0 {
+        let mut msg = format!("{}: skipped {}/{} pool(s):", dex_name, skipped, entries.len());
+        for (i, e) in entries.iter().enumerate() {
+            if !resolved.iter().any(|(ei, _, _)| *ei == i) {
+                let _ = write!(msg, " {}", e.symbol);
+            }
+        }
+        warn!("{}", msg);
+    }
+
+    let configs = resolved
         .iter()
-        .zip(raw_infos.iter())
-        .zip(pool_addrs.iter())
-        .map(|((entry, raw), &addr)| {
+        .map(|(ei, addr, raw)| {
+            let entry = &entries[*ei];
             let t0_info = &token_set[&raw.token0];
             let t1_info = &token_set[&raw.token1];
             let symbol_id = REGISTRY.lookup(&entry.symbol, &InstrumentType::Spot).copied();
@@ -312,7 +421,7 @@ pub async fn fetch_pool_configs(
             };
 
             PoolConfig {
-                address: addr,
+                address: *addr,
                 token0: raw.token0,
                 token1: raw.token1,
                 symbol0: t0_info.symbol.clone(),
