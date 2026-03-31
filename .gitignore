@@ -53,3 +53,5 @@ env/
 *.out
 *.log
 tmp.*
+
+latency*json
