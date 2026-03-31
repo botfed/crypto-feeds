@@ -58,6 +58,29 @@ fn build_targets(cfg: &AppConfig, market_data: &AllMarketData) -> Vec<SampleTarg
         }
     }
 
+    // On-chain pools (aerodrome, uniswap)
+    if let Some(ref onchain) = cfg.onchain {
+        for (dex_name, dex_cfg, coll) in [
+            ("aerodrome", &onchain.aerodrome, &market_data.aerodrome),
+            ("uniswap", &onchain.uniswap, &market_data.uniswap),
+        ] {
+            if let Some(pools) = dex_cfg {
+                for pool in &pools.pools {
+                    if let Some(&id) = REGISTRY.lookup(&pool.symbol, &InstrumentType::Spot) {
+                        let canonical =
+                            REGISTRY.get_symbol(id).unwrap_or(&pool.symbol).to_string();
+                        targets.push(SampleTarget {
+                            exchange_name: dex_name,
+                            canonical,
+                            collection: Arc::clone(coll),
+                            symbol_id: id,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     targets
 }
 
