@@ -128,7 +128,7 @@ pub async fn run_display(
 
                         let (fair_str, unc_str, vol_ann_str, ticks_str, age_str) = match fp {
                             Some(fp) => {
-                                let age_ms = (now_ns - fp.snap_ts_ns) / 1_000_000;
+                                let age_ms = (now_ns - fp.snap_ts_ns).max(0) / 1_000_000;
                                 let vol_ann = if fp.vol_ann_pct.is_finite() {
                                     format!("{:.1}%", fp.vol_ann_pct)
                                 } else {
