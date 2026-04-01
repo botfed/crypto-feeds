@@ -36,7 +36,7 @@ perp:
   hyperliquid: ['BTC_USDC', 'ETH_USDC', 'UNI_USDC', 'AIXBT_USDC', 'SPX_USDC']
 
 fair_price:
-  model: "kalman"
+  model: "adaptive_filter"
   sigma_mode: "instant_spread"
   bias_ewma_halflife_s: 3600.0
   spread_ewma_halflife_s: 3.0

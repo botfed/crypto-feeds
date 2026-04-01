@@ -110,7 +110,7 @@ impl VolEngineConfig {
     }
 }
 
-fn default_model() -> String { "kalman".to_string() }
+fn default_model() -> String { "adaptive_filter".to_string() }
 fn default_sigma_mode() -> String { "instant_spread".to_string() }
 fn default_bias_ewma_halflife_s() -> f64 { 3.0 }
 fn default_spread_ewma_halflife_s() -> f64 { 3.0 }
@@ -137,7 +137,12 @@ pub struct FairPriceParamsConfig {
     pub decay_halflife_s: f64,
     #[serde(default)]
     pub vol_engine: VolEngineConfig,
+    /// FP engine background drain interval in milliseconds. Default 100. Set to -1 to disable.
+    #[serde(default = "default_fp_drain_interval_ms")]
+    pub drain_interval_ms: i64,
 }
+
+fn default_fp_drain_interval_ms() -> i64 { 100 }
 
 impl Default for FairPriceParamsConfig {
     fn default() -> Self {
@@ -150,6 +155,7 @@ impl Default for FairPriceParamsConfig {
             max_latency_s: 0.0,
             decay_halflife_s: 0.0,
             vol_engine: VolEngineConfig::default(),
+            drain_interval_ms: default_fp_drain_interval_ms(),
         }
     }
 }
@@ -161,7 +167,7 @@ impl FairPriceParamsConfig {
                 max_latency_ms: self.max_latency_s * 1000.0,
                 decay_halflife_ms: self.decay_halflife_s * 1000.0,
             },
-            _ => crate::fair_price::FairPriceModel::Kalman,
+            _ => crate::fair_price::FairPriceModel::AdaptiveFilter,
         }
     }
 

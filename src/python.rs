@@ -835,15 +835,15 @@ fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
             .transpose()?
         {
             Some(s) => match s.as_str() {
-                "kalman" => FairPriceModel::Kalman,
+                "adaptive_filter" | "kalman" => FairPriceModel::AdaptiveFilter,
                 other => {
                     return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "Unknown model '{}'. Valid: kalman",
+                        "Unknown model '{}'. Valid: adaptive_filter, kalman",
                         other
                     )));
                 }
             },
-            None => FairPriceModel::Kalman,
+            None => FairPriceModel::AdaptiveFilter,
         };
 
         let sigma_k_floor: f64 = gd

@@ -47,7 +47,8 @@ onchain:
         symbol: "BTC_USDC"
 
 fair_price:
-  model: "kalman"
+  model: "adaptive_filter"
+  drain_interval_ms: 100    # background tick drain rate (-1 to disable)
   sigma_mode: "instant_spread"
   bias_ewma_halflife_s: 3600.0
   spread_ewma_halflife_s: 3.0

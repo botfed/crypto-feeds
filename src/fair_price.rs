@@ -94,8 +94,8 @@ pub enum SigmaMode {
 /// Which fair price model to use.
 #[derive(Debug, Clone, Copy)]
 pub enum FairPriceModel {
-    /// Tau-based Kalman filter (sequential state estimation).
-    Kalman,
+    /// Adaptive filter: sequential state estimation with tau-based process noise.
+    AdaptiveFilter,
     /// Gonzalo-Granger weighted average of exchange log-mids.
     GonzaloGranger {
         /// Max age in ms before an exchange is excluded. 0 = no cutoff.
@@ -109,7 +109,7 @@ pub enum FairPriceModel {
 pub struct FairPriceGroupConfig {
     pub name: String,
     pub members: Vec<GroupMember>,
-    /// Which fair price model to use. Default: Kalman.
+    /// Which fair price model to use. Default: AdaptiveFilter.
     pub model: FairPriceModel,
     /// How sigma_k is determined. Default: InstantSpread.
     pub sigma_mode: SigmaMode,
@@ -444,7 +444,7 @@ impl DiagWriter {
 
         writeln!(
             tick_wtr,
-            "snap_ts_ns,tick_ts_ns,group_idx,member_idx,log_mid,tau_ms,q,p_pre,innovation,s,kalman_gain,y_post,p_post"
+            "snap_ts_ns,tick_ts_ns,group_idx,member_idx,log_mid,tau_ms,q,p_pre,innovation,s,gain,y_post,p_post"
         )?;
         writeln!(
             group_wtr,
@@ -776,7 +776,7 @@ impl FairPriceEngine {
             // ── 3. Model-specific processing ────────────────────────────
             match group_cfg.model {
 
-            FairPriceModel::Kalman => {
+            FairPriceModel::AdaptiveFilter => {
                 // Initialize from first observation if needed
                 if !state.initialized {
                     if let Some(first) = tick_scratch.first() {
@@ -1081,7 +1081,7 @@ pub fn load_beacon(
             // Model selection
             if let Some(model_str) = params.get("model").and_then(|v| v.as_str()) {
                 match model_str {
-                    "kalman" => group.model = FairPriceModel::Kalman,
+                    "adaptive_filter" | "kalman" => group.model = FairPriceModel::AdaptiveFilter,
                     "gonzalo_granger" | "gg" => {
                         let max_lat = params.get("max_latency_ms")
                             .and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -1180,7 +1180,7 @@ mod tests {
                     },
                 ],
                 sigma_mode: SigmaMode::Static,
-                model: FairPriceModel::Kalman,
+                model: FairPriceModel::AdaptiveFilter,
                 bias_ewma_halflife_ms: 0.0,
                 spread_ewma_halflife_ms: 0.0,
                 sigma_k_floor: 1e-6,
@@ -1248,7 +1248,7 @@ mod tests {
                     name: "BTC".to_string(),
                     members: vec![],
                     sigma_mode: SigmaMode::Static,
-                    model: FairPriceModel::Kalman,
+                    model: FairPriceModel::AdaptiveFilter,
                     bias_ewma_halflife_ms: 0.0,
                     spread_ewma_halflife_ms: 0.0,
                     sigma_k_floor: 1e-6,
@@ -1257,7 +1257,7 @@ mod tests {
                     name: "ETH".to_string(),
                     members: vec![],
                     sigma_mode: SigmaMode::Static,
-                    model: FairPriceModel::Kalman,
+                    model: FairPriceModel::AdaptiveFilter,
                     bias_ewma_halflife_ms: 0.0,
                     spread_ewma_halflife_ms: 0.0,
                     sigma_k_floor: 1e-6,
@@ -1282,7 +1282,7 @@ mod tests {
                 name: "TEST".to_string(),
                 members: vec![],
                 sigma_mode: SigmaMode::Static,
-                model: FairPriceModel::Kalman,
+                model: FairPriceModel::AdaptiveFilter,
                 bias_ewma_halflife_ms: 0.0,
                 spread_ewma_halflife_ms: 0.0,
                 sigma_k_floor: 1e-6,

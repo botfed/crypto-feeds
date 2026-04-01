@@ -102,7 +102,7 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 name: base.clone(),
                 members,
                 sigma_mode: SigmaMode::InstantSpread,
-                model: FairPriceModel::Kalman,
+                model: FairPriceModel::AdaptiveFilter,
                 bias_ewma_halflife_ms: 3000.0,
                 spread_ewma_halflife_ms: 3000.0,
                 sigma_k_floor: 1e-6,

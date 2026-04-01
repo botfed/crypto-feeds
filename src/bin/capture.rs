@@ -218,7 +218,7 @@ fn parse_args() -> Args {
                 eprintln!("Usage: capture [--interval-ms N] [--tick-dump] [--with-fp] [--display] [--output-dir DIR] [--config PATH] [--warmup-secs N]");
                 eprintln!();
                 eprintln!("  --interval-ms N   Snap BBOs at N ms interval (e.g. 10)");
-                eprintln!("  --tick-dump        Full tick-level Kalman diagnostics (requires FP engine)");
+                eprintln!("  --tick-dump        Full tick-level filter diagnostics (requires FP engine)");
                 eprintln!("  --with-fp          Add fair price columns (starts FP engine)");
                 eprintln!("  --display          Live fair price TUI display (starts FP engine)");
                 eprintln!("  --output-dir DIR   Output directory (default: data/capture)");
@@ -275,9 +275,9 @@ async fn main() -> Result<()> {
         } else {
             let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
             let vol_provider = cfg.fair_price.to_vol_provider(&group_names);
-            let fp_interval_ms = args.interval_ms.unwrap_or(100);
+            let drain_interval_ms = cfg.fair_price.drain_interval_ms;
             let fp_config = FairPriceConfig {
-                interval_ms: fp_interval_ms,
+                interval_ms: drain_interval_ms.max(1) as u64,
                 buffer_capacity: 65536,
                 groups,
                 vol_provider,
@@ -303,8 +303,8 @@ async fn main() -> Result<()> {
                 diag,
             ));
 
-            // Always spawn timer task for floor drain rate.
-            {
+            // Spawn timer task for background drain unless disabled (-1).
+            if drain_interval_ms > 0 {
                 let sd = Arc::clone(&shutdown);
                 handles.push(tokio::spawn(run_fair_price_task(Arc::clone(&engine), sd)));
             }
@@ -324,7 +324,7 @@ async fn main() -> Result<()> {
                 let ve = &cfg.fair_price.vol_engine;
                 let ve_str = format!("{} hl={}s", ve.engine_type, ve.halflife_s);
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = crypto_feeds::fp_display::run_display(md, out_display, sd, model_str, ve_str, fp_interval_ms).await {
+                    if let Err(e) = crypto_feeds::fp_display::run_display(md, out_display, sd, model_str, ve_str, drain_interval_ms.max(1) as u64).await {
                         log::error!("display error: {:?}", e);
                     }
                 }));
