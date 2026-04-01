@@ -169,6 +169,8 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
             });
         }
         if members.len() >= 2 {
+            let bps = fp.bias_process_noise_bps_per_sqrt_s;
+            let log_val = bps * 1e-4;
             groups.push(FairPriceGroupConfig {
                 name: base.clone(),
                 members,
@@ -177,6 +179,7 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 bias_ewma_halflife_ms: fp.bias_ewma_halflife_s * 1000.0,
                 spread_ewma_halflife_ms: fp.spread_ewma_halflife_s * 1000.0,
                 sigma_k_floor: fp.sigma_k_floor,
+                h_bias_per_ms: log_val * log_val / 1000.0,
             });
         }
     }

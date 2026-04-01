@@ -140,9 +140,14 @@ pub struct FairPriceParamsConfig {
     /// FP engine background drain interval in milliseconds. Default 100. Set to -1 to disable.
     #[serde(default = "default_fp_drain_interval_ms")]
     pub drain_interval_ms: i64,
+    /// Bias process noise in bps/√s. Controls how fast biases drift in the augmented filter.
+    /// 0.1 ≈ bias can drift ~0.1 bps/√s ≈ 2.4 bps/√min.
+    #[serde(default = "default_bias_process_noise")]
+    pub bias_process_noise_bps_per_sqrt_s: f64,
 }
 
 fn default_fp_drain_interval_ms() -> i64 { 100 }
+fn default_bias_process_noise() -> f64 { 0.1 }
 
 impl Default for FairPriceParamsConfig {
     fn default() -> Self {
@@ -156,6 +161,7 @@ impl Default for FairPriceParamsConfig {
             decay_halflife_s: 0.0,
             vol_engine: VolEngineConfig::default(),
             drain_interval_ms: default_fp_drain_interval_ms(),
+            bias_process_noise_bps_per_sqrt_s: default_bias_process_noise(),
         }
     }
 }

@@ -119,7 +119,13 @@ pub struct FairPriceGroupConfig {
     pub spread_ewma_halflife_ms: f64,
     /// Floor for sigma_k in log-price units. Default 1e-6 (≈ 0.01 bps).
     pub sigma_k_floor: f64,
+    /// Process noise variance rate for bias states (log-price² per ms).
+    /// Controls how fast biases are allowed to drift in the augmented filter.
+    pub h_bias_per_ms: f64,
 }
+
+/// Maximum augmented state dimension (K+1). Stack arrays sized to this.
+const MAX_N: usize = 32;
 
 /// Top-level configuration for the fair price task.
 pub struct FairPriceConfig {
@@ -166,14 +172,29 @@ pub struct MemberTickSnapshot {
     pub ewma_half_spread: f64,
 }
 
-/// Per-group Kalman filter state.
+/// Per-group filter state. Augmented state vector [y, m_0, ..., m_{K-1}].
 struct GroupState {
-    y: f64,
-    p: f64,
+    /// State vector: x[0] = log fair price, x[k+1] = bias for member k.
+    x: Vec<f64>,
+    /// Covariance matrix P, flat row-major, (n × n).
+    cov: Vec<f64>,
+    /// Dimension of state vector (K+1), cached for indexing.
+    n: usize,
     /// Nanosecond timestamp of the last processed tick (for tau computation).
     prev_ts_ns: i64,
     initialized: bool,
     member_states: Vec<MemberState>,
+}
+
+impl GroupState {
+    #[inline]
+    fn p(&self, i: usize, j: usize) -> f64 {
+        self.cov[i * self.n + j]
+    }
+    #[inline]
+    fn p_mut(&mut self, i: usize, j: usize) -> &mut f64 {
+        &mut self.cov[i * self.n + j]
+    }
 }
 
 /// A tick observation collected from a raw ring buffer.
@@ -572,9 +593,11 @@ impl FairPriceEngine {
             .groups
             .iter()
             .map(|g| {
+                let n = g.members.len() + 1;
                 GroupState {
-                    y: 0.0,
-                    p: 0.0,
+                    x: vec![0.0; n],
+                    cov: vec![0.0; n * n],
+                    n,
                     prev_ts_ns: 0,
                     initialized: false,
                     member_states: g
@@ -777,12 +800,24 @@ impl FairPriceEngine {
             match group_cfg.model {
 
             FairPriceModel::AdaptiveFilter => {
+                let sn = state.n;
+                let h_bias = group_cfg.h_bias_per_ms;
+
                 // Initialize from first observation if needed
                 if !state.initialized {
                     if let Some(first) = tick_scratch.first() {
                         let ms = &state.member_states[first.member_idx];
-                        state.y = first.log_mid - ms.bias;
-                        state.p = ms.noise_var;
+                        // y = first observation minus its config bias
+                        state.x[0] = first.log_mid - ms.bias;
+                        // Seed biases from config
+                        for (k, ms) in state.member_states.iter().enumerate() {
+                            state.x[k + 1] = ms.bias;
+                        }
+                        // Initial covariance: diagonal
+                        *state.p_mut(0, 0) = ms.noise_var;
+                        for k in 0..group_cfg.members.len() {
+                            *state.p_mut(k + 1, k + 1) = 1e-6;
+                        }
                         state.prev_ts_ns = first.ts_ns;
                         state.initialized = true;
                     } else {
@@ -791,16 +826,24 @@ impl FairPriceEngine {
                 }
 
                 if n_ticks == 0 {
+                    // Predict only: add process noise to P diagonal
                     let tau_ms = (snap_ts_ns - state.prev_ts_ns) as f64 / 1e6;
-                    state.p += h_per_ms * tau_ms;
+                    *state.p_mut(0, 0) += h_per_ms * tau_ms;
+                    for k in 0..group_cfg.members.len() {
+                        *state.p_mut(k + 1, k + 1) += h_bias * tau_ms;
+                    }
                     state.prev_ts_ns = snap_ts_ns;
                 } else {
                     for obs in &*tick_scratch {
-                        let ms = &mut state.member_states[obs.member_idx];
-
+                        let mi = obs.member_idx;
                         let tau_ms = (obs.ts_ns - state.prev_ts_ns) as f64 / 1e6;
-                        let q = h_per_ms * tau_ms.max(0.0);
-                        state.p += q;
+                        let tau = tau_ms.max(0.0);
+
+                        // ── Predict: process noise on P diagonal ──
+                        *state.p_mut(0, 0) += h_per_ms * tau;
+                        for k in 0..group_cfg.members.len() {
+                            *state.p_mut(k + 1, k + 1) += h_bias * tau;
+                        }
 
                         // Determine noise_var based on sigma mode
                         let noise_var = match group_cfg.sigma_mode {
@@ -808,55 +851,87 @@ impl FairPriceEngine {
                                 obs.log_half_spread.powi(2).max(sigma_floor_sq)
                             }
                             SigmaMode::EwmaSpread => {
-                                ms.ewma_half_spread.powi(2).max(sigma_floor_sq)
+                                state.member_states[mi].ewma_half_spread.powi(2).max(sigma_floor_sq)
                             }
-                            SigmaMode::Static => ms.noise_var,
+                            SigmaMode::Static => state.member_states[mi].noise_var,
                         };
 
-                        // Pre-update residual for bias EWMA
-                        let residual = obs.log_mid - state.y;
+                        // ── Update: augmented Kalman step ──
+                        // H_k = e_0 + e_{k1}, observation z = y + m_k + noise
+                        let k1 = mi + 1;
+                        let p_pre = state.p(0, 0);
+                        let innovation = obs.log_mid - state.x[0] - state.x[k1];
 
-                        let p_pre = state.p;
-                        let innovation = obs.log_mid - ms.bias - state.y;
-                        let s = state.p + noise_var;
-                        let gain = state.p / s;
+                        // S = H·P·H' + R
+                        let s = state.p(0, 0) + state.p(0, k1)
+                              + state.p(k1, 0) + state.p(k1, k1) + noise_var;
 
-                        state.y += gain * innovation;
-                        state.p *= 1.0 - gain;
+                        // Gain: K_i = (P[i,0] + P[i,k1]) / S
+                        let mut gain = [0.0f64; MAX_N];
+                        for i in 0..sn {
+                            gain[i] = (state.cov[i * sn + 0] + state.cov[i * sn + k1]) / s;
+                        }
 
-                        // Bayesian-weighted bias EWMA (weight ramps on same timescale as halflife)
-                        if group_cfg.bias_ewma_halflife_ms > 0.0 {
-                            let d = ewma_decay(tau_ms.max(0.0), group_cfg.bias_ewma_halflife_ms);
-                            let alpha = 1.0 - d;
-                            if alpha > 0.0 {
-                                ms.bias_wt = alpha + d * ms.bias_wt;
-                                ms.bias += alpha / ms.bias_wt * (residual - ms.bias);
+                        // x += K * innovation
+                        for i in 0..sn {
+                            state.x[i] += gain[i] * innovation;
+                        }
+
+                        // Cache P rows 0 and k1 before mutation
+                        let mut row0 = [0.0f64; MAX_N];
+                        let mut rowk = [0.0f64; MAX_N];
+                        for j in 0..sn {
+                            row0[j] = state.cov[0 * sn + j];
+                            rowk[j] = state.cov[k1 * sn + j];
+                        }
+
+                        // P -= K * (row0 + rowk)
+                        for i in 0..sn {
+                            for j in 0..sn {
+                                state.cov[i * sn + j] -= gain[i] * (row0[j] + rowk[j]);
                             }
                         }
 
-                        ms.noise_var = noise_var;
+                        // Symmetrize to prevent numerical drift
+                        for i in 0..sn {
+                            for j in (i + 1)..sn {
+                                let avg = 0.5 * (state.cov[i * sn + j] + state.cov[j * sn + i]);
+                                state.cov[i * sn + j] = avg;
+                                state.cov[j * sn + i] = avg;
+                            }
+                        }
+
+                        state.member_states[mi].noise_var = noise_var;
 
                         if let Some(dw) = diag.as_mut() {
                             dw.write_tick(
-                                snap_ts_ns, obs.ts_ns, group_idx, obs.member_idx,
-                                obs.log_mid, tau_ms, q, p_pre, innovation, s, gain,
-                                state.y, state.p,
+                                snap_ts_ns, obs.ts_ns, group_idx, mi,
+                                obs.log_mid, tau_ms, h_per_ms * tau, p_pre, innovation, s,
+                                gain[0], state.x[0], state.cov[0],
                             );
                         }
 
                         state.prev_ts_ns = obs.ts_ns;
                     }
 
+                    // Sync Kalman bias estimates back to ms.bias
+                    for (k, ms) in state.member_states.iter_mut().enumerate() {
+                        ms.bias = state.x[k + 1];
+                    }
+
                     // Forward-propagate to snapshot boundary
                     let tau_fwd_ms = (snap_ts_ns - state.prev_ts_ns) as f64 / 1e6;
-                    let p_pre_fwd = state.p;
+                    let p_pre_fwd = state.cov[0];
                     if tau_fwd_ms > 0.0 {
-                        state.p += h_per_ms * tau_fwd_ms;
+                        *state.p_mut(0, 0) += h_per_ms * tau_fwd_ms;
+                        for k in 0..group_cfg.members.len() {
+                            *state.p_mut(k + 1, k + 1) += h_bias * tau_fwd_ms;
+                        }
                     }
 
                     if let Some(dw) = diag.as_mut() {
                         dw.write_group(
-                            snap_ts_ns, group_idx, state.y, state.p,
+                            snap_ts_ns, group_idx, state.x[0], state.cov[0],
                             p_pre_fwd, tau_fwd_ms, n_ticks, state.prev_ts_ns,
                         );
                     }
@@ -870,7 +945,7 @@ impl FairPriceEngine {
                 if group_cfg.bias_ewma_halflife_ms > 0.0 && state.initialized {
                     for obs in &*tick_scratch {
                         let ms = &mut state.member_states[obs.member_idx];
-                        let residual = obs.log_mid - state.y;
+                        let residual = obs.log_mid - state.x[0];
                         let tau_ms = if ms.latest_ts_ns > 0 {
                             (obs.ts_ns - ms.latest_ts_ns).max(0) as f64 / 1e6
                         } else {
@@ -926,13 +1001,13 @@ impl FairPriceEngine {
                 }
 
                 if w_sum.abs() > 1e-30 && n_active > 0 {
-                    state.y = y / w_sum;
-                    state.p = p / (w_sum * w_sum);
+                    state.x[0] = y / w_sum;
+                    state.cov[0] = p / (w_sum * w_sum);
 
                     // Add process noise for time since freshest tick
                     let staleness_ms = (snap_ts_ns - freshest_ts_ns) as f64 / 1e6;
                     if staleness_ms > 0.0 {
-                        state.p += h_per_ms * staleness_ms;
+                        state.cov[0] += h_per_ms * staleness_ms;
                     }
 
                     state.prev_ts_ns = snap_ts_ns;
@@ -944,7 +1019,7 @@ impl FairPriceEngine {
 
             // ── 4. Update vol provider + sync to outputs ────────────────
             if state.initialized {
-                config.vol_provider.update(group_idx, state.y.exp(), snap_ts_ns);
+                config.vol_provider.update(group_idx, state.x[0].exp(), snap_ts_ns);
             }
             let h_per_ms = config.vol_provider.h_per_ms(group_idx);
             self.outputs.set_h_per_ms(group_idx, h_per_ms);
@@ -955,14 +1030,15 @@ impl FairPriceEngine {
             }
 
             let vol_ann_pct = config.vol_provider.ann_vol(group_idx) * 100.0;
+            let p_yy = state.cov[0]; // P[0,0] = variance of y
 
             // ── 6. Push output ─────────────────────────────────────────
             self.outputs.push(
                 group_idx,
                 FairPriceOutput {
-                    fair_price: (state.y + state.p / 2.0).exp(),
-                    log_fair_price: state.y,
-                    uncertainty_bps: state.p.sqrt() * BPS,
+                    fair_price: (state.x[0] + p_yy / 2.0).exp(),
+                    log_fair_price: state.x[0],
+                    uncertainty_bps: p_yy.sqrt() * BPS,
                     vol_ann_pct,
                     snap_ts_ns,
                     n_ticks_used: n_ticks as u32,
@@ -1184,6 +1260,7 @@ mod tests {
                 bias_ewma_halflife_ms: 0.0,
                 spread_ewma_halflife_ms: 0.0,
                 sigma_k_floor: 1e-6,
+                h_bias_per_ms: 1e-12,
             }],
         };
 
@@ -1252,6 +1329,7 @@ mod tests {
                     bias_ewma_halflife_ms: 0.0,
                     spread_ewma_halflife_ms: 0.0,
                     sigma_k_floor: 1e-6,
+                    h_bias_per_ms: 1e-12,
                 },
                 FairPriceGroupConfig {
                     name: "ETH".to_string(),
@@ -1261,6 +1339,7 @@ mod tests {
                     bias_ewma_halflife_ms: 0.0,
                     spread_ewma_halflife_ms: 0.0,
                     sigma_k_floor: 1e-6,
+                    h_bias_per_ms: 1e-12,
                 },
             ],
         };
@@ -1286,6 +1365,7 @@ mod tests {
                 bias_ewma_halflife_ms: 0.0,
                 spread_ewma_halflife_ms: 0.0,
                 sigma_k_floor: 1e-6,
+                h_bias_per_ms: 1e-12,
             }],
         };
 

@@ -860,6 +860,7 @@ fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
             bias_ewma_halflife_ms,
             spread_ewma_halflife_ms,
             sigma_k_floor,
+            h_bias_per_ms: 1e-12,
         });
     }
 
