@@ -267,7 +267,7 @@ async fn main() -> Result<()> {
 
     // Set up FP engine if needed
     let has_capture = args.interval_ms.is_some();
-    let (outputs, fp_engine): (Option<Arc<FairPriceOutputs>>, Option<FairPriceEngine>) = if needs_fp {
+    let (outputs, fp_engine): (Option<Arc<FairPriceOutputs>>, Option<Arc<FairPriceEngine>>) = if needs_fp {
         let groups = auto_discover_groups(&cfg);
         if groups.is_empty() {
             eprintln!("Warning: no FP groups discovered, --with-fp will have no effect");
@@ -275,8 +275,9 @@ async fn main() -> Result<()> {
         } else {
             let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
             let vol_provider = cfg.fair_price.to_vol_provider(&group_names);
+            let fp_interval_ms = args.interval_ms.unwrap_or(100);
             let fp_config = FairPriceConfig {
-                interval_ms: 100,
+                interval_ms: fp_interval_ms,
                 buffer_capacity: 65536,
                 groups,
                 vol_provider,
@@ -295,19 +296,23 @@ async fn main() -> Result<()> {
                 None
             };
 
-            let engine = FairPriceEngine::new(
+            let engine = Arc::new(FairPriceEngine::new(
                 Arc::clone(&market_data),
                 Arc::clone(&out),
                 fp_config,
                 diag,
-            );
+            ));
 
-            // Capture loop owns engine when active; otherwise timer task does.
-            let engine_for_capture = if has_capture {
-                Some(engine)
-            } else {
+            // Always spawn timer task for floor drain rate.
+            {
                 let sd = Arc::clone(&shutdown);
-                handles.push(tokio::spawn(run_fair_price_task(engine, sd)));
+                handles.push(tokio::spawn(run_fair_price_task(Arc::clone(&engine), sd)));
+            }
+
+            // Capture also gets a clone to call update() for freshest FP.
+            let engine_for_capture = if has_capture {
+                Some(Arc::clone(&engine))
+            } else {
                 None
             };
 
@@ -319,7 +324,7 @@ async fn main() -> Result<()> {
                 let ve = &cfg.fair_price.vol_engine;
                 let ve_str = format!("{} hl={}s", ve.engine_type, ve.halflife_s);
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = crypto_feeds::fp_display::run_display(md, out_display, sd, model_str, ve_str, 100).await {
+                    if let Err(e) = crypto_feeds::fp_display::run_display(md, out_display, sd, model_str, ve_str, fp_interval_ms).await {
                         log::error!("display error: {:?}", e);
                     }
                 }));
@@ -344,7 +349,7 @@ async fn main() -> Result<()> {
         let output_dir = args.output_dir.clone();
         let with_fp = args.with_fp;
         let outputs_clone = outputs.clone();
-        let mut fp_engine = fp_engine;
+        let fp_engine = fp_engine;
 
         Some(tokio::spawn(async move {
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
@@ -375,14 +380,11 @@ async fn main() -> Result<()> {
                         eprintln!("Snapshot capture: {} rows written to {}", row_count, output_path);
                         let gz = wtr.into_inner().expect("flush");
                         let _ = gz.finish();
-                        if let Some(engine) = fp_engine.take() {
-                            engine.finish();
-                        }
                         return;
                     }
                 }
 
-                if let Some(ref mut engine) = fp_engine {
+                if let Some(ref engine) = fp_engine {
                     engine.update();
                 }
 

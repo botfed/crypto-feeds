@@ -204,9 +204,9 @@ async fn main() -> Result<()> {
 
     // Start fair price task with diagnostics
     {
-        let engine = FairPriceEngine::new(
+        let engine = Arc::new(FairPriceEngine::new(
             Arc::clone(&market_data), Arc::clone(&outputs), fp_config, Some(diag),
-        );
+        ));
         let sd = Arc::clone(&shutdown);
         handles.push(tokio::spawn(run_fair_price_task(engine, sd)));
     }

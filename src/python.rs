@@ -1093,7 +1093,7 @@ impl PyFeedManager {
         let shutdown = Arc::clone(&self.shutdown);
         let tick_data_for_query = Arc::clone(&tick_data);
 
-        let engine = FairPriceEngine::new(tick_data, outputs_clone, fp_config, None);
+        let engine = Arc::new(FairPriceEngine::new(tick_data, outputs_clone, fp_config, None));
         let handle = self
             .runtime
             .spawn(run_fair_price_task(engine, shutdown));

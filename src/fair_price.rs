@@ -4,7 +4,8 @@ use crate::symbol_registry::SymbolId;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::io::{BufWriter, Write as IoWrite};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::time::{self, MissedTickBehavior};
@@ -518,16 +519,28 @@ impl DiagWriter {
 }
 
 /// Fair price engine. Owns all mutable Kalman/GG state and can be updated
-/// on demand by any caller — no timer required.
+/// on demand by any caller via `Arc<FairPriceEngine>`.
+///
+/// Uses an `AtomicBool` try-lock to guarantee single-writer access to mutable
+/// state without a mutex. Two update methods:
+/// - `update()` — spins until exclusive access, guarantees fresh FP on return.
+/// - `try_update()` — non-blocking, returns false if another caller is mid-update.
 pub struct FairPriceEngine {
     tick_data: Arc<AllMarketData>,
     outputs: Arc<FairPriceOutputs>,
-    config: FairPriceConfig,
-    states: Vec<GroupState>,
     reprice_idx: Vec<Vec<Option<usize>>>,
-    tick_scratch: Vec<TickObs>,
-    diag: Option<DiagWriter>,
+    // Mutable state behind UnsafeCell, guarded by `updating`.
+    config: UnsafeCell<FairPriceConfig>,
+    states: UnsafeCell<Vec<GroupState>>,
+    tick_scratch: UnsafeCell<Vec<TickObs>>,
+    diag: UnsafeCell<Option<DiagWriter>>,
+    updating: AtomicBool,
 }
+
+// SAFETY: AtomicBool guard ensures only one thread mutates UnsafeCell fields at a time.
+// All other fields are read-only after construction (Send+Sync).
+unsafe impl Send for FairPriceEngine {}
+unsafe impl Sync for FairPriceEngine {}
 
 impl FairPriceEngine {
     pub fn new(
@@ -587,11 +600,12 @@ impl FairPriceEngine {
         Self {
             tick_data,
             outputs,
-            config,
-            states,
             reprice_idx,
-            tick_scratch: Vec::with_capacity(256),
-            diag,
+            config: UnsafeCell::new(config),
+            states: UnsafeCell::new(states),
+            tick_scratch: UnsafeCell::new(Vec::with_capacity(256)),
+            diag: UnsafeCell::new(diag),
+            updating: AtomicBool::new(false),
         }
     }
 
@@ -600,9 +614,19 @@ impl FairPriceEngine {
         &self.outputs
     }
 
+    /// Get the configured update interval in milliseconds.
+    pub fn interval_ms(&self) -> u64 {
+        // SAFETY: interval_ms is read-only after construction.
+        unsafe { &*self.config.get() }.interval_ms
+    }
+
     /// Get the last tick state for a specific member, as seen by the engine.
     pub fn member_tick_snapshot(&self, group_idx: usize, member_idx: usize) -> Option<MemberTickSnapshot> {
-        let ms = self.states.get(group_idx)?.member_states.get(member_idx)?;
+        // SAFETY: Reading snapshot fields that are only written under the update lock.
+        // A concurrent update may produce a torn read, but all fields are primitive
+        // types so the worst case is a slightly stale value — acceptable for diagnostics.
+        let states = unsafe { &*self.states.get() };
+        let ms = states.get(group_idx)?.member_states.get(member_idx)?;
         if ms.latest_received_ts_ns == 0 && ms.latest_exchange_ts_ns == 0 {
             return None;
         }
@@ -614,14 +638,52 @@ impl FairPriceEngine {
         })
     }
 
-    /// Drain all new ticks from ring buffers, run Kalman/GG, push fresh outputs.
-    pub fn update(&mut self) {
+    #[inline]
+    fn acquire(&self) {
+        while self.updating.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            while self.updating.load(Ordering::Relaxed) {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    #[inline]
+    fn release(&self) {
+        self.updating.store(false, Ordering::Release);
+    }
+
+    /// Blocking update. Spins until exclusive access, guarantees fresh FP on return.
+    /// Use for callers who need the freshest possible quote (capture, quoting).
+    pub fn update(&self) {
+        self.acquire();
+        self.do_update();
+        self.release();
+    }
+
+    /// Non-blocking update. Returns false if another caller is mid-update (skip).
+    /// Use for timer task (best-effort drain).
+    pub fn try_update(&self) -> bool {
+        if self.updating.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            return false;
+        }
+        self.do_update();
+        self.release();
+        true
+    }
+
+    /// Internal update logic. Caller must hold the AtomicBool lock.
+    fn do_update(&self) {
+        // SAFETY: Caller holds the AtomicBool lock, guaranteeing exclusive mutable access.
+        let config = unsafe { &mut *self.config.get() };
+        let states = unsafe { &mut *self.states.get() };
+        let tick_scratch = unsafe { &mut *self.tick_scratch.get() };
+        let diag = unsafe { &mut *self.diag.get() };
         let snap_ts_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
-        for (group_idx, group_cfg) in self.config.groups.iter().enumerate() {
-            let state = &mut self.states[group_idx];
-            let h_per_ms = self.config.vol_provider.h_per_ms(group_idx);
-            self.tick_scratch.clear();
+        for (group_idx, group_cfg) in config.groups.iter().enumerate() {
+            let state = &mut states[group_idx];
+            let h_per_ms = config.vol_provider.h_per_ms(group_idx);
+            tick_scratch.clear();
 
             // ── 1. Collect new ticks from all members ──────────────────
             for (mem_idx, member) in group_cfg.members.iter().enumerate() {
@@ -666,7 +728,7 @@ impl FairPriceEngine {
                                 ms.latest_raw_mid = mid;
                                 ms.latest_exchange_ts_ns = md.exchange_ts.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0);
                                 ms.latest_received_ts_ns = md.received_ts.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0);
-                                self.tick_scratch.push(TickObs {
+                                tick_scratch.push(TickObs {
                                     member_idx: mem_idx,
                                     ts_ns: ts,
                                     log_mid: log_mid_adj,
@@ -680,9 +742,9 @@ impl FairPriceEngine {
             }
 
             // ── 2. Sort ticks by timestamp ─────────────────────────────
-            self.tick_scratch.sort_unstable_by_key(|t| t.ts_ns);
+            tick_scratch.sort_unstable_by_key(|t| t.ts_ns);
 
-            let n_ticks = self.tick_scratch.len();
+            let n_ticks = tick_scratch.len();
 
             let sigma_floor_sq = group_cfg.sigma_k_floor * group_cfg.sigma_k_floor;
             let ln2 = std::f64::consts::LN_2;
@@ -696,7 +758,7 @@ impl FairPriceEngine {
 
             // Update latest_log_mid / latest_ts_ns and spread EWMA for all ticks
             // (shared between Kalman and GG)
-            for obs in &self.tick_scratch {
+            for obs in &*tick_scratch {
                 let ms = &mut state.member_states[obs.member_idx];
                 ms.latest_log_mid = obs.log_mid;
                 ms.latest_ts_ns = obs.ts_ns;
@@ -717,7 +779,7 @@ impl FairPriceEngine {
             FairPriceModel::Kalman => {
                 // Initialize from first observation if needed
                 if !state.initialized {
-                    if let Some(first) = self.tick_scratch.first() {
+                    if let Some(first) = tick_scratch.first() {
                         let ms = &state.member_states[first.member_idx];
                         state.y = first.log_mid - ms.bias;
                         state.p = ms.noise_var;
@@ -733,7 +795,7 @@ impl FairPriceEngine {
                     state.p += h_per_ms * tau_ms;
                     state.prev_ts_ns = snap_ts_ns;
                 } else {
-                    for obs in &self.tick_scratch {
+                    for obs in &*tick_scratch {
                         let ms = &mut state.member_states[obs.member_idx];
 
                         let tau_ms = (obs.ts_ns - state.prev_ts_ns) as f64 / 1e6;
@@ -774,7 +836,7 @@ impl FairPriceEngine {
 
                         ms.noise_var = noise_var;
 
-                        if let Some(ref mut dw) = self.diag {
+                        if let Some(dw) = diag.as_mut() {
                             dw.write_tick(
                                 snap_ts_ns, obs.ts_ns, group_idx, obs.member_idx,
                                 obs.log_mid, tau_ms, q, p_pre, innovation, s, gain,
@@ -792,7 +854,7 @@ impl FairPriceEngine {
                         state.p += h_per_ms * tau_fwd_ms;
                     }
 
-                    if let Some(ref mut dw) = self.diag {
+                    if let Some(dw) = diag.as_mut() {
                         dw.write_group(
                             snap_ts_ns, group_idx, state.y, state.p,
                             p_pre_fwd, tau_fwd_ms, n_ticks, state.prev_ts_ns,
@@ -806,7 +868,7 @@ impl FairPriceEngine {
             FairPriceModel::GonzaloGranger { max_latency_ms, decay_halflife_ms } => {
                 // Update bias EWMA for all observed ticks
                 if group_cfg.bias_ewma_halflife_ms > 0.0 && state.initialized {
-                    for obs in &self.tick_scratch {
+                    for obs in &*tick_scratch {
                         let ms = &mut state.member_states[obs.member_idx];
                         let residual = obs.log_mid - state.y;
                         let tau_ms = if ms.latest_ts_ns > 0 {
@@ -882,9 +944,9 @@ impl FairPriceEngine {
 
             // ── 4. Update vol provider + sync to outputs ────────────────
             if state.initialized {
-                self.config.vol_provider.update(group_idx, state.y.exp(), snap_ts_ns);
+                config.vol_provider.update(group_idx, state.y.exp(), snap_ts_ns);
             }
-            let h_per_ms = self.config.vol_provider.h_per_ms(group_idx);
+            let h_per_ms = config.vol_provider.h_per_ms(group_idx);
             self.outputs.set_h_per_ms(group_idx, h_per_ms);
 
             for (k, ms) in state.member_states.iter().enumerate() {
@@ -892,7 +954,7 @@ impl FairPriceEngine {
                 self.outputs.set_noise_var(group_idx, k, ms.noise_var);
             }
 
-            let vol_ann_pct = self.config.vol_provider.ann_vol(group_idx) * 100.0;
+            let vol_ann_pct = config.vol_provider.ann_vol(group_idx) * 100.0;
 
             // ── 6. Push output ─────────────────────────────────────────
             self.outputs.push(
@@ -908,27 +970,30 @@ impl FairPriceEngine {
                 },
             );
 
-            if let Some(ref mut dw) = self.diag {
+            if let Some(dw) = diag.as_mut() {
                 dw.maybe_flush();
             }
         }
     }
 
-    /// Consume engine, finalize diagnostic files.
-    pub fn finish(self) {
-        if let Some(dw) = self.diag {
+    /// Finalize diagnostic files.
+    pub fn finish(&self) {
+        // SAFETY: Called during shutdown, no concurrent access.
+        let diag = unsafe { &mut *self.diag.get() };
+        if let Some(dw) = diag.take() {
             dw.finish();
         }
     }
 }
 
-/// Timer-driven fair price loop. Calls `engine.update()` on an interval.
-/// Use this when no external caller is driving updates (e.g. display-only mode).
+/// Timer-driven fair price loop. Calls `engine.try_update()` on an interval.
+/// Guarantees a floor drain rate. Other callers (capture, quoting) can also
+/// call `engine.update()` for fresher results — try_update skips if busy.
 pub async fn run_fair_price_task(
-    mut engine: FairPriceEngine,
+    engine: Arc<FairPriceEngine>,
     shutdown: Arc<Notify>,
 ) {
-    let mut interval = time::interval(std::time::Duration::from_millis(engine.config.interval_ms));
+    let mut interval = time::interval(std::time::Duration::from_millis(engine.interval_ms()));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let shutdown_fut = shutdown.notified();
@@ -943,7 +1008,7 @@ pub async fn run_fair_price_task(
                 return;
             }
         }
-        engine.update();
+        engine.try_update();
     }
 }
 
@@ -1151,9 +1216,9 @@ mod tests {
             },
         );
 
-        let engine = FairPriceEngine::new(
+        let engine = Arc::new(FairPriceEngine::new(
             Arc::clone(&tick_data), Arc::clone(&outputs), config, None,
-        );
+        ));
         let shutdown_clone = Arc::clone(&shutdown);
         let handle = tokio::spawn(run_fair_price_task(engine, shutdown_clone));
 
