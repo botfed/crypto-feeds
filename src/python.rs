@@ -2,8 +2,8 @@ use crate::analytics::{Analytics, QuoteSide, RangeStat, SnapshotField};
 use crate::app_config::{AppConfig, load_config, load_perp, load_spot};
 use crate::bar_manager::{BarManager, BarSymbol};
 use crate::fair_price::{
-    FairPriceConfig, FairPriceGroupConfig, FairPriceModel, FairPriceOutput, FairPriceOutputs,
-    GroupMember, SigmaMode, run_fair_price_task,
+    FairPriceConfig, FairPriceEngine, FairPriceGroupConfig, FairPriceModel, FairPriceOutput,
+    FairPriceOutputs, GroupMember, SigmaMode, run_fair_price_task,
 };
 use crate::vol_provider::VolProvider;
 use crate::historical_bars::{aggregate_bars, load_1m_bars_with_backfill};
@@ -1093,9 +1093,10 @@ impl PyFeedManager {
         let shutdown = Arc::clone(&self.shutdown);
         let tick_data_for_query = Arc::clone(&tick_data);
 
+        let engine = FairPriceEngine::new(tick_data, outputs_clone, fp_config, None);
         let handle = self
             .runtime
-            .spawn(run_fair_price_task(tick_data, outputs_clone, fp_config, shutdown, None));
+            .spawn(run_fair_price_task(engine, shutdown));
 
         self.fair_price_handle = Some(handle);
         self.fair_price = Some(Py::new(

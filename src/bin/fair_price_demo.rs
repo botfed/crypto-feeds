@@ -9,7 +9,7 @@ use tokio::sync::Notify;
 use crypto_feeds::app_config::{AppConfig, load_config, load_onchain, load_perp, load_spot};
 use crypto_feeds::display::init_display_logger;
 use crypto_feeds::fair_price::{
-    FairPriceConfig, FairPriceGroupConfig, FairPriceOutputs, GroupMember,
+    FairPriceConfig, FairPriceEngine, FairPriceGroupConfig, FairPriceOutputs, GroupMember,
     run_fair_price_task,
 };
 use crypto_feeds::fp_display::run_display;
@@ -184,10 +184,11 @@ async fn main() -> Result<()> {
 
     // Start fair price task
     {
-        let tick = Arc::clone(&market_data);
-        let out = Arc::clone(&outputs);
+        let engine = FairPriceEngine::new(
+            Arc::clone(&market_data), Arc::clone(&outputs), fp_config, None,
+        );
         let sd = Arc::clone(&shutdown);
-        handles.push(tokio::spawn(run_fair_price_task(tick, out, fp_config, sd, None)));
+        handles.push(tokio::spawn(run_fair_price_task(engine, sd)));
     }
 
     // Start display

@@ -11,8 +11,8 @@ use tokio::time::{self, MissedTickBehavior};
 
 use crypto_feeds::app_config::{load_config, load_onchain, load_perp, load_spot, AppConfig};
 use crypto_feeds::fair_price::{
-    DiagWriter, FairPriceConfig, FairPriceGroupConfig, FairPriceOutputs, GroupMember,
-    run_fair_price_task,
+    DiagWriter, FairPriceConfig, FairPriceEngine, FairPriceGroupConfig, FairPriceOutputs,
+    GroupMember, run_fair_price_task,
 };
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType, MarketDataCollection};
 use crypto_feeds::symbol_registry::{REGISTRY, SymbolId};
@@ -266,11 +266,12 @@ async fn main() -> Result<()> {
     eprintln!("Discovered {} sample targets", targets.len());
 
     // Set up FP engine if needed
-    let outputs: Option<Arc<FairPriceOutputs>> = if needs_fp {
+    let has_capture = args.interval_ms.is_some();
+    let (outputs, fp_engine): (Option<Arc<FairPriceOutputs>>, Option<FairPriceEngine>) = if needs_fp {
         let groups = auto_discover_groups(&cfg);
         if groups.is_empty() {
             eprintln!("Warning: no FP groups discovered, --with-fp will have no effect");
-            None
+            (None, None)
         } else {
             let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
             let vol_provider = cfg.fair_price.to_vol_provider(&group_names);
@@ -294,10 +295,21 @@ async fn main() -> Result<()> {
                 None
             };
 
-            let tick = Arc::clone(&market_data);
-            let out_clone = Arc::clone(&out);
-            let sd = Arc::clone(&shutdown);
-            handles.push(tokio::spawn(run_fair_price_task(tick, out_clone, fp_config, sd, diag)));
+            let engine = FairPriceEngine::new(
+                Arc::clone(&market_data),
+                Arc::clone(&out),
+                fp_config,
+                diag,
+            );
+
+            // Capture loop owns engine when active; otherwise timer task does.
+            let engine_for_capture = if has_capture {
+                Some(engine)
+            } else {
+                let sd = Arc::clone(&shutdown);
+                handles.push(tokio::spawn(run_fair_price_task(engine, sd)));
+                None
+            };
 
             if args.display {
                 let md = Arc::clone(&market_data);
@@ -313,10 +325,10 @@ async fn main() -> Result<()> {
                 }));
             }
 
-            Some(out)
+            (Some(out), engine_for_capture)
         }
     } else {
-        None
+        (None, None)
     };
 
     // Warmup
@@ -332,6 +344,7 @@ async fn main() -> Result<()> {
         let output_dir = args.output_dir.clone();
         let with_fp = args.with_fp;
         let outputs_clone = outputs.clone();
+        let mut fp_engine = fp_engine;
 
         Some(tokio::spawn(async move {
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
@@ -342,7 +355,7 @@ async fn main() -> Result<()> {
 
             // Header
             if with_fp {
-                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,exchange_ts_raw,received_ts,group,fair_price,y,p,vol_ann_pct,bias,sigma_k").unwrap();
+                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,exchange_ts_raw,received_ts,fp_group,fp,fp_y,fp_p,fp_vol_ann_pct,fp_bias,fp_sigma_k,fp_snap_ts_ns,fp_mid,fp_tick_exchange_ts,fp_tick_received_ts,fp_half_spread").unwrap();
             } else {
                 writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,exchange_ts_raw,received_ts").unwrap();
             }
@@ -362,8 +375,15 @@ async fn main() -> Result<()> {
                         eprintln!("Snapshot capture: {} rows written to {}", row_count, output_path);
                         let gz = wtr.into_inner().expect("flush");
                         let _ = gz.finish();
+                        if let Some(engine) = fp_engine.take() {
+                            engine.finish();
+                        }
                         return;
                     }
+                }
+
+                if let Some(ref mut engine) = fp_engine {
+                    engine.update();
                 }
 
                 let sample_ts = Utc::now().timestamp_nanos_opt().unwrap_or(0);
@@ -383,39 +403,58 @@ async fn main() -> Result<()> {
                     let received_ts = format_ts(md.received_ts);
 
                     if with_fp {
-                        // Find FP + per-member params for this symbol's group
-                        let (group, fp, y, p, vol, bias, sigma_k) = if let Some(ref out) = outputs_clone {
+                        // Find FP group + per-member params + tick snapshot
+                        let empty = String::new;
+                        let (group, fp, y, p, vol, bias, sigma_k, fp_snap_ts,
+                             fp_mid, fp_tick_exch_ts, fp_tick_recv_ts, fp_hs) =
+                        if let Some(ref out) = outputs_clone {
                             let base = t.canonical.split('-').nth(1).unwrap_or("");
                             if let Some(gi) = out.find_group(base) {
                                 let fp_cols = if let Some(fp_out) = out.latest(gi) {
                                     (fp_out.fair_price.to_string(),
                                      fp_out.log_fair_price.to_string(),
                                      format!("{:.16e}", (fp_out.uncertainty_bps / 1e4).powi(2)),
-                                     format!("{:.4}", fp_out.vol_ann_pct))
+                                     format!("{:.4}", fp_out.vol_ann_pct),
+                                     fp_out.snap_ts_ns.to_string())
                                 } else {
-                                    (String::new(), String::new(), String::new(), String::new())
+                                    (empty(), empty(), empty(), empty(), empty())
                                 };
-                                // Per-member bias and sigma_k
                                 let ex = Exchange::from_str(t.exchange_name);
-                                let (bias_s, sk_s) = if let Some(ex) = ex {
-                                    if let Some(mi) = out.find_member(gi, &ex, t.symbol_id) {
-                                        if let Some((b, nv)) = out.get_member_params(gi, mi) {
-                                            (format!("{:.10e}", b), format!("{:.10e}", nv.sqrt()))
-                                        } else { (String::new(), String::new()) }
-                                    } else { (String::new(), String::new()) }
-                                } else { (String::new(), String::new()) };
-                                (base.to_string(), fp_cols.0, fp_cols.1, fp_cols.2, fp_cols.3, bias_s, sk_s)
+                                let mi = ex.and_then(|e| out.find_member(gi, &e, t.symbol_id));
+                                // Per-member bias and sigma_k
+                                let (bias_s, sk_s) = mi
+                                    .and_then(|mi| out.get_member_params(gi, mi))
+                                    .map(|(b, nv)| (format!("{:.10e}", b), format!("{:.10e}", nv.sqrt())))
+                                    .unwrap_or_else(|| (empty(), empty()));
+                                // Per-member tick snapshot from engine
+                                let tick_snap = mi.and_then(|mi| {
+                                    fp_engine.as_ref()?.member_tick_snapshot(gi, mi)
+                                });
+                                let (fm, ft_e, ft_r, fhs) = match tick_snap {
+                                    Some(s) => (
+                                        s.raw_mid.to_string(),
+                                        s.exchange_ts_ns.to_string(),
+                                        s.received_ts_ns.to_string(),
+                                        format!("{:.16e}", s.ewma_half_spread),
+                                    ),
+                                    None => (empty(), empty(), empty(), empty()),
+                                };
+                                (base.to_string(), fp_cols.0, fp_cols.1, fp_cols.2, fp_cols.3,
+                                 bias_s, sk_s, fp_cols.4, fm, ft_e, ft_r, fhs)
                             } else {
-                                (String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new())
+                                (empty(), empty(), empty(), empty(), empty(), empty(),
+                                 empty(), empty(), empty(), empty(), empty(), empty())
                             }
                         } else {
-                            (String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new())
+                            (empty(), empty(), empty(), empty(), empty(), empty(),
+                             empty(), empty(), empty(), empty(), empty(), empty())
                         };
 
-                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                             sample_ts, t.canonical, t.exchange_name,
                             bid, ask, bid_qty, ask_qty, exchange_ts, exchange_ts_raw, received_ts,
-                            group, fp, y, p, vol, bias, sigma_k);
+                            group, fp, y, p, vol, bias, sigma_k, fp_snap_ts,
+                            fp_mid, fp_tick_exch_ts, fp_tick_recv_ts, fp_hs);
                     } else {
                         let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{},{}",
                             sample_ts, t.canonical, t.exchange_name,

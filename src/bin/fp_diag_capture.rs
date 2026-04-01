@@ -7,8 +7,8 @@ use tokio::sync::Notify;
 
 use crypto_feeds::app_config::{AppConfig, load_config, load_onchain, load_perp, load_spot};
 use crypto_feeds::fair_price::{
-    DiagWriter, FairPriceConfig, FairPriceGroupConfig, FairPriceModel, FairPriceOutputs, GroupMember,
-    SigmaMode, run_fair_price_task,
+    DiagWriter, FairPriceConfig, FairPriceEngine, FairPriceGroupConfig, FairPriceModel,
+    FairPriceOutputs, GroupMember, SigmaMode, run_fair_price_task,
 };
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType};
 use crypto_feeds::symbol_registry::REGISTRY;
@@ -204,12 +204,11 @@ async fn main() -> Result<()> {
 
     // Start fair price task with diagnostics
     {
-        let tick = Arc::clone(&market_data);
-        let out = Arc::clone(&outputs);
+        let engine = FairPriceEngine::new(
+            Arc::clone(&market_data), Arc::clone(&outputs), fp_config, Some(diag),
+        );
         let sd = Arc::clone(&shutdown);
-        handles.push(tokio::spawn(
-            run_fair_price_task(tick, out, fp_config, sd, Some(diag)),
-        ));
+        handles.push(tokio::spawn(run_fair_price_task(engine, sd)));
     }
 
     // Progress reporting

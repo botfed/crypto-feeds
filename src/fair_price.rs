@@ -144,6 +144,25 @@ struct MemberState {
     latest_log_mid: f64,
     /// Timestamp of most recent tick in nanoseconds (for GG staleness).
     latest_ts_ns: i64,
+    /// Raw (bid+ask)/2 from the last tick consumed (no log, no reprice).
+    latest_raw_mid: f64,
+    /// exchange_ts of the last tick consumed (0 if absent).
+    latest_exchange_ts_ns: i64,
+    /// received_ts of the last tick consumed (0 if absent).
+    latest_received_ts_ns: i64,
+}
+
+/// Snapshot of a member's last tick state, as seen by the FP engine.
+#[derive(Debug, Clone, Copy)]
+pub struct MemberTickSnapshot {
+    /// Raw (bid+ask)/2 from the exchange tick, no log, no reprice.
+    pub raw_mid: f64,
+    /// exchange_ts of the last tick consumed (0 if absent).
+    pub exchange_ts_ns: i64,
+    /// received_ts of the last tick consumed (0 if absent).
+    pub received_ts_ns: i64,
+    /// EWMA half-spread in log-price space.
+    pub ewma_half_spread: f64,
 }
 
 /// Per-group Kalman filter state.
@@ -498,103 +517,123 @@ impl DiagWriter {
     }
 }
 
-/// Main fair price loop. Reads raw ticks from `AllMarketData` ring buffers,
-/// runs a static Kalman filter with tau-based process noise, and pushes
-/// `FairPriceOutput` into per-group ring buffers.
-///
-/// All parameters (h_per_ms, bias, noise_var) are fixed from config.
-/// Process noise is proportional to elapsed time between ticks.
-pub async fn run_fair_price_task(
+/// Fair price engine. Owns all mutable Kalman/GG state and can be updated
+/// on demand by any caller — no timer required.
+pub struct FairPriceEngine {
     tick_data: Arc<AllMarketData>,
     outputs: Arc<FairPriceOutputs>,
-    mut config: FairPriceConfig,
-    shutdown: Arc<Notify>,
-    mut diag: Option<DiagWriter>,
-) {
-    // Pre-resolve reprice_group names → group indices per member
-    let reprice_idx: Vec<Vec<Option<usize>>> = config
-        .groups
-        .iter()
-        .map(|g| {
-            g.members
-                .iter()
-                .map(|m| {
-                    m.reprice_group.as_ref().and_then(|name| {
-                        let idx = config.groups.iter().position(|g2| g2.name == *name);
-                        if idx.is_none() {
-                            log::warn!("reprice_group '{}' not found, ignoring", name);
-                        }
-                        idx
-                    })
-                })
-                .collect()
-        })
-        .collect();
+    config: FairPriceConfig,
+    states: Vec<GroupState>,
+    reprice_idx: Vec<Vec<Option<usize>>>,
+    tick_scratch: Vec<TickObs>,
+    diag: Option<DiagWriter>,
+}
 
-    let mut states: Vec<GroupState> = config
-        .groups
-        .iter()
-        .map(|g| {
-            GroupState {
-                y: 0.0,
-                p: 0.0,
-                prev_ts_ns: 0,
-                initialized: false,
-                member_states: g
-                    .members
+impl FairPriceEngine {
+    pub fn new(
+        tick_data: Arc<AllMarketData>,
+        outputs: Arc<FairPriceOutputs>,
+        config: FairPriceConfig,
+        diag: Option<DiagWriter>,
+    ) -> Self {
+        let reprice_idx: Vec<Vec<Option<usize>>> = config
+            .groups
+            .iter()
+            .map(|g| {
+                g.members
                     .iter()
-                    .map(|m| MemberState {
-                        prev_tick_pos: 0,
-                        bias: m.bias,
-                        bias_wt: if m.bias != 0.0 { 1.0 } else { 0.0 },
-                        noise_var: m.noise_var,
-                        ewma_half_spread: m.noise_var.sqrt(),
-                        latest_log_mid: f64::NAN,
-                        latest_ts_ns: 0,
+                    .map(|m| {
+                        m.reprice_group.as_ref().and_then(|name| {
+                            let idx = config.groups.iter().position(|g2| g2.name == *name);
+                            if idx.is_none() {
+                                log::warn!("reprice_group '{}' not found, ignoring", name);
+                            }
+                            idx
+                        })
                     })
-                    .collect(),
-            }
-        })
-        .collect();
+                    .collect()
+            })
+            .collect();
 
-    let mut interval = time::interval(std::time::Duration::from_millis(config.interval_ms));
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    let shutdown_fut = shutdown.notified();
-    tokio::pin!(shutdown_fut);
-
-    let mut tick_scratch: Vec<TickObs> = Vec::with_capacity(256);
-
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {}
-            _ = &mut shutdown_fut => {
-                log::info!("Fair price task shutting down");
-                if let Some(dw) = diag {
-                    dw.finish();
+        let states: Vec<GroupState> = config
+            .groups
+            .iter()
+            .map(|g| {
+                GroupState {
+                    y: 0.0,
+                    p: 0.0,
+                    prev_ts_ns: 0,
+                    initialized: false,
+                    member_states: g
+                        .members
+                        .iter()
+                        .map(|m| MemberState {
+                            prev_tick_pos: 0,
+                            bias: m.bias,
+                            bias_wt: if m.bias != 0.0 { 1.0 } else { 0.0 },
+                            noise_var: m.noise_var,
+                            ewma_half_spread: m.noise_var.sqrt(),
+                            latest_log_mid: f64::NAN,
+                            latest_ts_ns: 0,
+                            latest_raw_mid: f64::NAN,
+                            latest_exchange_ts_ns: 0,
+                            latest_received_ts_ns: 0,
+                        })
+                        .collect(),
                 }
-                return;
-            }
-        }
+            })
+            .collect();
 
+        Self {
+            tick_data,
+            outputs,
+            config,
+            states,
+            reprice_idx,
+            tick_scratch: Vec::with_capacity(256),
+            diag,
+        }
+    }
+
+    /// Borrow the shared outputs (for readers).
+    pub fn outputs(&self) -> &Arc<FairPriceOutputs> {
+        &self.outputs
+    }
+
+    /// Get the last tick state for a specific member, as seen by the engine.
+    pub fn member_tick_snapshot(&self, group_idx: usize, member_idx: usize) -> Option<MemberTickSnapshot> {
+        let ms = self.states.get(group_idx)?.member_states.get(member_idx)?;
+        if ms.latest_received_ts_ns == 0 && ms.latest_exchange_ts_ns == 0 {
+            return None;
+        }
+        Some(MemberTickSnapshot {
+            raw_mid: ms.latest_raw_mid,
+            exchange_ts_ns: ms.latest_exchange_ts_ns,
+            received_ts_ns: ms.latest_received_ts_ns,
+            ewma_half_spread: ms.ewma_half_spread,
+        })
+    }
+
+    /// Drain all new ticks from ring buffers, run Kalman/GG, push fresh outputs.
+    pub fn update(&mut self) {
         let snap_ts_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
-        for (group_idx, group_cfg) in config.groups.iter().enumerate() {
-            let state = &mut states[group_idx];
-            let h_per_ms = config.vol_provider.h_per_ms(group_idx);
-            tick_scratch.clear();
+        for (group_idx, group_cfg) in self.config.groups.iter().enumerate() {
+            let state = &mut self.states[group_idx];
+            let h_per_ms = self.config.vol_provider.h_per_ms(group_idx);
+            self.tick_scratch.clear();
 
             // ── 1. Collect new ticks from all members ──────────────────
             for (mem_idx, member) in group_cfg.members.iter().enumerate() {
-                let reprice_log_fp = match reprice_idx[group_idx][mem_idx] {
-                    Some(rg_idx) => match outputs.latest(rg_idx) {
+                let reprice_log_fp = match self.reprice_idx[group_idx][mem_idx] {
+                    Some(rg_idx) => match self.outputs.latest(rg_idx) {
                         Some(fp) if fp.log_fair_price.is_finite() => fp.log_fair_price,
                         _ => continue,
                     },
                     None => 0.0,
                 };
 
-                let coll = tick_data.get_collection(&member.exchange);
+                let coll = self.tick_data.get_collection(&member.exchange);
                 let tick_buf = match coll.get_buffer(&member.symbol_id) {
                     Some(b) => b,
                     None => continue,
@@ -623,7 +662,11 @@ pub async fn run_fair_price_task(
                                     mid.ln() + reprice_log_fp
                                 };
                                 let log_half_spread = (ask.ln() - bid.ln()) / 2.0;
-                                tick_scratch.push(TickObs {
+                                let ms = &mut state.member_states[mem_idx];
+                                ms.latest_raw_mid = mid;
+                                ms.latest_exchange_ts_ns = md.exchange_ts.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0);
+                                ms.latest_received_ts_ns = md.received_ts.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0);
+                                self.tick_scratch.push(TickObs {
                                     member_idx: mem_idx,
                                     ts_ns: ts,
                                     log_mid: log_mid_adj,
@@ -637,9 +680,9 @@ pub async fn run_fair_price_task(
             }
 
             // ── 2. Sort ticks by timestamp ─────────────────────────────
-            tick_scratch.sort_unstable_by_key(|t| t.ts_ns);
+            self.tick_scratch.sort_unstable_by_key(|t| t.ts_ns);
 
-            let n_ticks = tick_scratch.len();
+            let n_ticks = self.tick_scratch.len();
 
             let sigma_floor_sq = group_cfg.sigma_k_floor * group_cfg.sigma_k_floor;
             let ln2 = std::f64::consts::LN_2;
@@ -653,7 +696,7 @@ pub async fn run_fair_price_task(
 
             // Update latest_log_mid / latest_ts_ns and spread EWMA for all ticks
             // (shared between Kalman and GG)
-            for obs in &tick_scratch {
+            for obs in &self.tick_scratch {
                 let ms = &mut state.member_states[obs.member_idx];
                 ms.latest_log_mid = obs.log_mid;
                 ms.latest_ts_ns = obs.ts_ns;
@@ -674,7 +717,7 @@ pub async fn run_fair_price_task(
             FairPriceModel::Kalman => {
                 // Initialize from first observation if needed
                 if !state.initialized {
-                    if let Some(first) = tick_scratch.first() {
+                    if let Some(first) = self.tick_scratch.first() {
                         let ms = &state.member_states[first.member_idx];
                         state.y = first.log_mid - ms.bias;
                         state.p = ms.noise_var;
@@ -690,7 +733,7 @@ pub async fn run_fair_price_task(
                     state.p += h_per_ms * tau_ms;
                     state.prev_ts_ns = snap_ts_ns;
                 } else {
-                    for obs in &tick_scratch {
+                    for obs in &self.tick_scratch {
                         let ms = &mut state.member_states[obs.member_idx];
 
                         let tau_ms = (obs.ts_ns - state.prev_ts_ns) as f64 / 1e6;
@@ -731,7 +774,7 @@ pub async fn run_fair_price_task(
 
                         ms.noise_var = noise_var;
 
-                        if let Some(ref mut dw) = diag {
+                        if let Some(ref mut dw) = self.diag {
                             dw.write_tick(
                                 snap_ts_ns, obs.ts_ns, group_idx, obs.member_idx,
                                 obs.log_mid, tau_ms, q, p_pre, innovation, s, gain,
@@ -749,7 +792,7 @@ pub async fn run_fair_price_task(
                         state.p += h_per_ms * tau_fwd_ms;
                     }
 
-                    if let Some(ref mut dw) = diag {
+                    if let Some(ref mut dw) = self.diag {
                         dw.write_group(
                             snap_ts_ns, group_idx, state.y, state.p,
                             p_pre_fwd, tau_fwd_ms, n_ticks, state.prev_ts_ns,
@@ -763,7 +806,7 @@ pub async fn run_fair_price_task(
             FairPriceModel::GonzaloGranger { max_latency_ms, decay_halflife_ms } => {
                 // Update bias EWMA for all observed ticks
                 if group_cfg.bias_ewma_halflife_ms > 0.0 && state.initialized {
-                    for obs in &tick_scratch {
+                    for obs in &self.tick_scratch {
                         let ms = &mut state.member_states[obs.member_idx];
                         let residual = obs.log_mid - state.y;
                         let tau_ms = if ms.latest_ts_ns > 0 {
@@ -839,20 +882,20 @@ pub async fn run_fair_price_task(
 
             // ── 4. Update vol provider + sync to outputs ────────────────
             if state.initialized {
-                config.vol_provider.update(group_idx, state.y.exp(), snap_ts_ns);
+                self.config.vol_provider.update(group_idx, state.y.exp(), snap_ts_ns);
             }
-            let h_per_ms = config.vol_provider.h_per_ms(group_idx);
-            outputs.set_h_per_ms(group_idx, h_per_ms);
+            let h_per_ms = self.config.vol_provider.h_per_ms(group_idx);
+            self.outputs.set_h_per_ms(group_idx, h_per_ms);
 
             for (k, ms) in state.member_states.iter().enumerate() {
-                outputs.set_bias(group_idx, k, ms.bias);
-                outputs.set_noise_var(group_idx, k, ms.noise_var);
+                self.outputs.set_bias(group_idx, k, ms.bias);
+                self.outputs.set_noise_var(group_idx, k, ms.noise_var);
             }
 
-            let vol_ann_pct = config.vol_provider.ann_vol(group_idx) * 100.0;
+            let vol_ann_pct = self.config.vol_provider.ann_vol(group_idx) * 100.0;
 
             // ── 6. Push output ─────────────────────────────────────────
-            outputs.push(
+            self.outputs.push(
                 group_idx,
                 FairPriceOutput {
                     fair_price: (state.y + state.p / 2.0).exp(),
@@ -865,10 +908,42 @@ pub async fn run_fair_price_task(
                 },
             );
 
-            if let Some(ref mut dw) = diag {
+            if let Some(ref mut dw) = self.diag {
                 dw.maybe_flush();
             }
         }
+    }
+
+    /// Consume engine, finalize diagnostic files.
+    pub fn finish(self) {
+        if let Some(dw) = self.diag {
+            dw.finish();
+        }
+    }
+}
+
+/// Timer-driven fair price loop. Calls `engine.update()` on an interval.
+/// Use this when no external caller is driving updates (e.g. display-only mode).
+pub async fn run_fair_price_task(
+    mut engine: FairPriceEngine,
+    shutdown: Arc<Notify>,
+) {
+    let mut interval = time::interval(std::time::Duration::from_millis(engine.config.interval_ms));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    let shutdown_fut = shutdown.notified();
+    tokio::pin!(shutdown_fut);
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = &mut shutdown_fut => {
+                log::info!("Fair price task shutting down");
+                engine.finish();
+                return;
+            }
+        }
+        engine.update();
     }
 }
 
@@ -1076,15 +1151,11 @@ mod tests {
             },
         );
 
-        let outputs_clone = Arc::clone(&outputs);
+        let engine = FairPriceEngine::new(
+            Arc::clone(&tick_data), Arc::clone(&outputs), config, None,
+        );
         let shutdown_clone = Arc::clone(&shutdown);
-        let handle = tokio::spawn(run_fair_price_task(
-            Arc::clone(&tick_data),
-            outputs_clone,
-            config,
-            shutdown_clone,
-            None,
-        ));
+        let handle = tokio::spawn(run_fair_price_task(engine, shutdown_clone));
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         shutdown.notify_waiters();
