@@ -52,26 +52,11 @@ fair_price:
   sigma_mode: "instant_spread"
   spread_ewma_halflife_s: 3.0
   sigma_k_floor: 1e-6
-  bias_process_noise_bps_per_sqrt_s: 1.0  # bias drift ~0.1 bps/√s ≈ 2.4 bps/√min
+  bias_process_noise_bps_per_sqrt_s: 0.1  # bias drift ~0.1 bps/√s ≈ 2.4 bps/√min
   vol_engine:
     type: "gk_ewma"
-    default_init_ann_vol: 1.0
-    halflife_s: 3600.0
-    floor_ann: 0.50
+    default_init_ann_vol: 10.0
+    halflife_s: 60.0
+    floor_ann: 5.0
     bar_min: 1
     max_bars: 1440
-    BTC:
-      init_ann_vol: 0.80
-      floor_ann: 0.30
-    ETH:
-      init_ann_vol: 1.27
-      floor_ann: 0.30
-    VIRTUAL:
-      init_ann_vol: 2.50
-      floor_ann: 0.80
-    AIXBT:
-      init_ann_vol: 3.16
-      floor_ann: 1.00
-    SPX:
-      init_ann_vol: 2.00
-      floor_ann: 0.80
