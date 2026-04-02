@@ -30,6 +30,8 @@ pub struct FairPriceOutput {
     pub fair_price: f64,
     pub log_fair_price: f64,
     pub uncertainty_bps: f64,
+    /// P[0,0] before tick updates (prior uncertainty variance).
+    pub p_pre: f64,
     /// Annualized vol as percentage, derived from h_per_ms.
     pub vol_ann_pct: f64,
     pub snap_ts_ns: i64,
@@ -157,6 +159,8 @@ struct MemberState {
     latest_exchange_ts_ns: i64,
     /// received_ts of the last tick consumed (0 if absent).
     latest_received_ts_ns: i64,
+    /// Half-spread in bps from the last tick: (ask - bid) / (2 * mid) * 1e4.
+    latest_half_spread_bps: f64,
 }
 
 /// Snapshot of a member's last tick state, as seen by the FP engine.
@@ -168,8 +172,8 @@ pub struct MemberTickSnapshot {
     pub exchange_ts_ns: i64,
     /// received_ts of the last tick consumed (0 if absent).
     pub received_ts_ns: i64,
-    /// EWMA half-spread in log-price space.
-    pub ewma_half_spread: f64,
+    /// Half-spread in bps: (ask - bid) / (2 * mid) * 1e4.
+    pub half_spread_bps: f64,
 }
 
 /// Per-group filter state. Augmented state vector [y, m_0, ..., m_{K-1}].
@@ -614,6 +618,7 @@ impl FairPriceEngine {
                             latest_raw_mid: f64::NAN,
                             latest_exchange_ts_ns: 0,
                             latest_received_ts_ns: 0,
+                            latest_half_spread_bps: f64::NAN,
                         })
                         .collect(),
                 }
@@ -657,7 +662,7 @@ impl FairPriceEngine {
             raw_mid: ms.latest_raw_mid,
             exchange_ts_ns: ms.latest_exchange_ts_ns,
             received_ts_ns: ms.latest_received_ts_ns,
-            ewma_half_spread: ms.ewma_half_spread,
+            half_spread_bps: ms.latest_half_spread_bps,
         })
     }
 
@@ -749,6 +754,7 @@ impl FairPriceEngine {
                                 let log_half_spread = (ask.ln() - bid.ln()) / 2.0;
                                 let ms = &mut state.member_states[mem_idx];
                                 ms.latest_raw_mid = mid;
+                                ms.latest_half_spread_bps = (ask - bid) / (2.0 * mid) * 1e4;
                                 ms.latest_exchange_ts_ns = md.exchange_ts.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0);
                                 ms.latest_received_ts_ns = md.received_ts.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0);
                                 tick_scratch.push(TickObs {
@@ -783,10 +789,8 @@ impl FairPriceEngine {
             // (shared between Kalman and GG)
             for obs in &*tick_scratch {
                 let ms = &mut state.member_states[obs.member_idx];
-                ms.latest_log_mid = obs.log_mid;
-                ms.latest_ts_ns = obs.ts_ns;
 
-                // Update spread EWMA (time-weighted)
+                // Update spread EWMA (time-weighted) — must read prev ts BEFORE overwriting
                 if group_cfg.spread_ewma_halflife_ms > 0.0 && ms.latest_ts_ns > 0 {
                     let tau = (obs.ts_ns - ms.latest_ts_ns).max(0) as f64 / 1e6;
                     let d = ewma_decay(tau, group_cfg.spread_ewma_halflife_ms);
@@ -794,9 +798,14 @@ impl FairPriceEngine {
                 } else {
                     ms.ewma_half_spread = obs.log_half_spread;
                 }
+
+                ms.latest_log_mid = obs.log_mid;
+                ms.latest_ts_ns = obs.ts_ns;
             }
 
             // ── 3. Model-specific processing ────────────────────────────
+            let p_pre_update = state.cov[0]; // P[0,0] before any predict/update
+
             match group_cfg.model {
 
             FairPriceModel::AdaptiveFilter => {
@@ -1039,6 +1048,7 @@ impl FairPriceEngine {
                     fair_price: (state.x[0] + p_yy / 2.0).exp(),
                     log_fair_price: state.x[0],
                     uncertainty_bps: p_yy.sqrt() * BPS,
+                    p_pre: p_pre_update,
                     vol_ann_pct,
                     snap_ts_ns,
                     n_ticks_used: n_ticks as u32,
@@ -1378,6 +1388,7 @@ mod tests {
                 fair_price: 100.0,
                 log_fair_price: 100.0_f64.ln(),
                 uncertainty_bps: 1.5,
+                p_pre: 0.0,
                 vol_ann_pct: 45.0,
                 snap_ts_ns: 1000,
                 n_ticks_used: 5,

@@ -21,7 +21,7 @@ pub const BPS: f64 = 1e4;
 pub const EDGE_HIGHLIGHT_HURDLE_BPS: f64 = 5.0;
 /// When true, displayed m_k biases are anchored to the mean of SPOT members
 /// so that perp biases read as premium/discount vs spot consensus.
-const ANCHOR_BIAS_TO_SPOT: bool = true;
+const ANCHOR_BIAS_TO_SPOT: bool = false;
 
 pub fn term_size() -> (usize, usize) {
     #[cfg(unix)]
