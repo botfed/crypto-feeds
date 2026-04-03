@@ -158,6 +158,8 @@ struct MemberState {
     noise_var: f64,
     /// EWMA of log half-spread (for EwmaSpread mode).
     ewma_half_spread: f64,
+    /// Timestamp of first tick for this member (for EWMA halflife ramp-up). 0 = not yet seen.
+    ewma_start_ts_ns: i64,
     /// Most recent log mid from this exchange (for GG mode).
     latest_log_mid: f64,
     /// Timestamp of most recent tick in nanoseconds (for GG staleness).
@@ -628,6 +630,7 @@ impl FairPriceEngine {
                             bias_wt: if m.bias != 0.0 { 1.0 } else { 0.0 },
                             noise_var: m.noise_var,
                             ewma_half_spread: m.noise_var.sqrt(),
+                            ewma_start_ts_ns: 0,
                             latest_log_mid: f64::NAN,
                             latest_ts_ns: 0,
                             latest_raw_mid: f64::NAN,
@@ -808,10 +811,16 @@ impl FairPriceEngine {
                 // Update spread EWMA (time-weighted) — must read prev ts BEFORE overwriting
                 if group_cfg.spread_ewma_halflife_ms > 0.0 && ms.latest_ts_ns > 0 {
                     let tau = (obs.ts_ns - ms.latest_ts_ns).max(0) as f64 / 1e6;
-                    let d = ewma_decay(tau, group_cfg.spread_ewma_halflife_ms);
+                    // Ramp halflife from 0 → configured over the first halflife period
+                    let elapsed_ms = (obs.ts_ns - ms.ewma_start_ts_ns).max(0) as f64 / 1e6;
+                    let hl = (elapsed_ms).min(group_cfg.spread_ewma_halflife_ms).max(1.0);
+                    let d = ewma_decay(tau, hl);
                     ms.ewma_half_spread = (1.0 - d) * obs.log_half_spread + d * ms.ewma_half_spread;
                 } else {
                     ms.ewma_half_spread = obs.log_half_spread;
+                    if ms.ewma_start_ts_ns == 0 {
+                        ms.ewma_start_ts_ns = obs.ts_ns;
+                    }
                 }
 
                 ms.latest_log_mid = obs.log_mid;
