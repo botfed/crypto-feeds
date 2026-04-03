@@ -60,6 +60,7 @@ fair_price:
     apex: 0.1
     extended: 0.1
     nado: 0.1
+    bybit: 0.1
   vol_engine:
     type: "gk_ewma"
     default_init_ann_vol: 1.0
