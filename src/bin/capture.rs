@@ -290,7 +290,7 @@ async fn main() -> Result<()> {
             for m in &mut group.members {
                 let effective = if m.vol_24h > 0.0 { m.vol_24h } else { max_vol * 0.01 };
                 m.vol_adj = if max_vol > 0.0 && effective > 0.0 {
-                    (max_vol / effective).sqrt()
+                    (max_vol / effective).powf(cfg.fair_price.liq_adj_exponent)
                 } else {
                     1.0
                 };

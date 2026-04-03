@@ -151,11 +151,16 @@ pub struct FairPriceParamsConfig {
     /// Apply volume-based liquidity adjustment to sigma_k. Default false.
     #[serde(default)]
     pub liquidity_adjustment: bool,
+    /// Exponent for liquidity adjustment: vol_adj = (max_vol/vol_k)^exponent.
+    /// 0.5 = sqrt (gentle), 1.0 = linear (aggressive). Default 0.75.
+    #[serde(default = "default_liq_adj_exponent")]
+    pub liq_adj_exponent: f64,
 }
 
 fn default_fp_drain_interval_ms() -> i64 { 100 }
 fn default_bias_process_noise() -> f64 { 0.1 }
 fn default_bias_init_uncertainty_bps() -> f64 { 0.5 }
+fn default_liq_adj_exponent() -> f64 { 0.75 }
 
 impl Default for FairPriceParamsConfig {
     fn default() -> Self {
@@ -172,6 +177,7 @@ impl Default for FairPriceParamsConfig {
             bias_process_noise_bps_per_sqrt_s: default_bias_process_noise(),
             bias_init_uncertainty_bps: default_bias_init_uncertainty_bps(),
             liquidity_adjustment: false,
+            liq_adj_exponent: default_liq_adj_exponent(),
         }
     }
 }
