@@ -58,7 +58,7 @@ fair_price:
   vol_engine:
     type: "gk_ewma"
     default_init_ann_vol: 1.0
-    halflife_s: 60.0
+    halflife_s: 600.0
     floor_ann: 0.50
     bar_min: 1
     max_bars: 1440
