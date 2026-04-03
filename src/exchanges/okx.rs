@@ -8,9 +8,10 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures_util::SinkExt;
 use futures_util::stream::SplitSink;
-use log::{debug, error};
+use log::{debug, error, info};
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
@@ -23,6 +24,8 @@ pub fn get_fees() -> ExchangeFees {
 struct OkxFeed {
     itype: InstrumentType,
     mapper: OkxMapper,
+    /// instId → (canonical symbol, ctVal). Precomputed at startup for perp.
+    perp_symbol_map: HashMap<String, (String, f64)>,
 }
 
 impl OkxFeed {
@@ -30,13 +33,25 @@ impl OkxFeed {
         Self {
             itype: InstrumentType::Spot,
             mapper: OkxMapper,
+            perp_symbol_map: HashMap::new(),
         }
     }
-    fn new_perp() -> Self {
-        Self {
-            itype: InstrumentType::Perp,
-            mapper: OkxMapper,
+    fn new_perp(symbols: &[&str]) -> Result<Self> {
+        let mapper = OkxMapper;
+        let ct_vals = fetch_contract_values(symbols)?;
+        let mut perp_symbol_map = HashMap::new();
+        for &sym in symbols {
+            if let Ok(native) = mapper.denormalize(sym, InstrumentType::Perp) {
+                // native = "BTC-USDT-SWAP"
+                let ct_val = ct_vals.get(&native).copied().unwrap_or(1.0);
+                perp_symbol_map.insert(native, (sym.to_string(), ct_val));
+            }
         }
+        Ok(Self {
+            itype: InstrumentType::Perp,
+            mapper,
+            perp_symbol_map,
+        })
     }
 }
 
@@ -58,6 +73,55 @@ struct OkxBboData {
 struct OkxBboResponse {
     arg: OkxArg,
     data: Vec<OkxBboData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OkxInstrument {
+    #[serde(rename = "instId")]
+    inst_id: String,
+    #[serde(rename = "ctVal")]
+    ct_val: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OkxInstrumentsResponse {
+    code: String,
+    data: Vec<OkxInstrument>,
+}
+
+/// Fetch contract values from OKX REST API.
+/// Returns a map of instId (e.g. "BTC-USDT-SWAP") → ctVal (base units per contract).
+fn fetch_contract_values(symbols: &[&str]) -> Result<HashMap<String, f64>> {
+    let mapper = OkxMapper;
+    let native_symbols: Vec<String> = symbols
+        .iter()
+        .filter_map(|s| mapper.denormalize(s, InstrumentType::Perp).ok())
+        .collect();
+
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            let client = reqwest::Client::new();
+            let resp: OkxInstrumentsResponse = client
+                .get("https://www.okx.com/api/v5/public/instruments?instType=SWAP")
+                .send()
+                .await?
+                .json()
+                .await?;
+            if resp.code != "0" {
+                anyhow::bail!("OKX instruments API returned code: {}", resp.code);
+            }
+            let mut ct_vals = HashMap::new();
+            for inst in &resp.data {
+                if native_symbols.contains(&inst.inst_id) {
+                    let val: f64 = inst.ct_val.parse().unwrap_or(1.0);
+                    info!("OKX contract {}: ctVal={}", inst.inst_id, val);
+                    ct_vals.insert(inst.inst_id.clone(), val);
+                }
+            }
+            Ok(ct_vals)
+        })
+    })
 }
 
 #[async_trait::async_trait]
@@ -136,16 +200,29 @@ impl ExchangeFeed for OkxFeed {
                             .first()
                             .and_then(|v| v.first())
                             .and_then(|p| p.parse::<f64>().ok());
-                        let bid_qty = entry
+                        let mut bid_qty = entry
                             .bids
                             .first()
                             .and_then(|v| v.get(1))
                             .and_then(|q| q.parse::<f64>().ok());
-                        let ask_qty = entry
+                        let mut ask_qty = entry
                             .asks
                             .first()
                             .and_then(|v| v.get(1))
                             .and_then(|q| q.parse::<f64>().ok());
+
+                        // For perp: lookup canonical symbol + apply contract value
+                        let symbol = if let Some((sym, ct_val)) = self.perp_symbol_map.get(&response.arg.inst_id) {
+                            bid_qty = bid_qty.map(|q| q * ct_val);
+                            ask_qty = ask_qty.map(|q| q * ct_val);
+                            sym.clone()
+                        } else {
+                            // Spot or unknown — strip "-SWAP" suffix for compat
+                            response.arg.inst_id
+                                .strip_suffix("-SWAP")
+                                .unwrap_or(&response.arg.inst_id)
+                                .to_string()
+                        };
 
                         let exchange_ts = entry
                             .ts
@@ -162,15 +239,6 @@ impl ExchangeFeed for OkxFeed {
                             exchange_ts: None,
                             received_ts: Some(received_ts),
                         };
-
-                        // Strip "-SWAP" suffix so the symbol matches registry aliases
-                        // e.g. "BTC-USDT-SWAP" -> "BTC-USDT"
-                        let symbol = response
-                            .arg
-                            .inst_id
-                            .strip_suffix("-SWAP")
-                            .unwrap_or(&response.arg.inst_id)
-                            .to_string();
 
                         Ok(Some((symbol, market_data)))
                     }
@@ -211,7 +279,7 @@ pub async fn listen_perp_bbo(
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    let feed = Arc::new(OkxFeed::new_perp());
+    let feed = Arc::new(OkxFeed::new_perp(symbols)?);
     listen_with_reconnect(
         data,
         symbols,

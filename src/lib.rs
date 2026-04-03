@@ -17,6 +17,7 @@ pub mod vol_engine;
 pub mod vol_params;
 pub mod vol_provider;
 pub mod fp_display;
+pub mod volume_fetcher;
 
 #[cfg(feature = "python")]
 pub mod python;

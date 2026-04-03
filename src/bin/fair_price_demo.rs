@@ -113,6 +113,8 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 gg_weight: 0.0,
                 reprice_group: reprice.clone(),
                 invert_reprice: false,
+                vol_24h: 0.0,
+                vol_adj: 1.0,
             });
         }
 
@@ -130,6 +132,8 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                     let log_val = bps * 1e-4;
                     log_val * log_val / 1000.0
                 },
+                bias_init_p: (fp.bias_init_uncertainty_bps * 1e-4).powi(2),
+                liquidity_adjustment: fp.liquidity_adjustment,
             });
         }
     }

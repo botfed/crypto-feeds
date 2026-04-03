@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::io::{Write, stdout};
 use std::sync::Arc;
@@ -81,6 +82,16 @@ pub fn fmt_qty(v: f64) -> String {
     }
 }
 
+fn fmt_usd(v: f64) -> String {
+    if v >= 1_000_000.0 {
+        format!("{:.1}M", v / 1_000_000.0)
+    } else if v >= 1_000.0 {
+        format!("{:.1}K", v / 1_000.0)
+    } else {
+        format!("{:.0}", v)
+    }
+}
+
 pub async fn run_display(
     tick_data: Arc<AllMarketData>,
     outputs: Arc<FairPriceOutputs>,
@@ -98,6 +109,9 @@ pub async fn run_display(
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Per-member EWMA liquidity state: (group_idx, member_idx) → ewma_liq_usd
+    let mut liq_ewma: HashMap<(usize, usize), f64> = HashMap::new();
+
     let result = loop {
         tokio::select! {
             _ = &mut shutdown_fut => {
@@ -108,7 +122,8 @@ pub async fn run_display(
                 let out = Arc::clone(&outputs);
                 let ms = fp_model_str.clone();
                 let vs = vol_engine_str.clone();
-                let frame = tokio::task::spawn_blocking(move || {
+                let mut le = liq_ewma; // move in
+                let (frame, le_back) = tokio::task::spawn_blocking(move || {
                     let elapsed = start.elapsed().as_secs();
                     let h = elapsed / 3600;
                     let m = (elapsed % 3600) / 60;
@@ -157,7 +172,7 @@ pub async fn run_display(
                         // Header
                         macro_rules! row {
                             ($buf:expr, $($arg:expr),* $(,)?) => {
-                                writeln!($buf, "  {:<5} {:<17} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>8} {:>8} {:>7} {:>9} {:>7}", $($arg),*)
+                                writeln!($buf, "  {:<5} {:<17} {:>13} {:>13} {:>7} {:>7} {:>7} {:>13} {:>13} {:>9} {:>9} {:>8} {:>8} {:>7} {:>9} {:>7}", $($arg),*)
                             }
                         }
                         let _ = row!(buf,
@@ -166,7 +181,7 @@ pub async fn run_display(
                             "HSprd",
                             "TrdEdge",
                             "BidQty", "AskQty",
-                            "m_k", "sigma_k",
+                            "BBO$", "Vol24h", "m_k", "sigma_k",
                             "P_unc", "Age", "ClkAdj",
                         );
                         let _ = row!(buf,
@@ -175,21 +190,23 @@ pub async fn run_display(
                             "(bps)",
                             "(bps)",
                             "", "",
-                            "(bps)", "(bps)",
+                            "", "(base)", "(bps)", "(bps)",
                             "(bps)", "(ms)", "(ms)",
                         );
 
                         if let Some(members) = out.group_members(group_idx) {
-                            // Sort by first 4 chars of symbol (PERP before SPOT), then by exchange
+                            // Sort by 24h volume descending (most liquid first), then alphabetical
                             let mut sorted_indices: Vec<usize> = (0..members.len()).collect();
                             sorted_indices.sort_by(|&a, &b| {
-                                let sa = members[a].display_name.as_deref()
-                                    .unwrap_or_else(|| REGISTRY.get_symbol(members[a].symbol_id).unwrap_or("?"));
-                                let sb = members[b].display_name.as_deref()
-                                    .unwrap_or_else(|| REGISTRY.get_symbol(members[b].symbol_id).unwrap_or("?"));
-                                let prefix_a = &sa[..sa.len().min(4)];
-                                let prefix_b = &sb[..sb.len().min(4)];
-                                prefix_a.cmp(prefix_b).then(members[a].exchange.as_str().cmp(members[b].exchange.as_str()))
+                                members[b].vol_24h.partial_cmp(&members[a].vol_24h)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| {
+                                        let sa = members[a].display_name.as_deref()
+                                            .unwrap_or_else(|| REGISTRY.get_symbol(members[a].symbol_id).unwrap_or("?"));
+                                        let sb = members[b].display_name.as_deref()
+                                            .unwrap_or_else(|| REGISTRY.get_symbol(members[b].symbol_id).unwrap_or("?"));
+                                        sa.cmp(sb)
+                                    })
                             });
                             // Compute spot bias anchor for display
                             let bias_anchor_bps = if ANCHOR_BIAS_TO_SPOT {
@@ -246,6 +263,17 @@ pub async fn run_display(
                                         let color_on = if highlight { GREEN } else { "" };
                                         let color_off = if highlight { RESET } else { "" };
 
+                                        let liq_raw = (q.bid_qty + q.ask_qty) * q.mid_at_exchange / 2.0;
+                                        let decay = (-std::f64::consts::LN_2 / 3600.0_f64).exp(); // 1-hour halflife, 1s tick
+                                        let liq = le.entry((group_idx, mem_idx))
+                                            .and_modify(|e| *e = decay * *e + (1.0 - decay) * liq_raw)
+                                            .or_insert(liq_raw);
+                                        let liq = *liq;
+                                        let vol_str = if member.vol_24h > 0.0 {
+                                            fmt_usd(member.vol_24h * q.mid_at_exchange)
+                                        } else {
+                                            "-".to_string()
+                                        };
                                         let age_str = format!("{:.2}", age_ms);
                                         let _ = write!(buf, "{}", color_on);
                                         let _ = row!(buf,
@@ -258,6 +286,8 @@ pub async fn run_display(
                                             fmt_bps(trd_edge),
                                             fmt_qty(q.bid_qty),
                                             fmt_qty(q.ask_qty),
+                                            fmt_usd(liq),
+                                            vol_str,
                                             fmt_bps(mk_bps),
                                             fmt_bps(sk_bps),
                                             fmt_bps(lcu0),
@@ -271,6 +301,11 @@ pub async fn run_display(
                                         let (mk, sk) = params.unwrap_or((0.0, 0.0));
                                         let mk_bps = mk * BPS - bias_anchor_bps;
                                         let sk_bps = sk.sqrt() * BPS;
+                                        let vol_str = if member.vol_24h > 0.0 {
+                                            fmt_usd(member.vol_24h)
+                                        } else {
+                                            "-".to_string()
+                                        };
                                         let _ = row!(buf,
                                             ex_name,
                                             sym_name,
@@ -279,6 +314,8 @@ pub async fn run_display(
                                             "-",
                                             "-",
                                             "-", "-",
+                                            "-",
+                                            vol_str,
                                             fmt_bps(mk_bps),
                                             fmt_bps(sk_bps),
                                             "-", "-", "-",
@@ -294,8 +331,9 @@ pub async fn run_display(
                     let remaining = rows.saturating_sub(used);
                     write_log_section(&mut buf, remaining);
                     let frame = prepare_frame(&buf);
-                    format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW)
+                    (format!("{}{}{}", CURSOR_HOME, frame, CLEAR_BELOW), le)
                 }).await?;
+                liq_ewma = le_back;
                 flush_str(frame).await?;
             }
         }

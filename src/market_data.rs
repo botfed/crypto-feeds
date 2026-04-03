@@ -117,7 +117,7 @@ impl std::fmt::Debug for AllMarketData {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Hash, Eq, PartialEq)]
 pub enum Exchange {
     Binance,
     Coinbase,

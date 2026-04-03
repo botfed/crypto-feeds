@@ -94,6 +94,8 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 gg_weight: 0.0,
                 reprice_group: reprice.clone(),
                 invert_reprice: false,
+                vol_24h: 0.0,
+                vol_adj: 1.0,
             });
         }
 
@@ -107,6 +109,8 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 spread_ewma_halflife_ms: 3000.0,
                 sigma_k_floor: 1e-6,
                 h_bias_per_ms: 1e-12,
+                bias_init_p: 2.5e-9,
+                liquidity_adjustment: false,
             });
         }
     }

@@ -778,6 +778,8 @@ fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
                 gg_weight,
                 reprice_group,
                 invert_reprice,
+                vol_24h: 0.0,
+                vol_adj: 1.0,
             });
         }
 
@@ -861,6 +863,8 @@ fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
             spread_ewma_halflife_ms,
             sigma_k_floor,
             h_bias_per_ms: 1e-12,
+            bias_init_p: 2.5e-9,
+            liquidity_adjustment: false,
         });
     }
 

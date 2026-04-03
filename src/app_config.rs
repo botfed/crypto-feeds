@@ -144,10 +144,18 @@ pub struct FairPriceParamsConfig {
     /// 0.1 ≈ bias can drift ~0.1 bps/√s ≈ 2.4 bps/√min.
     #[serde(default = "default_bias_process_noise")]
     pub bias_process_noise_bps_per_sqrt_s: f64,
+    /// Initial bias uncertainty in bps. Default 0.5. Controls how aggressively biases
+    /// adjust on the first few ticks. Lower = more trust in the initial bias (0).
+    #[serde(default = "default_bias_init_uncertainty_bps")]
+    pub bias_init_uncertainty_bps: f64,
+    /// Apply volume-based liquidity adjustment to sigma_k. Default false.
+    #[serde(default)]
+    pub liquidity_adjustment: bool,
 }
 
 fn default_fp_drain_interval_ms() -> i64 { 100 }
 fn default_bias_process_noise() -> f64 { 0.1 }
+fn default_bias_init_uncertainty_bps() -> f64 { 0.5 }
 
 impl Default for FairPriceParamsConfig {
     fn default() -> Self {
@@ -162,6 +170,8 @@ impl Default for FairPriceParamsConfig {
             vol_engine: VolEngineConfig::default(),
             drain_interval_ms: default_fp_drain_interval_ms(),
             bias_process_noise_bps_per_sqrt_s: default_bias_process_noise(),
+            bias_init_uncertainty_bps: default_bias_init_uncertainty_bps(),
+            liquidity_adjustment: false,
         }
     }
 }

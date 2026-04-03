@@ -166,11 +166,14 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 gg_weight: 0.0,
                 reprice_group: reprice.clone(),
                 invert_reprice: false,
+                vol_24h: 0.0,
+                vol_adj: 1.0,
             });
         }
         if members.len() >= 2 {
             let bps = fp.bias_process_noise_bps_per_sqrt_s;
             let log_val = bps * 1e-4;
+            let init_bps = fp.bias_init_uncertainty_bps;
             groups.push(FairPriceGroupConfig {
                 name: base.clone(),
                 members,
@@ -180,6 +183,8 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 spread_ewma_halflife_ms: fp.spread_ewma_halflife_s * 1000.0,
                 sigma_k_floor: fp.sigma_k_floor,
                 h_bias_per_ms: log_val * log_val / 1000.0,
+                bias_init_p: (init_bps * 1e-4) * (init_bps * 1e-4),
+                liquidity_adjustment: fp.liquidity_adjustment,
             });
         }
     }
@@ -271,7 +276,26 @@ async fn main() -> Result<()> {
     // Set up FP engine if needed
     let has_capture = args.interval_ms.is_some();
     let (outputs, fp_engine): (Option<Arc<FairPriceOutputs>>, Option<Arc<FairPriceEngine>>) = if needs_fp {
-        let groups = auto_discover_groups(&cfg);
+        let volumes = Arc::new(crypto_feeds::volume_fetcher::fetch_all_volumes(&cfg).await);
+        let mut groups = auto_discover_groups(&cfg);
+        // Apply 24h volume data to group members and precompute vol_adj
+        for group in &mut groups {
+            for m in &mut group.members {
+                let reg_sym = REGISTRY.get_symbol(m.symbol_id).unwrap_or("?");
+                if let Some(&vol) = volumes.get(&(m.exchange, reg_sym.to_string())) {
+                    m.vol_24h = vol;
+                }
+            }
+            let max_vol = group.members.iter().map(|m| m.vol_24h).fold(0.0_f64, f64::max);
+            for m in &mut group.members {
+                let effective = if m.vol_24h > 0.0 { m.vol_24h } else { max_vol * 0.01 };
+                m.vol_adj = if max_vol > 0.0 && effective > 0.0 {
+                    (max_vol / effective).sqrt()
+                } else {
+                    1.0
+                };
+            }
+        }
         if groups.is_empty() {
             eprintln!("Warning: no FP groups discovered, --with-fp will have no effect");
             (None, None)

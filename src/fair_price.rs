@@ -80,6 +80,11 @@ pub struct GroupMember {
     /// so we compute reprice_fp / raw_price instead of raw_price * reprice_fp.
     /// Bid/ask are also swapped since inverting reverses the book.
     pub invert_reprice: bool,
+    /// 24h volume in base currency (0 = unknown).
+    pub vol_24h: f64,
+    /// Precomputed sqrt(max_vol / effective_vol) for liquidity-adjusted sigma_k.
+    /// 1.0 = no adjustment (most liquid or no volume data).
+    pub vol_adj: f64,
 }
 
 /// How sigma_k (observation noise) is determined per tick.
@@ -124,6 +129,10 @@ pub struct FairPriceGroupConfig {
     /// Process noise variance rate for bias states (log-price² per ms).
     /// Controls how fast biases are allowed to drift in the augmented filter.
     pub h_bias_per_ms: f64,
+    /// Initial P[k+1,k+1] for bias states (log-price² units).
+    pub bias_init_p: f64,
+    /// Apply volume-based liquidity adjustment to sigma_k (vol_adj post-multiplier).
+    pub liquidity_adjustment: bool,
 }
 
 /// Maximum augmented state dimension (K+1). Stack arrays sized to this.
@@ -222,6 +231,10 @@ pub struct MemberInfo {
     invert_reprice: bool,
     live_bias: AtomicU64,
     live_noise_var: AtomicU64,
+    /// 24h volume in base currency (for display/sorting).
+    pub vol_24h: f64,
+    /// Precomputed liquidity adjustment factor sqrt(max_vol / effective_vol).
+    pub vol_adj: f64,
 }
 
 /// Collection of fair price output ring buffers, one per group.
@@ -286,6 +299,8 @@ impl FairPriceOutputs {
                             invert_reprice: m.invert_reprice,
                             live_bias: AtomicU64::new(m.bias.to_bits()),
                             live_noise_var: AtomicU64::new(m.noise_var.to_bits()),
+                            vol_24h: m.vol_24h,
+                            vol_adj: m.vol_adj,
                         }
                     })
                     .collect()
@@ -825,7 +840,7 @@ impl FairPriceEngine {
                         // Initial covariance: diagonal
                         *state.p_mut(0, 0) = ms.noise_var;
                         for k in 0..group_cfg.members.len() {
-                            *state.p_mut(k + 1, k + 1) = 1e-6;
+                            *state.p_mut(k + 1, k + 1) = group_cfg.bias_init_p;
                         }
                         state.prev_ts_ns = first.ts_ns;
                         state.initialized = true;
@@ -855,7 +870,7 @@ impl FairPriceEngine {
                         }
 
                         // Determine noise_var based on sigma mode
-                        let noise_var = match group_cfg.sigma_mode {
+                        let mut noise_var = match group_cfg.sigma_mode {
                             SigmaMode::InstantSpread => {
                                 obs.log_half_spread.powi(2).max(sigma_floor_sq)
                             }
@@ -864,6 +879,10 @@ impl FairPriceEngine {
                             }
                             SigmaMode::Static => state.member_states[mi].noise_var,
                         };
+                        if group_cfg.liquidity_adjustment {
+                            let adj = group_cfg.members[mi].vol_adj;
+                            noise_var = (noise_var.sqrt() * adj).powi(2).max(sigma_floor_sq);
+                        }
 
                         // ── Update: augmented Kalman step ──
                         // H_k = e_0 + e_{k1}, observation z = y + m_k + noise
@@ -992,12 +1011,15 @@ impl FairPriceEngine {
                     let w = member.gg_weight * decay;
 
                     // sigma_k for uncertainty
-                    let noise_var = match group_cfg.sigma_mode {
+                    let mut noise_var = match group_cfg.sigma_mode {
                         SigmaMode::InstantSpread | SigmaMode::EwmaSpread => {
                             ms.ewma_half_spread.powi(2).max(sigma_floor_sq)
                         }
                         SigmaMode::Static => ms.noise_var,
                     };
+                    if group_cfg.liquidity_adjustment {
+                        noise_var = (noise_var.sqrt() * member.vol_adj).powi(2).max(sigma_floor_sq);
+                    }
 
                     y += w * (ms.latest_log_mid - ms.bias);
                     p += w * w * noise_var;
@@ -1254,6 +1276,8 @@ mod tests {
                         gg_weight: 0.0,
                         reprice_group: None,
                         invert_reprice: false,
+                        vol_24h: 0.0,
+                        vol_adj: 1.0,
                     },
                     GroupMember {
                         exchange: Exchange::Coinbase,
@@ -1263,6 +1287,8 @@ mod tests {
                         gg_weight: 0.0,
                         reprice_group: None,
                         invert_reprice: false,
+                        vol_24h: 0.0,
+                        vol_adj: 1.0,
                     },
                 ],
                 sigma_mode: SigmaMode::Static,
@@ -1271,6 +1297,8 @@ mod tests {
                 spread_ewma_halflife_ms: 0.0,
                 sigma_k_floor: 1e-6,
                 h_bias_per_ms: 1e-12,
+                bias_init_p: 2.5e-9,
+                liquidity_adjustment: false,
             }],
         };
 
@@ -1340,6 +1368,8 @@ mod tests {
                     spread_ewma_halflife_ms: 0.0,
                     sigma_k_floor: 1e-6,
                     h_bias_per_ms: 1e-12,
+                bias_init_p: 2.5e-9,
+                liquidity_adjustment: false,
                 },
                 FairPriceGroupConfig {
                     name: "ETH".to_string(),
@@ -1350,6 +1380,8 @@ mod tests {
                     spread_ewma_halflife_ms: 0.0,
                     sigma_k_floor: 1e-6,
                     h_bias_per_ms: 1e-12,
+                bias_init_p: 2.5e-9,
+                liquidity_adjustment: false,
                 },
             ],
         };
@@ -1376,6 +1408,8 @@ mod tests {
                 spread_ewma_halflife_ms: 0.0,
                 sigma_k_floor: 1e-6,
                 h_bias_per_ms: 1e-12,
+                bias_init_p: 2.5e-9,
+                liquidity_adjustment: false,
             }],
         };
 

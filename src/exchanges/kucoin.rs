@@ -11,6 +11,7 @@ use futures_util::stream::SplitSink;
 use log::{debug, error, info};
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
@@ -24,6 +25,8 @@ struct KucoinFeed {
     bullet_url: &'static str,
     itype: InstrumentType,
     mapper: KucoinMapper,
+    /// Native symbol → (canonical symbol, qty multiplier). Precomputed at startup for perp.
+    perp_symbol_map: HashMap<String, (String, f64)>,
 }
 
 impl KucoinFeed {
@@ -32,14 +35,25 @@ impl KucoinFeed {
             bullet_url: "https://api.kucoin.com/api/v1/bullet-public",
             itype: InstrumentType::Spot,
             mapper: KucoinMapper,
+            perp_symbol_map: HashMap::new(),
         }
     }
-    fn new_perp() -> Self {
-        Self {
+    fn new_perp(symbols: &[&str]) -> Result<Self> {
+        let mapper = KucoinMapper;
+        let multipliers = fetch_contract_multipliers(symbols)?;
+        let mut perp_symbol_map = HashMap::new();
+        for &sym in symbols {
+            if let Ok(native) = mapper.denormalize(sym, InstrumentType::Perp) {
+                let mult = multipliers.get(&native).copied().unwrap_or(1.0);
+                perp_symbol_map.insert(native, (sym.to_string(), mult));
+            }
+        }
+        Ok(Self {
             bullet_url: "https://api-futures.kucoin.com/api/v1/bullet-public",
             itype: InstrumentType::Perp,
-            mapper: KucoinMapper,
-        }
+            mapper,
+            perp_symbol_map,
+        })
     }
 }
 
@@ -127,6 +141,56 @@ fn fetch_bullet_token(bullet_url: &str) -> Result<String> {
             );
             info!("KuCoin WS endpoint: {}", server.endpoint);
             Ok(url)
+        })
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct KucoinContractInfo {
+    symbol: String,
+    multiplier: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct KucoinContractsResponse {
+    code: String,
+    data: Vec<KucoinContractInfo>,
+}
+
+/// Fetch contract multipliers from Kucoin futures REST API.
+/// Returns a map of native symbol (e.g. "XBTUSDTM") → multiplier (base units per contract).
+fn fetch_contract_multipliers(symbols: &[&str]) -> Result<HashMap<String, f64>> {
+    let mapper = KucoinMapper;
+    // Convert canonical symbols to native Kucoin format for filtering
+    let native_symbols: Vec<String> = symbols
+        .iter()
+        .filter_map(|s| mapper.denormalize(s, InstrumentType::Perp).ok())
+        .collect();
+
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            let client = reqwest::Client::new();
+            let resp: KucoinContractsResponse = client
+                .get("https://api-futures.kucoin.com/api/v1/contracts/active")
+                .send()
+                .await?
+                .json()
+                .await?;
+            if resp.code != "200000" {
+                anyhow::bail!("KuCoin contracts API returned code: {}", resp.code);
+            }
+            let mut multipliers = HashMap::new();
+            for contract in &resp.data {
+                if native_symbols.contains(&contract.symbol) {
+                    info!(
+                        "KuCoin contract {}: multiplier={}",
+                        contract.symbol, contract.multiplier
+                    );
+                    multipliers.insert(contract.symbol.clone(), contract.multiplier);
+                }
+            }
+            Ok(multipliers)
         })
     })
 }
@@ -260,15 +324,15 @@ impl ExchangeFeed for KucoinFeed {
                                 .map(|s| s.to_string())
                         })
                         .unwrap_or_default();
-                    let symbol = match self.mapper.parse(&native, InstrumentType::Perp) {
-                        Ok((base, quote)) => format!("{}-{}", base, quote),
-                        Err(_) => native,
+                    let (symbol, mult) = match self.perp_symbol_map.get(&native) {
+                        Some((sym, m)) => (sym.clone(), *m),
+                        None => return Ok(None),
                     };
 
                     let bid = parse_f64(&ticker.best_bid_price);
                     let ask = parse_f64(&ticker.best_ask_price);
-                    let bid_qty = parse_f64(&ticker.best_bid_size);
-                    let ask_qty = parse_f64(&ticker.best_ask_size);
+                    let bid_qty = parse_f64(&ticker.best_bid_size).map(|q| q * mult);
+                    let ask_qty = parse_f64(&ticker.best_ask_size).map(|q| q * mult);
                     // ts is in nanoseconds
                     let exchange_ts = ticker
                         .ts
@@ -326,7 +390,7 @@ pub async fn listen_perp_bbo(
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    let feed = Arc::new(KucoinFeed::new_perp());
+    let feed = Arc::new(KucoinFeed::new_perp(symbols)?);
     listen_with_reconnect(
         data,
         symbols,
