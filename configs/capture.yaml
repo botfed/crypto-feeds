@@ -1,19 +1,15 @@
 spot:
-  binance:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
-  bybit:    ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
-  okx:      ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
-  coinbase: ["BTC_USD",  "ETH_USD",  "SPX_USD"]
+  binance:  ["BTC_USDT", "ETH_USDT"]
+  bybit:    ["BTC_USDT", "ETH_USDT"]
+  okx:      ["BTC_USDT", "ETH_USDT"]
+  coinbase: ["BTC_USD",  "ETH_USD"]
 
 perp:
   binance:     ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   okx:         ["BTC_USDT", "ETH_kSDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   bybit:       ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   apex:        ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
-  hyperliquid: ["BTC_USDC", "ETH_USDC", "AIXBT_USDC", "SPX_USDC", "VIRTUAL_USDC"]
-  nado:        ["BTC_USDT", "ETH_USDT",               "SPX_USDT",               ]
-  extended:    ["BTC_USD",  "ETH_USD",                "SPX_USD",  "VIRTUAL_USD"]
-  apex:        ["BTC_USDT", "ETH_USDT",               "SPX_USDT", "VIRTUAL_USDT"]
-  coinbase:    ["BTC_USD", "ETH_USD"]
+  hyperliquid: ["BTC_USDC", "ETH_USDC"]
 
 onchain:
   rpc_env: "BASE_WSS_RPC"
@@ -60,8 +56,8 @@ fair_price:
     apex: 0.1
     extended: 0.1
     nado: 0.1
-    bybit: 0.1
-    okx: 0.1
+    bybit: 0.5
+    okx: 0.5
     hyperliquid: 0.1
 
   vol_engine:
