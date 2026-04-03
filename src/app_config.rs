@@ -159,6 +159,10 @@ pub struct FairPriceParamsConfig {
     /// < 1.0 = trust mids more (higher gain). Default 1.0 (no change).
     #[serde(default = "default_sigma_scale")]
     pub sigma_scale: f64,
+    /// Per-exchange volume trust multiplier. Penalizes exchanges with inflated self-reported volume.
+    /// E.g., bingx: 0.1 divides reported volume by 10. Default 1.0 for unlisted exchanges.
+    #[serde(default)]
+    pub volume_adjustments: std::collections::HashMap<String, f64>,
 }
 
 fn default_fp_drain_interval_ms() -> i64 { 100 }
@@ -184,6 +188,7 @@ impl Default for FairPriceParamsConfig {
             liquidity_adjustment: false,
             liq_adj_exponent: default_liq_adj_exponent(),
             sigma_scale: default_sigma_scale(),
+            volume_adjustments: std::collections::HashMap::new(),
         }
     }
 }

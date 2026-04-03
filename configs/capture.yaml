@@ -4,7 +4,6 @@ spot:
   kucoin:   ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   okx:      ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "VIRTUAL_USDT"]
   coinbase: ["BTC_USD",  "ETH_USD",  "SPX_USD"]
-  mexc:     ["BTC_USDT", "ETH_USDT", "SPX_USDT", "AIXBT_USDT"]
 
 perp:
   binance:     ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
@@ -57,6 +56,13 @@ fair_price:
   sigma_k_floor: 0
   bias_process_noise_bps_per_sqrt_s: 0.01  # bias drift ~0.01 bps/√s
   bias_init_uncertainty_bps: 0.5           # initial bias uncertainty
+  volume_adjustments:
+    bingx: 0.1
+    kucoin: 0.1
+    mexc: 0.1
+    apex: 0.1
+    extended: 0.1
+    nado: 0.1
   vol_engine:
     type: "gk_ewma"
     default_init_ann_vol: 1.0

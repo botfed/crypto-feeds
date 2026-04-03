@@ -286,6 +286,10 @@ async fn main() -> Result<()> {
                 if let Some(&vol) = volumes.get(&(m.exchange, reg_sym.to_string())) {
                     m.vol_24h = vol;
                 }
+                // Apply per-exchange volume trust factor (penalizes wash trading)
+                let trust = cfg.fair_price.volume_adjustments
+                    .get(m.exchange.as_str()).copied().unwrap_or(1.0);
+                m.vol_24h *= trust;
             }
             let max_vol = group.members.iter().map(|m| m.vol_24h).fold(0.0_f64, f64::max);
             for m in &mut group.members {
