@@ -865,6 +865,7 @@ fn parse_fair_price_config(dict: &Bound<PyDict>) -> PyResult<FairPriceConfig> {
             h_bias_per_ms: 1e-12,
             bias_init_p: 2.5e-9,
             liquidity_adjustment: false,
+            sigma_scale: 1.0,
         });
     }
 

@@ -134,6 +134,7 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 },
                 bias_init_p: (fp.bias_init_uncertainty_bps * 1e-4).powi(2),
                 liquidity_adjustment: fp.liquidity_adjustment,
+                sigma_scale: fp.sigma_scale,
             });
         }
     }

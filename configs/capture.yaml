@@ -50,6 +50,7 @@ fair_price:
   model: "adaptive_filter"
   drain_interval_ms: 50    # background tick drain rate (-1 to disable)
   sigma_mode: "ewma_spread"
+  sigma_scale: 0.1
   liquidity_adjustment: true
   liq_adj_exponent: .75
   spread_ewma_halflife_s: 600.0

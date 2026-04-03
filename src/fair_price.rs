@@ -133,6 +133,8 @@ pub struct FairPriceGroupConfig {
     pub bias_init_p: f64,
     /// Apply volume-based liquidity adjustment to sigma_k (vol_adj post-multiplier).
     pub liquidity_adjustment: bool,
+    /// Overall scale factor for sigma_k. Applied after spread + liq_adj. noise_var *= scale².
+    pub sigma_scale: f64,
 }
 
 /// Maximum augmented state dimension (K+1). Stack arrays sized to this.
@@ -892,6 +894,7 @@ impl FairPriceEngine {
                             let adj = group_cfg.members[mi].vol_adj;
                             noise_var = (noise_var.sqrt() * adj).powi(2).max(sigma_floor_sq);
                         }
+                        noise_var *= group_cfg.sigma_scale * group_cfg.sigma_scale;
 
                         // ── Update: augmented Kalman step ──
                         // H_k = e_0 + e_{k1}, observation z = y + m_k + noise
@@ -1029,6 +1032,7 @@ impl FairPriceEngine {
                     if group_cfg.liquidity_adjustment {
                         noise_var = (noise_var.sqrt() * member.vol_adj).powi(2).max(sigma_floor_sq);
                     }
+                    noise_var *= group_cfg.sigma_scale * group_cfg.sigma_scale;
 
                     y += w * (ms.latest_log_mid - ms.bias);
                     p += w * w * noise_var;
@@ -1308,6 +1312,7 @@ mod tests {
                 h_bias_per_ms: 1e-12,
                 bias_init_p: 2.5e-9,
                 liquidity_adjustment: false,
+                sigma_scale: 1.0,
             }],
         };
 
@@ -1379,6 +1384,7 @@ mod tests {
                     h_bias_per_ms: 1e-12,
                 bias_init_p: 2.5e-9,
                 liquidity_adjustment: false,
+                sigma_scale: 1.0,
                 },
                 FairPriceGroupConfig {
                     name: "ETH".to_string(),
@@ -1391,6 +1397,7 @@ mod tests {
                     h_bias_per_ms: 1e-12,
                 bias_init_p: 2.5e-9,
                 liquidity_adjustment: false,
+                sigma_scale: 1.0,
                 },
             ],
         };
@@ -1419,6 +1426,7 @@ mod tests {
                 h_bias_per_ms: 1e-12,
                 bias_init_p: 2.5e-9,
                 liquidity_adjustment: false,
+                sigma_scale: 1.0,
             }],
         };
 

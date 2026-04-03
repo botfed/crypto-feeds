@@ -155,12 +155,17 @@ pub struct FairPriceParamsConfig {
     /// 0.5 = sqrt (gentle), 1.0 = linear (aggressive). Default 0.75.
     #[serde(default = "default_liq_adj_exponent")]
     pub liq_adj_exponent: f64,
+    /// Overall scale factor for sigma_k. Applied after spread + liq_adj.
+    /// < 1.0 = trust mids more (higher gain). Default 1.0 (no change).
+    #[serde(default = "default_sigma_scale")]
+    pub sigma_scale: f64,
 }
 
 fn default_fp_drain_interval_ms() -> i64 { 100 }
 fn default_bias_process_noise() -> f64 { 0.1 }
 fn default_bias_init_uncertainty_bps() -> f64 { 0.5 }
 fn default_liq_adj_exponent() -> f64 { 0.75 }
+fn default_sigma_scale() -> f64 { 1.0 }
 
 impl Default for FairPriceParamsConfig {
     fn default() -> Self {
@@ -178,6 +183,7 @@ impl Default for FairPriceParamsConfig {
             bias_init_uncertainty_bps: default_bias_init_uncertainty_bps(),
             liquidity_adjustment: false,
             liq_adj_exponent: default_liq_adj_exponent(),
+            sigma_scale: default_sigma_scale(),
         }
     }
 }

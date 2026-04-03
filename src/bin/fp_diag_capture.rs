@@ -111,6 +111,7 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
                 h_bias_per_ms: 1e-12,
                 bias_init_p: 2.5e-9,
                 liquidity_adjustment: false,
+                sigma_scale: 1.0,
             });
         }
     }
