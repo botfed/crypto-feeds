@@ -46,7 +46,7 @@ fair_price:
   model: "adaptive_filter"
   drain_interval_ms: 50    # background tick drain rate (-1 to disable)
   sigma_mode: "ewma_spread"
-  sigma_scale: 0.1
+  sigma_scale: 0.5
   liquidity_adjustment: true
   liq_adj_exponent: .75
   spread_ewma_halflife_s: 600.0
@@ -60,7 +60,7 @@ fair_price:
     apex: 0.1
     extended: 0.1
     nado: 0.1
-    bybit: 0.1
+    bybit: 0.5
   vol_engine:
     type: "gk_ewma"
     default_init_ann_vol: 1.0
