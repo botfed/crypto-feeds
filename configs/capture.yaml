@@ -2,12 +2,13 @@ spot:
   binance:  ["BTC_USDT", "ETH_USDT"]
   bybit:    ["BTC_USDT", "ETH_USDT"]
   okx:      ["BTC_USDT", "ETH_USDT"]
-  coinbase: ["BTC_USD",  "ETH_USD"]
+  coinbase: ["BTC_USD",  "ETH_USD", "CLANKER_USD"]
 
 perp:
-  binance:     ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
+  binance:     ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT", "CLANKER_USDT"]
+  bingx:       ["CLANKER_USDT"]
   okx:         ["BTC_USDT", "ETH_kSDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
-  bybit:       ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
+  bybit:       ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT", "CLANKER_USDT"]
   apex:        ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   hyperliquid: ["BTC_USDC", "ETH_USDC"]
 
@@ -37,6 +38,10 @@ onchain:
         symbol: "VIRTUAL_ETH"
       - address: "0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef"
         symbol: "BTC_USDC"
+      - address: "0x4e829f8a5213c42535ab84aa40bd4adcce9cba02"
+        symbol: "BRETT_WETH"
+      - address: "0xd23fe2db317e1a96454a2d1c7e8fc0dbf19bb000"
+        symbol: "CLANKER_WETH"
 
 fair_price:
   model: "adaptive_filter"
