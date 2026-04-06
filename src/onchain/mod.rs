@@ -406,9 +406,10 @@ pub async fn fetch_pool_configs(
             let invert_price = {
                 let parts: Vec<&str> = entry.symbol.split('_').collect();
                 if parts.len() == 2 {
+                    let quote_norm = normalize_token(parts[1]);
                     let t0_norm = normalize_token(&t0_info.symbol);
-                    let invert = t0_norm.eq_ignore_ascii_case(parts[1]);
-                    if !invert && !normalize_token(&t1_info.symbol).eq_ignore_ascii_case(parts[1]) {
+                    let invert = t0_norm.eq_ignore_ascii_case(quote_norm);
+                    if !invert && !normalize_token(&t1_info.symbol).eq_ignore_ascii_case(quote_norm) {
                         warn!(
                             "{} pool {} ({}/{}): neither token matches quote '{}', defaulting invert=false",
                             dex_name, entry.address, t0_info.symbol, t1_info.symbol, parts[1]
@@ -417,6 +418,16 @@ pub async fn fetch_pool_configs(
                     invert
                 } else {
                     entry.invert_price
+                }
+            };
+
+            // Normalize the label so BRETT_WETH → BRETT_ETH, etc.
+            let label = {
+                let parts: Vec<&str> = entry.symbol.split('_').collect();
+                if parts.len() == 2 {
+                    format!("{}_{}", normalize_token(parts[0]), normalize_token(parts[1]))
+                } else {
+                    entry.symbol.clone()
                 }
             };
 
@@ -432,7 +443,7 @@ pub async fn fetch_pool_configs(
                 fee: raw.fee,
                 invert_price,
                 symbol_id,
-                label: entry.symbol.clone(),
+                label,
             }
         })
         .collect();
