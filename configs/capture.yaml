@@ -26,6 +26,10 @@ onchain:
         symbol: "SPX_ETH"
       - address: "0x3e66e55e97ce60096f74b7C475e8249f2D31a9fb"
         symbol: "BTC_USDC"
+      - address: "0x4e829f8a5213c42535ab84aa40bd4adcce9cba02"
+        symbol: "BRETT_WETH"
+      - address: "0xd23fe2db317e1a96454a2d1c7e8fc0dbf19bb000"
+        symbol: "CLANKER_WETH"
   uniswap:
     pools:
       - address: "0x6c561B446416E1A00E8E93E221854d6eA4171372"
@@ -38,10 +42,6 @@ onchain:
         symbol: "VIRTUAL_ETH"
       - address: "0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef"
         symbol: "BTC_USDC"
-      - address: "0x4e829f8a5213c42535ab84aa40bd4adcce9cba02"
-        symbol: "BRETT_WETH"
-      - address: "0xd23fe2db317e1a96454a2d1c7e8fc0dbf19bb000"
-        symbol: "CLANKER_WETH"
 
 fair_price:
   model: "adaptive_filter"
