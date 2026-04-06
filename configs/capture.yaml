@@ -30,6 +30,8 @@ onchain:
         symbol: "BRETT_WETH"
       - address: "0xd23fe2db317e1a96454a2d1c7e8fc0dbf19bb000"
         symbol: "CLANKER_WETH"
+      - address: "0x56b92e5b391dbfb8b8028ac95a4b97f52ffeb416"
+        symbol: "KAITO_WETH"
   uniswap:
     pools:
       - address: "0x6c561B446416E1A00E8E93E221854d6eA4171372"
