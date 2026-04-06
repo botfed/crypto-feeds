@@ -65,7 +65,7 @@ fn build_targets(cfg: &AppConfig, market_data: &AllMarketData) -> Vec<SampleTarg
             ("uniswap", &onchain.uniswap, &market_data.uniswap),
         ] {
             if let Some(pools) = dex_cfg {
-                for pool in &pools.pools {
+                for pool in &pools.validated_pools(dex_name) {
                     if let Some(&id) = REGISTRY.lookup(&pool.symbol, &InstrumentType::Spot) {
                         let canonical =
                             REGISTRY.get_symbol(id).unwrap_or(&pool.symbol).to_string();
@@ -124,7 +124,7 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
     if let Some(ref onchain) = cfg.onchain {
         for (dex_name, dex_cfg) in [("aerodrome", &onchain.aerodrome), ("uniswap", &onchain.uniswap)] {
             if let Some(pools) = dex_cfg {
-                for pool in &pools.pools {
+                for pool in &pools.validated_pools(dex_name) {
                     let parts: Vec<&str> = pool.symbol.split('_').collect();
                     if parts.len() == 2 {
                         let reprice = if USD_QUOTES.contains(&parts[1]) {

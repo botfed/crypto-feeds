@@ -46,7 +46,7 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
             ("uniswap", &onchain.uniswap),
         ] {
             if let Some(pools) = dex_cfg {
-                for pool in &pools.pools {
+                for pool in &pools.validated_pools(dex_name) {
                     let parts: Vec<&str> = pool.symbol.split('_').collect();
                     if parts.len() == 2 {
                         let reprice = if USD_QUOTES.contains(&parts[1]) {

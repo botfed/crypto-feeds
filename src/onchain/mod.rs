@@ -83,18 +83,22 @@ impl DexPoolsConfig {
     pub fn validated_pools(&self, dex_name: &str) -> Vec<PoolEntry> {
         self.pools
             .iter()
-            .filter(|e| {
-                if e.address.parse::<Address>().is_ok() {
-                    true
-                } else {
+            .filter_map(|e| {
+                if e.address.parse::<Address>().is_err() {
                     warn!(
                         "{} pool '{}': invalid address '{}', skipping",
                         dex_name, e.symbol, e.address,
                     );
-                    false
+                    return None;
                 }
+                // Normalize wrapped tokens: CLANKER_WETH → CLANKER_ETH
+                let mut entry = e.clone();
+                let parts: Vec<&str> = entry.symbol.split('_').collect();
+                if parts.len() == 2 {
+                    entry.symbol = format!("{}_{}", normalize_token(parts[0]), normalize_token(parts[1]));
+                }
+                Some(entry)
             })
-            .cloned()
             .collect()
     }
 }
@@ -232,6 +236,18 @@ pub async fn do_try_multicall(provider: &impl Provider, calls: Vec<Call3>) -> Re
 }
 
 // ---------------------------------------------------------------------------
+// Token symbol normalisation (WETH → ETH, WBTC/cbBTC → BTC)
+// ---------------------------------------------------------------------------
+
+pub fn normalize_token(sym: &str) -> &str {
+    match sym {
+        "WETH" => "ETH",
+        "WBTC" | "cbBTC" => "BTC",
+        other => other,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Init: fetch static pool config via multicall
 // ---------------------------------------------------------------------------
 
@@ -366,14 +382,6 @@ pub async fn fetch_pool_configs(
         token_set.insert(addr, TokenInfo { decimals, symbol: sym });
     }
 
-    fn normalize_token(sym: &str) -> &str {
-        match sym {
-            "WETH" => "ETH",
-            "WBTC" | "cbBTC" => "BTC",
-            other => other,
-        }
-    }
-
     // Log a single summary of skipped pools (if any)
     let skipped = entries.len() - resolved.len();
     if skipped > 0 {
@@ -421,16 +429,6 @@ pub async fn fetch_pool_configs(
                 }
             };
 
-            // Normalize the label so BRETT_WETH → BRETT_ETH, etc.
-            let label = {
-                let parts: Vec<&str> = entry.symbol.split('_').collect();
-                if parts.len() == 2 {
-                    format!("{}_{}", normalize_token(parts[0]), normalize_token(parts[1]))
-                } else {
-                    entry.symbol.clone()
-                }
-            };
-
             PoolConfig {
                 address: *addr,
                 token0: raw.token0,
@@ -443,7 +441,7 @@ pub async fn fetch_pool_configs(
                 fee: raw.fee,
                 invert_price,
                 symbol_id,
-                label,
+                label: entry.symbol.clone(),
             }
         })
         .collect();
