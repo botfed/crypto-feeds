@@ -6,7 +6,7 @@ spot:
 
 perp:
   binance:     ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT", "KAITO_USDT", "CLANKER_USDT"]
-  bingx:       ["CLANKER_USDT"]
+  bingx:       ["CLANKER_USDT", "KAITO_USDT"]
   okx:         ["BTC_USDT", "ETH_kSDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT", "KAITO_USDT"]
   bybit:       ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT", "CLANKER_USDT"]
   apex:        ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
