@@ -78,6 +78,12 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
         self.write_pos.store(pos + 1, Ordering::Release);
     }
 
+    /// Number of entries written so far. Use to detect new data (compare to previous value).
+    #[inline]
+    pub fn write_count(&self) -> u64 {
+        self.write_pos.load(Ordering::Acquire)
+    }
+
     /// Read the latest entry. Returns `None` if nothing has been written yet.
     pub fn latest(&self) -> Option<T> {
         let pos = self.write_pos.load(Ordering::Acquire);

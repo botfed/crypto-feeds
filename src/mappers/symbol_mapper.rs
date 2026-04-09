@@ -1,7 +1,5 @@
 use crate::market_data::InstrumentType;
 use anyhow::Result;
-use once_cell::sync::Lazy;
-use rustc_hash::FxHashMap;
 
 /// Converts between exchange-native and normalized symbol formats
 pub trait SymbolMapper: Send + Sync {

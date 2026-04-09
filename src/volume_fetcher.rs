@@ -308,6 +308,7 @@ async fn fetch_kucoin_spot(
 
 // Kucoin perp: use contracts/active endpoint (already fetched for multipliers)
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct KucoinContract {
     symbol: String,
     multiplier: f64,

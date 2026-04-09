@@ -158,6 +158,7 @@ impl ExchangeFeed for BybitFeed {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BybitResponse {
     topic: String,
     #[serde(rename = "type")]

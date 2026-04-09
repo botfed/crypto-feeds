@@ -5,7 +5,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::io::{BufWriter, Write as IoWrite};
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::time::{self, MissedTickBehavior};

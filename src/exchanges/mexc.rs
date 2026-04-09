@@ -57,6 +57,7 @@ fn parse_mexc_spot_bookticker_pb(data: &[u8]) -> Option<(String, f64, f64, f64, 
 //
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct MexcFuturesDepthMsg {
     channel: String,
     symbol: String,
@@ -66,6 +67,7 @@ struct MexcFuturesDepthMsg {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct MexcFuturesDepthData {
     #[serde(default)]
     asks: Vec<[f64; 3]>,

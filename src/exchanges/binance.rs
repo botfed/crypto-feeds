@@ -17,6 +17,7 @@ pub fn get_fees() -> ExchangeFees {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BinanceBookTicker {
     stream: String,
     data: BinanceBookTickerData,

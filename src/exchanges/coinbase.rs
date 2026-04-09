@@ -22,6 +22,7 @@ pub fn get_fees() -> ExchangeFees {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
+#[allow(dead_code)]
 enum CoinbaseMessage {
     #[serde(rename = "ticker")]
     Ticker(CoinbaseTicker),
@@ -34,6 +35,7 @@ enum CoinbaseMessage {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct CoinbaseTicker {
     product_id: String,
     best_bid: String,

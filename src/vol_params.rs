@@ -6,6 +6,7 @@ use std::path::Path;
 
 /// Raw YAML structure matching botfed-params/vol/{symbol}.yaml
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct RawVolFile {
     symbol: String,
     target_min: usize,

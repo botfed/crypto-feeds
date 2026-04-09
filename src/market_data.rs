@@ -305,6 +305,11 @@ impl MarketDataCollection {
         self.slots[*id].ring.get()?.latest()
     }
 
+    /// Number of ticks written for this symbol. Use to detect new data.
+    pub fn write_count(&self, id: &SymbolId) -> u64 {
+        self.slots[*id].ring.get().map(|r| r.write_count()).unwrap_or(0)
+    }
+
     /// Direct access to the underlying ring buffer for a symbol.
     pub fn get_buffer(&self, id: &SymbolId) -> Option<&RingBuffer<MarketData>> {
         self.slots[*id].ring.get().map(|b| b.as_ref())

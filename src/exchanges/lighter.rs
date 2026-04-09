@@ -122,6 +122,7 @@ impl LighterFeed {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct LighterOrderBookMsg {
     /// e.g. "order_book:{MARKET_INDEX}"
     channel: String,
@@ -133,6 +134,7 @@ struct LighterOrderBookMsg {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct LighterOrderBookData {
     code: i32,
     asks: Vec<PriceLevel>,
