@@ -146,11 +146,12 @@ pub async fn load_1m_bars_with_backfill(
     let mut bars = load_1m_bars(bar_data_dir, symbol, warmup_days)?;
     let now_ms = Utc::now().timestamp_millis();
 
+    let earliest_needed_ms = now_ms - (warmup_days as i64) * 86_400_000;
     let last_bar_ms = bars.last().map(|b| b.open_time_ms).unwrap_or(0);
-    let gap_minutes = (now_ms - last_bar_ms) / 60_000;
+    let fetch_from = (last_bar_ms + 60_000).max(earliest_needed_ms);
+    let gap_minutes = (now_ms - fetch_from) / 60_000;
 
     if gap_minutes > 1 {
-        let fetch_from = last_bar_ms + 60_000;
         info!(
             "{}: disk bars end {}m ago, fetching from Binance API",
             symbol, gap_minutes
