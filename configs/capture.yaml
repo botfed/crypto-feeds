@@ -1,7 +1,7 @@
 spot:
-  binance:  ["BTC_USDT", "ETH_USDT", "KAITO_USDT"]
-  bybit:    ["BTC_USDT", "ETH_USDT"]
-  okx:      ["BTC_USDT", "ETH_USDT"]
+  binance:  ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "KAITO_USDT"]
+  bybit:    ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
+  okx:      ["BTC_USDT", "ETH_USDT", "AIXBT_USDT"]
   coinbase: ["BTC_USD",  "ETH_USD", "CLANKER_USD"]
 
 perp:
