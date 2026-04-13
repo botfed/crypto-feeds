@@ -920,7 +920,7 @@ impl PyAppConfig {
         }
 
         Ok(Self {
-            config: AppConfig { spot, perp, sample_interval_ms: 10, onchain: None, vol_models: None },
+            config: AppConfig { spot, perp, sample_interval_ms: 10, onchain: None, vol_models: None, fair_price: Default::default(), clock_correction: Default::default() },
         })
     }
 
