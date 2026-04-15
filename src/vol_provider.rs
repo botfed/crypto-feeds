@@ -1,7 +1,10 @@
-use crate::bar_manager::BarBuilder;
+use crate::bar_manager::{BarBuilder, BarManager};
 use crate::historical_bars::Bar;
-use crate::vol_engine::raw_gk;
+use crate::vol_engine::{deseasoned_gk, raw_gk};
+use crate::vol_params::{HarParams, SeasonalFactors};
+use chrono::{Datelike, Timelike, Utc};
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 const MS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0 * 1000.0;
 const LN2: f64 = std::f64::consts::LN_2;
@@ -22,6 +25,11 @@ pub enum VolProvider {
     /// GK variance on fair-price OHLC bars, EWMA smoothed in log-space.
     GkEwma {
         states: Vec<GkEwmaVolState>,
+    },
+    /// HAR (Heterogeneous Autoregressive) model — stateless regression over bar history.
+    /// Lock-free: reads completed bars from BarManager (lock-free ring buffers).
+    Har {
+        states: Vec<HarVolState>,
     },
 }
 
@@ -48,6 +56,15 @@ pub struct GkEwmaVolState {
     ewma_log_gk_sq: f64,
     /// Rolling buffer of (price, ts_ms) for virtual head — covers target_min minutes.
     snap_buf: VecDeque<(f64, i64)>,
+}
+
+pub struct HarVolState {
+    har_params: HarParams,
+    seasonality: SeasonalFactors,
+    target_min: usize,
+    symbol: String,
+    bars: Arc<BarManager>,
+    cached_ann_vol: f64,
 }
 
 impl VolProvider {
@@ -99,6 +116,26 @@ impl VolProvider {
         VolProvider::GkEwma { states }
     }
 
+    /// Build a HAR provider. One state per (symbol, params) pair.
+    pub fn new_har(
+        groups: Vec<(String, HarParams, SeasonalFactors, usize)>, // (symbol, params, seasonality, target_min)
+        bars: Arc<BarManager>,
+        seed_ann_vol: f64,
+    ) -> Self {
+        let states = groups
+            .into_iter()
+            .map(|(symbol, har_params, seasonality, target_min)| HarVolState {
+                har_params,
+                seasonality,
+                target_min,
+                symbol,
+                bars: Arc::clone(&bars),
+                cached_ann_vol: seed_ann_vol,
+            })
+            .collect();
+        VolProvider::Har { states }
+    }
+
     /// Current h_per_ms (per-millisecond transition variance) for a group.
     pub fn h_per_ms(&self, group_idx: usize) -> f64 {
         match self {
@@ -108,6 +145,10 @@ impl VolProvider {
             }
             VolProvider::Ewma { states } => states[group_idx].h_per_ms,
             VolProvider::GkEwma { states } => states[group_idx].h_per_ms,
+            VolProvider::Har { states } => {
+                let av = states[group_idx].cached_ann_vol;
+                av * av / MS_PER_YEAR
+            }
         }
     }
 
@@ -121,6 +162,7 @@ impl VolProvider {
             VolProvider::GkEwma { states } => {
                 (states[group_idx].h_per_ms * MS_PER_YEAR).sqrt()
             }
+            VolProvider::Har { states } => states[group_idx].cached_ann_vol,
         }
     }
 
@@ -212,6 +254,43 @@ impl VolProvider {
                     }
                 }
             }
+            VolProvider::Har { states } => {
+                let s = &mut states[group_idx];
+                let Some(view) = s.bars.get_bars(&s.symbol) else { return };
+                let n = view.n_completed();
+                let max_w = s.har_params.max_window();
+                if n + 1 < max_w { return; }
+
+                let Some(virtual_head) = view.virtual_head(fair_price) else { return };
+                let completed = view.completed();
+
+                // HAR prediction in log-deseasoned space
+                let mut log_rvs = Vec::with_capacity(s.har_params.windows.len());
+                for &w in &s.har_params.windows {
+                    let mut rv_sum = deseasoned_gk(&virtual_head, &s.seasonality);
+                    let take = (w - 1).min(n);
+                    for i in 0..take {
+                        rv_sum += deseasoned_gk(&completed[n - 1 - i], &s.seasonality);
+                    }
+                    if rv_sum <= 0.0 { return; }
+                    log_rvs.push(rv_sum.ln());
+                }
+
+                let log_pred = s.har_params.predict(&log_rvs);
+
+                // Annualize
+                let now = Utc::now();
+                let seasonal_now = s.seasonality.factor(
+                    now.hour() as usize,
+                    now.weekday().num_days_from_monday() as usize,
+                );
+                let bars_per_year = MINUTES_PER_YEAR / s.target_min as f64;
+                let var_per_bar = log_pred.exp() * seasonal_now;
+                let ann_vol = (var_per_bar * bars_per_year).sqrt();
+                if ann_vol.is_finite() && ann_vol > 0.0 {
+                    s.cached_ann_vol = ann_vol;
+                }
+            }
         }
     }
 
@@ -234,6 +313,9 @@ impl VolProvider {
                     s.ewma_log_gk = log_gk;
                     s.ewma_log_gk_sq = log_gk * log_gk;
                 }
+            }
+            VolProvider::Har { states } => {
+                states[group_idx].cached_ann_vol = ann_vol;
             }
         }
     }
@@ -306,6 +388,112 @@ mod tests {
             "h_per_ms should be floored: {} vs {}",
             vp.h_per_ms(0),
             h_floor,
+        );
+    }
+
+    #[test]
+    fn test_har_matches_vol_engine() {
+        use crate::bar_manager::{BarManager, BarSymbol};
+        use crate::historical_bars::Bar;
+        use crate::market_data::{AllMarketData, Exchange};
+        use crate::vol_engine::VolEngine;
+        use crate::vol_params::{HarParams, SeasonalFactors, VolParams};
+
+        let target_min = 5;
+        let max_bars = 300;
+        let symbol_id: usize = 0;
+
+        // Create test HAR params (simple: 2 windows)
+        let har = HarParams {
+            intercept: -2.0,
+            betas: vec![0.4, 0.6],
+            windows: vec![1, 6],
+        };
+        let seasonality = SeasonalFactors {
+            f_h: [1.0; 24],
+            f_d: [1.0; 7],
+        };
+
+        // Create BarManager
+        let bar_mgr = Arc::new(BarManager::new(
+            vec![BarSymbol {
+                name: "HARTEST".to_string(),
+                exchange: Exchange::Binance,
+                symbol_id,
+            }],
+            target_min,
+            max_bars,
+        ));
+
+        // Generate synthetic bars (300 bars of 5-min OHLC)
+        let base_ts = 1_700_000_000_000i64; // some epoch ms
+        let bar_ms = target_min as i64 * 60_000;
+        let mut bars = Vec::new();
+        for i in 0..max_bars {
+            let t = base_ts + i as i64 * bar_ms;
+            let base_price = 100.0 + (i as f64 * 0.01).sin() * 2.0;
+            bars.push(Bar {
+                open_time_ms: t,
+                open: base_price,
+                high: base_price + 0.5,
+                low: base_price - 0.3,
+                close: base_price + 0.1,
+                volume: 1000.0,
+            });
+        }
+
+        // Warmup bar manager
+        bar_mgr.warmup("HARTEST", bars.clone(), &[]);
+
+        // Set up AllMarketData with a mid price for the virtual head
+        let market_data = AllMarketData::new();
+        let latest_mid = 100.5;
+        market_data.binance.push(
+            &symbol_id,
+            crate::market_data::MarketData {
+                bid: Some(100.0),
+                ask: Some(101.0),
+                bid_qty: Some(1.0),
+                ask_qty: Some(1.0),
+                exchange_ts_raw: None,
+                exchange_ts: None,
+                received_ts: None,
+            },
+        );
+
+        // --- VolEngine path ---
+        let vol_params = VolParams {
+            symbol: "HARTEST".to_string(),
+            target_min,
+            seasonality: seasonality.clone(),
+            har_ols: None,
+            har_qlike: Some(har.clone()),
+            garch: None,
+            ewma: None,
+        };
+        let mut param_map = std::collections::HashMap::new();
+        param_map.insert("HARTEST".to_string(), vol_params);
+        let vol_engine = VolEngine::new(param_map, Arc::clone(&bar_mgr));
+        vol_engine.replay_history();
+        let preds = vol_engine.predict_now("HARTEST", &market_data).unwrap();
+        let ve_vol = preds.har_qlike;
+
+        // --- VolProvider::Har path ---
+        let mut vp = VolProvider::new_har(
+            vec![("HARTEST".to_string(), har, seasonality, target_min)],
+            Arc::clone(&bar_mgr),
+            1.0, // seed (will be overwritten by update)
+        );
+        let ts_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        vp.update(0, latest_mid, ts_ns);
+        let vp_vol = vp.ann_vol(0);
+
+        // Compare — should be identical (same math, same data)
+        let diff_pct = ((ve_vol - vp_vol) / ve_vol).abs() * 100.0;
+        assert!(
+            diff_pct < 0.01,
+            "VolEngine ({:.6}) vs VolProvider ({:.6}) differ by {:.4}%",
+            ve_vol, vp_vol, diff_pct,
         );
     }
 
