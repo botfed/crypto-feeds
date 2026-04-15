@@ -26,7 +26,7 @@ pub struct BarBuilder {
     target_min: usize,
     max_bars: usize,
     max_1m: usize,
-    total_produced: usize,
+    pub(crate) total_produced: usize,
 }
 
 impl BarBuilder {

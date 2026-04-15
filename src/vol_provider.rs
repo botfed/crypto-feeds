@@ -1,10 +1,9 @@
-use crate::bar_manager::{BarBuilder, BarManager};
+use crate::bar_manager::BarBuilder;
 use crate::historical_bars::Bar;
 use crate::vol_engine::{deseasoned_gk, raw_gk};
 use crate::vol_params::{HarParams, SeasonalFactors};
 use chrono::{Datelike, Timelike, Utc};
 use std::collections::VecDeque;
-use std::sync::Arc;
 
 const MS_PER_YEAR: f64 = 365.25 * 24.0 * 3600.0 * 1000.0;
 const LN2: f64 = std::f64::consts::LN_2;
@@ -62,8 +61,7 @@ pub struct HarVolState {
     har_params: HarParams,
     seasonality: SeasonalFactors,
     target_min: usize,
-    symbol: String,
-    bars: Arc<BarManager>,
+    bar_builder: BarBuilder,
     cached_ann_vol: f64,
 }
 
@@ -116,21 +114,30 @@ impl VolProvider {
         VolProvider::GkEwma { states }
     }
 
-    /// Build a HAR provider. One state per (symbol, params) pair.
+    /// Build a HAR provider. One state per group.
+    /// Each group gets its own BarBuilder pre-populated with warmup bars.
     pub fn new_har(
-        groups: Vec<(String, HarParams, SeasonalFactors, usize)>, // (symbol, params, seasonality, target_min)
-        bars: Arc<BarManager>,
+        groups: Vec<(HarParams, SeasonalFactors, usize, Vec<Bar>)>, // (params, seasonality, target_min, warmup_bars)
         seed_ann_vol: f64,
     ) -> Self {
         let states = groups
             .into_iter()
-            .map(|(symbol, har_params, seasonality, target_min)| HarVolState {
-                har_params,
-                seasonality,
-                target_min,
-                symbol,
-                bars: Arc::clone(&bars),
-                cached_ann_vol: seed_ann_vol,
+            .map(|(har_params, seasonality, target_min, warmup_bars)| {
+                let max_bars = har_params.max_window() + 16;
+                let mut builder = BarBuilder::new(target_min, max_bars);
+                // Pre-populate with historical bars
+                let start = warmup_bars.len().saturating_sub(max_bars);
+                for bar in &warmup_bars[start..] {
+                    builder.completed.push_back(*bar);
+                }
+                builder.total_produced = builder.completed.len();
+                HarVolState {
+                    har_params,
+                    seasonality,
+                    target_min,
+                    bar_builder: builder,
+                    cached_ann_vol: seed_ann_vol,
+                }
             })
             .collect();
         VolProvider::Har { states }
@@ -256,13 +263,14 @@ impl VolProvider {
             }
             VolProvider::Har { states } => {
                 let s = &mut states[group_idx];
-                let Some(view) = s.bars.get_bars(&s.symbol) else { return };
-                let n = view.n_completed();
-                let max_w = s.har_params.max_window();
-                if n + 1 < max_w { return; }
+                let ts_ms = snap_ts_ns / 1_000_000;
+                s.bar_builder.feed(fair_price, ts_ms);
 
-                let Some(virtual_head) = view.virtual_head(fair_price) else { return };
-                let completed = view.completed();
+                let n = s.bar_builder.n_completed();
+                if n + 1 < s.har_params.max_window() { return; }
+
+                let Some(virtual_head) = s.bar_builder.virtual_head(fair_price) else { return };
+                let completed = s.bar_builder.completed();
 
                 // HAR prediction in log-deseasoned space
                 let mut log_rvs = Vec::with_capacity(s.har_params.windows.len());
@@ -398,6 +406,7 @@ mod tests {
         use crate::market_data::{AllMarketData, Exchange};
         use crate::vol_engine::VolEngine;
         use crate::vol_params::{HarParams, SeasonalFactors, VolParams};
+        use std::sync::Arc;
 
         let target_min = 5;
         let max_bars = 300;
@@ -482,8 +491,7 @@ mod tests {
 
         // --- VolProvider::Har path ---
         let mut vp = VolProvider::new_har(
-            vec![("HARTEST".to_string(), har, seasonality, target_min)],
-            Arc::clone(&bar_mgr),
+            vec![(har, seasonality, target_min, bars.clone())],
             1.0, // seed (will be overwritten by update)
         );
         let ts_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
