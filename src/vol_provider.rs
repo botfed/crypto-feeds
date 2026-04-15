@@ -442,8 +442,10 @@ mod tests {
             });
         }
 
-        // Warmup bar manager
+        // Warmup bar manager with target bars + feed a live tick so has_ticks() = true
         bar_mgr.warmup("HARTEST", bars.clone(), &[]);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        bar_mgr.feed_tick("HARTEST", 100.5, now_ms);
 
         // Set up AllMarketData with a mid price for the virtual head
         let market_data = AllMarketData::new();

@@ -352,6 +352,15 @@ impl BarManager {
         self.inner.read().unwrap().target_min
     }
 
+    /// Feed a single tick to a symbol's bar builder. Test only.
+    #[cfg(test)]
+    pub fn feed_tick(&self, symbol: &str, price: f64, ts_ms: i64) {
+        let mut inner = self.inner.write().unwrap();
+        if let Some(state) = inner.symbols.get_mut(symbol) {
+            state.builder.feed(price, ts_ms);
+        }
+    }
+
     /// Spawn the tick→bar maintenance task.
     pub fn spawn_maintenance(
         &self,
