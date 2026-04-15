@@ -102,6 +102,7 @@ impl ExchangeFeed for BinanceFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: chrono::DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
         // Some exchanges send non-data frames; Binance combined stream sends JSON objects
         // Return Ok(None) on parse failure? Here we propagate error so caller can log.
@@ -148,6 +149,7 @@ impl ExchangeFeed for BinanceFeed {
                     exchange_ts_raw: exchange_ts,
                     exchange_ts: None,
                     received_ts: Some(received_ts),
+                    received_instant: Some(received_instant),
                 };
 
                 Ok(Some((msg.data.symbol, market_data)))

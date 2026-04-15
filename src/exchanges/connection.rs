@@ -100,6 +100,7 @@ pub trait ExchangeFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: chrono::DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>>;
 }
 
@@ -276,12 +277,13 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
             }
 
             msg = read.next() => {
+                let received_instant = std::time::Instant::now();
                 let received_ts = Utc::now();
                 last_message_time = received_ts;
 
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        match feed.parse_message(WireMessage::Text(text.as_str()), received_ts) {
+                        match feed.parse_message(WireMessage::Text(text.as_str()), received_ts, received_instant) {
                             Ok(Some((sym, md))) => {
                                 if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
                                     let stale = do_ts_dedup && md.exchange_ts_raw.map_or(false, |ts| {
@@ -312,7 +314,7 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                     }
 
                     Some(Ok(Message::Binary(bytes))) => {
-                        match feed.parse_message(WireMessage::Binary(&bytes), received_ts) {
+                        match feed.parse_message(WireMessage::Binary(&bytes), received_ts, received_instant) {
                             Ok(Some((sym, md))) => {
                                 if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
                                     let stale = do_ts_dedup && md.exchange_ts_raw.map_or(false, |ts| {

@@ -68,6 +68,7 @@ impl ExchangeFeed for KrakenFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
         match self.itype {
             InstrumentType::Spot => {
@@ -140,6 +141,7 @@ impl ExchangeFeed for KrakenFeed {
                                                     exchange_ts_raw: exchange_ts,
                                                     exchange_ts: None,
                                                     received_ts: Some(received_ts),
+                                                    received_instant: Some(received_instant),
                                                 };
                                                 return Ok(Some((symbol.to_string(), market_data)));
                                             }
@@ -240,6 +242,7 @@ impl ExchangeFeed for KrakenFuturesFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => {
@@ -276,6 +279,7 @@ impl ExchangeFeed for KrakenFuturesFeed {
                     exchange_ts_raw: exchange_ts,
                     exchange_ts: None,
                     received_ts: Some(received_ts),
+                    received_instant: Some(received_instant),
                 };
 
                 // PI_XBTUSD -> BTCUSD for registry lookup

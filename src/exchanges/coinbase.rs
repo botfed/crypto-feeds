@@ -101,6 +101,7 @@ impl ExchangeFeed for CoinbaseFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
         // Coinbase sends multiple message types; we parse them all and filter later.
         match msg {
@@ -136,6 +137,7 @@ impl ExchangeFeed for CoinbaseFeed {
                             exchange_ts_raw: exchange_ts,
                             exchange_ts: None,
                             received_ts: Some(received_ts),
+                            received_instant: Some(received_instant),
                         };
 
                         return Ok(Some((ticker.product_id, market_data)));
@@ -251,6 +253,7 @@ impl ExchangeFeed for CoinbaseAdvancedFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => {
@@ -293,6 +296,7 @@ impl ExchangeFeed for CoinbaseAdvancedFeed {
                             exchange_ts_raw: exchange_ts,
                             exchange_ts: None,
                             received_ts: Some(received_ts),
+                            received_instant: Some(received_instant),
                         };
 
                         return Ok(Some((sym, market_data)));

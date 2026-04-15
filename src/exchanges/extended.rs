@@ -71,6 +71,7 @@ impl ExchangeFeed for ExtendedBboFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
         let WireMessage::Text(text) = msg else {
             return Ok(None);
@@ -107,6 +108,7 @@ impl ExchangeFeed for ExtendedBboFeed {
             exchange_ts_raw: DateTime::from_timestamp_millis(ob.ts as i64),
             exchange_ts: None,
             received_ts: Some(received_ts),
+            received_instant: Some(received_instant),
         };
 
         Ok(Some((self.config_sym.clone(), md)))

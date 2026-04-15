@@ -159,6 +159,7 @@ impl ExchangeFeed for ApexFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => {
@@ -218,6 +219,7 @@ impl ExchangeFeed for ApexFeed {
                         exchange_ts_raw: exchange_ts,
                         exchange_ts: None,
                         received_ts: Some(received_ts),
+                        received_instant: Some(received_instant),
                     },
                 )))
             }

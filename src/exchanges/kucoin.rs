@@ -255,6 +255,7 @@ impl ExchangeFeed for KucoinFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => {
@@ -310,6 +311,7 @@ impl ExchangeFeed for KucoinFeed {
                             exchange_ts_raw: exchange_ts,
                             exchange_ts: None,
                             received_ts: Some(received_ts),
+                            received_instant: Some(received_instant),
                         },
                     )))
                 } else if topic.starts_with("/contractMarket/tickerV2:") {
@@ -348,6 +350,7 @@ impl ExchangeFeed for KucoinFeed {
                             exchange_ts_raw: exchange_ts,
                             exchange_ts: None,
                             received_ts: Some(received_ts),
+                            received_instant: Some(received_instant),
                         },
                     )))
                 } else {

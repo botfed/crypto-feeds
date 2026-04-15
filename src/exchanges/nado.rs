@@ -121,7 +121,7 @@ fn parse_x18(s: &str) -> Option<f64> {
     s.parse::<f64>().ok().map(|v| v / X18)
 }
 
-fn parse_bbo(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>) -> Option<(String, MarketData)> {
+fn parse_bbo(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>, received_instant: std::time::Instant) -> Option<(String, MarketData)> {
     if !text.contains("best_bid_offer") {
         return None;
     }
@@ -157,6 +157,7 @@ fn parse_bbo(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>) -> Option<
         exchange_ts_raw: exchange_ts,
         exchange_ts: None,
         received_ts: Some(received_ts),
+        received_instant: Some(received_instant),
     };
 
     Some((config_sym.to_string(), md))
@@ -234,7 +235,8 @@ async fn connect_and_stream(
 
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Some((sym, md)) = parse_bbo(feed, text.as_str(), received_ts) {
+                        let received_instant = std::time::Instant::now();
+                        if let Some((sym, md)) = parse_bbo(feed, text.as_str(), received_ts, received_instant) {
                             if let Some(&id) = REGISTRY.lookup(&sym, &feed.itype) {
                                 let stale = md.exchange_ts_raw.map_or(false, |ts| {
                                     last_exchange_ts.get(&id).map_or(false, |&last| ts < last)

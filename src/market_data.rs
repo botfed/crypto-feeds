@@ -5,8 +5,9 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Instant;
 
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct MarketData {
     pub bid: Option<f64>,
     pub ask: Option<f64>,
@@ -15,6 +16,22 @@ pub struct MarketData {
     pub exchange_ts_raw: Option<DateTime<Utc>>,
     pub exchange_ts: Option<DateTime<Utc>>,
     pub received_ts: Option<DateTime<Utc>>,
+    pub received_instant: Option<Instant>,
+}
+
+impl Default for MarketData {
+    fn default() -> Self {
+        Self {
+            bid: None,
+            ask: None,
+            bid_qty: None,
+            ask_qty: None,
+            exchange_ts_raw: None,
+            exchange_ts: None,
+            received_ts: None,
+            received_instant: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

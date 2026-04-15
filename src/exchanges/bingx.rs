@@ -84,7 +84,7 @@ fn parse_str_or_num(v: &Option<serde_json::Value>) -> Option<f64> {
     }
 }
 
-fn parse_bingx_text(text: &str, received_ts: DateTime<Utc>) -> Result<Option<(String, MarketData)>> {
+fn parse_bingx_text(text: &str, received_ts: DateTime<Utc>, received_instant: std::time::Instant) -> Result<Option<(String, MarketData)>> {
     if text == "Ping" || text == "Pong" || text == "ping" || text == "pong" {
         return Ok(None);
     }
@@ -144,6 +144,7 @@ fn parse_bingx_text(text: &str, received_ts: DateTime<Utc>) -> Result<Option<(St
             exchange_ts_raw: exchange_ts,
             exchange_ts: None,
             received_ts: Some(received_ts),
+            received_instant: Some(received_instant),
         },
     )))
 }
@@ -192,9 +193,10 @@ impl ExchangeFeed for BingxFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
         match msg {
-            WireMessage::Text(text) => parse_bingx_text(text, received_ts),
+            WireMessage::Text(text) => parse_bingx_text(text, received_ts, received_instant),
             WireMessage::Binary(data) => {
                 match decompress_gzip(data) {
                     Ok(text) => {
@@ -202,7 +204,7 @@ impl ExchangeFeed for BingxFeed {
                             self.got_ping.store(true, std::sync::atomic::Ordering::Relaxed);
                             return Ok(None);
                         }
-                        parse_bingx_text(&text, received_ts)
+                        parse_bingx_text(&text, received_ts, received_instant)
                     }
                     Err(e) => {
                         error!("BingX gzip decompress error: {}", e);

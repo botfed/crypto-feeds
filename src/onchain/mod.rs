@@ -203,6 +203,7 @@ impl PoolState {
             exchange_ts_raw: Some(self.block_ts),
             exchange_ts: None,
             received_ts: Some(received_ts),
+            received_instant: None,
         }
     }
 }

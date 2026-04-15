@@ -235,6 +235,7 @@ impl ExchangeFeed for LighterFeed {
         &self,
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
         let WireMessage::Text(text) = msg else {
             return Ok(None);
@@ -329,6 +330,7 @@ impl ExchangeFeed for LighterFeed {
             exchange_ts_raw: exchange_ts,
             exchange_ts: None,
             received_ts: Some(received_ts),
+            received_instant: Some(received_instant),
         };
 
         Ok(Some((symbol.to_string(), md)))
