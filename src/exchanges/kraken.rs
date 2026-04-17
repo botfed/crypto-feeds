@@ -142,6 +142,7 @@ impl ExchangeFeed for KrakenFeed {
                                                     exchange_ts: None,
                                                     received_ts: Some(received_ts),
                                                     received_instant: Some(received_instant),
+                    feed_latency_ns: 0,
                                                 };
                                                 return Ok(Some((symbol.to_string(), market_data)));
                                             }
@@ -280,6 +281,7 @@ impl ExchangeFeed for KrakenFuturesFeed {
                     exchange_ts: None,
                     received_ts: Some(received_ts),
                     received_instant: Some(received_instant),
+                    feed_latency_ns: 0,
                 };
 
                 // PI_XBTUSD -> BTCUSD for registry lookup

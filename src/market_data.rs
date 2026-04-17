@@ -17,6 +17,8 @@ pub struct MarketData {
     pub exchange_ts: Option<DateTime<Utc>>,
     pub received_ts: Option<DateTime<Utc>>,
     pub received_instant: Option<Instant>,
+    /// Feed processing latency: WS recv → ring buffer write (nanoseconds)
+    pub feed_latency_ns: u64,
 }
 
 impl Default for MarketData {
@@ -30,6 +32,7 @@ impl Default for MarketData {
             exchange_ts: None,
             received_ts: None,
             received_instant: None,
+            feed_latency_ns: 0,
         }
     }
 }

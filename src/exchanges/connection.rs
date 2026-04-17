@@ -284,7 +284,7 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         match feed.parse_message(WireMessage::Text(text.as_str()), received_ts, received_instant) {
-                            Ok(Some((sym, md))) => {
+                            Ok(Some((sym, mut md))) => {
                                 if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
                                     let stale = do_ts_dedup && md.exchange_ts_raw.map_or(false, |ts| {
                                         last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
@@ -295,6 +295,7 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                                                 last_exchange_ts.insert(id, ts);
                                             }
                                         }
+                                        md.feed_latency_ns = received_instant.elapsed().as_nanos() as u64;
                                         data.push(&id, md);
                                     }
                                 }
@@ -315,7 +316,7 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
 
                     Some(Ok(Message::Binary(bytes))) => {
                         match feed.parse_message(WireMessage::Binary(&bytes), received_ts, received_instant) {
-                            Ok(Some((sym, md))) => {
+                            Ok(Some((sym, mut md))) => {
                                 if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
                                     let stale = do_ts_dedup && md.exchange_ts_raw.map_or(false, |ts| {
                                         last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
@@ -326,6 +327,7 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                                                 last_exchange_ts.insert(id, ts);
                                             }
                                         }
+                                        md.feed_latency_ns = received_instant.elapsed().as_nanos() as u64;
                                         data.push(&id, md);
                                     }
                                 }

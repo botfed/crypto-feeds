@@ -150,6 +150,7 @@ impl ExchangeFeed for BinanceFeed {
                     exchange_ts: None,
                     received_ts: Some(received_ts),
                     received_instant: Some(received_instant),
+                    feed_latency_ns: 0,
                 };
 
                 Ok(Some((msg.data.symbol, market_data)))

@@ -245,6 +245,7 @@ impl ExchangeFeed for MexcFeed {
                             exchange_ts: None,
                             received_ts: Some(received_ts),
                             received_instant: Some(received_instant),
+                    feed_latency_ns: 0,
                         };
                         Ok(Some((symbol, md)))
                     } else {
@@ -327,6 +328,7 @@ impl ExchangeFeed for MexcFeed {
                     exchange_ts: None,
                     received_ts: Some(received_ts),
                     received_instant: Some(received_instant),
+                    feed_latency_ns: 0,
                 };
 
                 Ok(Some((depth.symbol, md)))

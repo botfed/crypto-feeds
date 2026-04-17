@@ -158,6 +158,7 @@ fn parse_bbo(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>, received_i
         exchange_ts: None,
         received_ts: Some(received_ts),
         received_instant: Some(received_instant),
+                    feed_latency_ns: 0,
     };
 
     Some((config_sym.to_string(), md))

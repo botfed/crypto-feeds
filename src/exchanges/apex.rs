@@ -220,6 +220,7 @@ impl ExchangeFeed for ApexFeed {
                         exchange_ts: None,
                         received_ts: Some(received_ts),
                         received_instant: Some(received_instant),
+                    feed_latency_ns: 0,
                     },
                 )))
             }
