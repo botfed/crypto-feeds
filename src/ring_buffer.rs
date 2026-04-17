@@ -84,8 +84,22 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
         self.write_pos.load(Ordering::Acquire)
     }
 
-    /// Read the latest entry. Returns `None` if nothing has been written yet.
+    /// Read the latest entry without spinning. Tries the most recent slot once;
+    /// on contention (write in progress), falls back to the previous slot which
+    /// is guaranteed complete. Returns `None` only if nothing has been written.
+    #[inline]
     pub fn latest(&self) -> Option<T> {
+        let pos = self.write_pos.load(Ordering::Acquire);
+        if pos == 0 {
+            return None;
+        }
+        self.try_read_at(pos - 1)
+            .or_else(|| if pos >= 2 { self.try_read_at(pos - 2) } else { None })
+    }
+
+    /// Read the latest entry with retries on contention (up to 4 spin-loop attempts).
+    /// Use for diagnostic/non-hot-path reads where freshness matters more than latency.
+    pub fn latest_blocking(&self) -> Option<T> {
         let pos = self.write_pos.load(Ordering::Acquire);
         if pos == 0 {
             return None;
@@ -93,18 +107,16 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
         self.read_at(pos - 1)
     }
 
-    /// Non-blocking read of the latest entry. Tries once — returns `None` on
-    /// contention (write in progress or torn read) instead of retrying.
-    /// Use on hot paths where stale data from the previous tick is acceptable.
+    /// Single-attempt read at a position. Returns `None` on contention.
     #[inline]
-    pub fn latest_noblock(&self) -> Option<T> {
-        let pos = self.write_pos.load(Ordering::Acquire);
-        if pos == 0 {
+    fn try_read_at(&self, pos: u64) -> Option<T> {
+        let current = self.write_pos.load(Ordering::Acquire);
+        if pos >= current || current - pos > self.capacity as u64 {
             return None;
         }
-        let idx = self.index(pos - 1);
+        let idx = self.index(pos);
         let slot = &self.buf[idx];
-        let expected_seq = ((pos - 1) * 2) + 2;
+        let expected_seq = (pos * 2) + 2;
 
         let seq1 = slot.seq.load(Ordering::Acquire);
         if seq1 & 1 != 0 || seq1 != expected_seq {
