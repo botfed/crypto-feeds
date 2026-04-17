@@ -93,6 +93,34 @@ impl<T: Copy + Default + Send> RingBuffer<T> {
         self.read_at(pos - 1)
     }
 
+    /// Non-blocking read of the latest entry. Tries once — returns `None` on
+    /// contention (write in progress or torn read) instead of retrying.
+    /// Use on hot paths where stale data from the previous tick is acceptable.
+    #[inline]
+    pub fn latest_noblock(&self) -> Option<T> {
+        let pos = self.write_pos.load(Ordering::Acquire);
+        if pos == 0 {
+            return None;
+        }
+        let idx = self.index(pos - 1);
+        let slot = &self.buf[idx];
+        let expected_seq = ((pos - 1) * 2) + 2;
+
+        let seq1 = slot.seq.load(Ordering::Acquire);
+        if seq1 & 1 != 0 || seq1 != expected_seq {
+            return None;
+        }
+
+        let data = unsafe { *slot.data.get() };
+
+        let seq2 = slot.seq.load(Ordering::Acquire);
+        if seq1 != seq2 {
+            return None;
+        }
+
+        Some(data)
+    }
+
     /// Read a specific historical entry by its absolute position.
     ///
     /// Returns `None` if:

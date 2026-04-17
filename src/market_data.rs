@@ -339,6 +339,18 @@ impl MarketDataCollection {
         Some((bid + ask) / 2.0)
     }
 
+    /// Non-blocking latest — returns `None` on contention instead of retrying.
+    pub fn latest_noblock(&self, id: &SymbolId) -> Option<MarketData> {
+        self.slots[*id].ring.get()?.latest_noblock()
+    }
+
+    pub fn get_midquote_noblock(&self, id: &SymbolId) -> Option<f64> {
+        let md = self.latest_noblock(id)?;
+        let bid = md.bid?;
+        let ask = md.ask?;
+        Some((bid + ask) / 2.0)
+    }
+
     pub fn get_midquote_w_timestamps(
         &self,
         id: &SymbolId,
