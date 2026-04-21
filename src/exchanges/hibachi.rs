@@ -72,10 +72,19 @@ impl HibachiFeed {
 #[derive(Debug, Deserialize)]
 struct HibachiAskBidPrice {
     symbol: String,
+    data: HibachiAskBidData,
+}
+
+#[derive(Debug, Deserialize)]
+struct HibachiAskBidData {
     #[serde(rename = "askPrice")]
     ask_price: String,
     #[serde(rename = "bidPrice")]
     bid_price: String,
+    #[serde(rename = "askSize", default)]
+    ask_size: Option<String>,
+    #[serde(rename = "bidSize", default)]
+    bid_size: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -137,14 +146,16 @@ impl ExchangeFeed for HibachiFeed {
                     }
                 };
 
-                let bid = msg.bid_price.parse::<f64>().ok();
-                let ask = msg.ask_price.parse::<f64>().ok();
+                let bid = msg.data.bid_price.parse::<f64>().ok();
+                let ask = msg.data.ask_price.parse::<f64>().ok();
+                let bid_qty = msg.data.bid_size.as_deref().and_then(|s| s.parse::<f64>().ok());
+                let ask_qty = msg.data.ask_size.as_deref().and_then(|s| s.parse::<f64>().ok());
 
                 let market_data = MarketData {
                     bid,
                     ask,
-                    bid_qty: None,
-                    ask_qty: None,
+                    bid_qty,
+                    ask_qty,
                     exchange_ts_raw: None,
                     exchange_ts: None,
                     received_ts: Some(received_ts),

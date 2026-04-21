@@ -5,12 +5,13 @@ spot:
   coinbase: ["BTC_USD",  "ETH_USD", "CLANKER_USD"]
 
 perp:
-  binance:     ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT", "KAITO_USDT", "CLANKER_USDT"]
+  binance:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT", "KAITO_USDT", "CLANKER_USDT"]
   bingx:       ["CLANKER_USDT", "KAITO_USDT"]
-  okx:         ["BTC_USDT", "ETH_kSDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT", "KAITO_USDT"]
+  okx:         ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT", "KAITO_USDT"]
   bybit:       ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT", "CLANKER_USDT"]
   apex:        ["BTC_USDT", "ETH_USDT", "AIXBT_USDT", "SPX_USDT", "VIRTUAL_USDT"]
   hyperliquid: ["BTC_USDC", "ETH_USDC"]
+  hibachi:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
 
 onchain:
   rpc_env: "BASE_WSS_RPC"
@@ -44,48 +45,3 @@ onchain:
         symbol: "VIRTUAL_ETH"
       - address: "0xfBB6Eed8e7aa03B138556eeDaF5D271A5E1e43ef"
         symbol: "BTC_USDC"
-
-fair_price:
-  model: "adaptive_filter"
-  drain_interval_ms: 50    # background tick drain rate (-1 to disable)
-  sigma_mode: "ewma_spread"
-  sigma_scale: 0.1
-  liquidity_adjustment: true
-  liq_adj_exponent: 2
-  spread_ewma_halflife_s: 600.0
-  sigma_k_floor: 0
-  bias_process_noise_bps_per_sqrt_s: 0.01  # bias drift ~0.01 bps/√s
-  bias_init_uncertainty_bps: 0.5           # initial bias uncertainty
-  volume_adjustments:
-    bingx: 0.1
-    kucoin: 0.1
-    mexc: 0.1
-    apex: 0.1
-    extended: 0.1
-    nado: 0.1
-    bybit: 0.5
-    okx: 0.5
-    hyperliquid: 0.1
-
-  vol_engine:
-    type: "gk_ewma"
-    default_init_ann_vol: 1.0
-    halflife_s: 600.0
-    floor_ann: 0.50
-    bar_min: 1
-    max_bars: 1440
-    BTC:
-      init_ann_vol: 0.80
-      floor_ann: 0.30
-    ETH:
-      init_ann_vol: 1.27
-      floor_ann: 0.30
-    VIRTUAL:
-      init_ann_vol: 2.50
-      floor_ann: 1.00
-    AIXBT:
-      init_ann_vol: 3.16
-      floor_ann: 1.00
-    SPX:
-      init_ann_vol: 2.00
-      floor_ann: 1.00
