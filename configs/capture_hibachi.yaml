@@ -1,0 +1,5 @@
+perp:
+  binance:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
+  bybit:       ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
+  okx:         ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
+  hibachi:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
