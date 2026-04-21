@@ -93,7 +93,7 @@ fn build_feed_targets(cfg: &AppConfig, market_data: &AllMarketData) -> Vec<FeedT
 
 pub async fn run_feed_display(
     market_data: Arc<AllMarketData>,
-    cfg: AppConfig,
+    cfg: Arc<AppConfig>,
     shutdown: Arc<Notify>,
 ) -> Result<()> {
     let shutdown_fut = shutdown.notified();

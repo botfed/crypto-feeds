@@ -369,12 +369,13 @@ async fn main() -> Result<()> {
     };
 
     // Non-FP feed health display
+    let cfg = Arc::new(cfg);
     if args.display && !needs_fp {
         let md = Arc::clone(&market_data);
         let sd = Arc::clone(&shutdown);
-        let cfg_clone = cfg.clone();
+        let cfg_arc = Arc::clone(&cfg);
         handles.push(tokio::spawn(async move {
-            if let Err(e) = crypto_feeds::feed_display::run_feed_display(md, cfg_clone, sd).await {
+            if let Err(e) = crypto_feeds::feed_display::run_feed_display(md, cfg_arc, sd).await {
                 log::error!("feed display error: {:?}", e);
             }
         }));
