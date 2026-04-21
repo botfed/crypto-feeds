@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
     } else {
         env_logger::init();
     }
-    let needs_fp = args.with_fp || args.tick_dump || args.display;
+    let needs_fp = args.with_fp || args.tick_dump;
 
     let cfg: AppConfig = load_config(&args.config_path)
         .with_context(|| format!("loading {}", args.config_path))?;
@@ -367,6 +367,18 @@ async fn main() -> Result<()> {
     } else {
         (None, None)
     };
+
+    // Non-FP feed health display
+    if args.display && !needs_fp {
+        let md = Arc::clone(&market_data);
+        let sd = Arc::clone(&shutdown);
+        let cfg_clone = cfg.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = crypto_feeds::feed_display::run_feed_display(md, cfg_clone, sd).await {
+                log::error!("feed display error: {:?}", e);
+            }
+        }));
+    }
 
     // Warmup
     if args.warmup_secs > 0 {
