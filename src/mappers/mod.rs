@@ -11,6 +11,7 @@ mod okx;
 mod kucoin;
 mod bingx;
 mod apex;
+mod hibachi;
 mod hyperliquid;
 
 // Re-export the trait
@@ -29,6 +30,7 @@ pub use okx::OkxMapper;
 pub use kucoin::KucoinMapper;
 pub use bingx::BingxMapper;
 pub use apex::ApexMapper;
+pub use hibachi::HibachiMapper;
 pub use hyperliquid::HyperliquidMapper;
 
 use anyhow::Result;
@@ -48,6 +50,7 @@ pub fn get_mapper(exchange: &str) -> Result<Box<dyn SymbolMapper>> {
         "kucoin" => Ok(Box::new(KucoinMapper)),
         "bingx" => Ok(Box::new(BingxMapper)),
         "apex" => Ok(Box::new(ApexMapper)),
+        "hibachi" => Ok(Box::new(HibachiMapper)),
         "hyperliquid" => Ok(Box::new(HyperliquidMapper)),
         _ => anyhow::bail!("Unsupported exchange: {}", exchange),
     }

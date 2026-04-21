@@ -128,6 +128,7 @@ pub struct AllMarketData {
     pub hyperliquid: Arc<MarketDataCollection>,
     pub aerodrome: Arc<MarketDataCollection>,
     pub uniswap: Arc<MarketDataCollection>,
+    pub hibachi: Arc<MarketDataCollection>,
 }
 
 // Debug impl
@@ -154,6 +155,7 @@ pub enum Exchange {
     Hyperliquid,
     Aerodrome,
     Uniswap,
+    Hibachi,
 }
 
 impl Exchange {
@@ -174,6 +176,7 @@ impl Exchange {
             Exchange::Hyperliquid => "hyperliquid",
             Exchange::Aerodrome => "aerodrome",
             Exchange::Uniswap => "uniswap",
+            Exchange::Hibachi => "hibachi",
         }
     }
 
@@ -194,6 +197,7 @@ impl Exchange {
             "hyperliquid" => Some(Exchange::Hyperliquid),
             "aerodrome" => Some(Exchange::Aerodrome),
             "uniswap" => Some(Exchange::Uniswap),
+            "hibachi" => Some(Exchange::Hibachi),
             _ => None,
         }
     }
@@ -218,6 +222,7 @@ impl AllMarketData {
             (Hyperliquid, &self.hyperliquid),
             (Aerodrome, &self.aerodrome),
             (Uniswap, &self.uniswap),
+            (Hibachi, &self.hibachi),
         ]
         .into_iter()
     }
@@ -239,6 +244,7 @@ impl AllMarketData {
             Exchange::Hyperliquid => &self.hyperliquid,
             Exchange::Aerodrome => &self.aerodrome,
             Exchange::Uniswap => &self.uniswap,
+            Exchange::Hibachi => &self.hibachi,
         }
     }
 }
@@ -266,6 +272,7 @@ impl AllMarketData {
             hyperliquid: new_coll(),
             aerodrome: new_coll(),
             uniswap: new_coll(),
+            hibachi: new_coll(),
         }
     }
 }

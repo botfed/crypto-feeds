@@ -66,6 +66,15 @@ pub struct HarVolState {
 }
 
 impl VolProvider {
+    pub fn group_count(&self) -> usize {
+        match self {
+            VolProvider::Static { ann_vols } => ann_vols.len(),
+            VolProvider::Ewma { states } => states.len(),
+            VolProvider::GkEwma { states } => states.len(),
+            VolProvider::Har { states } => states.len(),
+        }
+    }
+
     /// Build a static provider from per-group annualized vols.
     pub fn new_static(ann_vols: Vec<f64>) -> Self {
         VolProvider::Static { ann_vols }
@@ -117,12 +126,11 @@ impl VolProvider {
     /// Build a HAR provider. One state per group.
     /// Each group gets its own BarBuilder pre-populated with warmup bars.
     pub fn new_har(
-        groups: Vec<(HarParams, SeasonalFactors, usize, Vec<Bar>)>, // (params, seasonality, target_min, warmup_bars)
-        seed_ann_vol: f64,
+        groups: Vec<(HarParams, SeasonalFactors, usize, Vec<Bar>, f64)>, // (params, seasonality, target_min, warmup_bars, seed_ann_vol)
     ) -> Self {
         let states = groups
             .into_iter()
-            .map(|(har_params, seasonality, target_min, warmup_bars)| {
+            .map(|(har_params, seasonality, target_min, warmup_bars, seed_ann_vol)| {
                 let max_bars = har_params.max_window() + 16;
                 let mut builder = BarBuilder::new(target_min, max_bars);
                 // Pre-populate with historical bars
@@ -491,8 +499,7 @@ mod tests {
 
         // --- VolProvider::Har path ---
         let mut vp = VolProvider::new_har(
-            vec![(har, seasonality, target_min, bars.clone())],
-            1.0, // seed (will be overwritten by update)
+            vec![(har, seasonality, target_min, bars.clone(), 1.0)],
         );
         let ts_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         vp.update(0, latest_mid, ts_ns);

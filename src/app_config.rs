@@ -364,6 +364,16 @@ pub fn load_spot(
             }
         }));
     }
+    if let Some(syms) = spot_syms("hibachi") {
+        let data = Arc::clone(&market_data.hibachi);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = hibachi::listen_spot_bbo(data, &symbol_refs, shutdown).await {
+                error!("Hibachi spot listener exited with error {:?}", e);
+            }
+        }));
+    }
     Ok(())
 }
 
@@ -530,6 +540,16 @@ pub fn load_perp(
             let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
             if let Err(e) = hyperliquid::listen_perp_bbo(data, &symbol_refs, shutdown).await {
                 error!("Hyperliquid perp listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = perp_syms("hibachi") {
+        let data = Arc::clone(&market_data.hibachi);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = hibachi::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("Hibachi perp listener exited with error {:?}", e);
             }
         }));
     }
