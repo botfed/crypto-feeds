@@ -98,6 +98,8 @@ pub struct AllSnapshotData {
     pub aerodrome: Arc<SnapshotCollection>,
     pub uniswap: Arc<SnapshotCollection>,
     pub hibachi: Arc<SnapshotCollection>,
+    pub hotstuff: Arc<SnapshotCollection>,
+    pub zeroone: Arc<SnapshotCollection>,
 }
 
 impl std::fmt::Debug for AllSnapshotData {
@@ -126,6 +128,8 @@ impl AllSnapshotData {
             aerodrome: new_coll(),
             uniswap: new_coll(),
             hibachi: new_coll(),
+            hotstuff: new_coll(),
+            zeroone: new_coll(),
         }
     }
 
@@ -147,6 +151,8 @@ impl AllSnapshotData {
             Exchange::Aerodrome => &self.aerodrome,
             Exchange::Uniswap => &self.uniswap,
             Exchange::Hibachi => &self.hibachi,
+            Exchange::Hotstuff => &self.hotstuff,
+            Exchange::ZeroOne => &self.zeroone,
         }
     }
 
@@ -169,12 +175,14 @@ impl AllSnapshotData {
             (Aerodrome, &self.aerodrome),
             (Uniswap, &self.uniswap),
             (Hibachi, &self.hibachi),
+            (Hotstuff, &self.hotstuff),
+            (ZeroOne, &self.zeroone),
         ]
         .into_iter()
     }
 }
 
-const NUM_EXCHANGES: usize = 16;
+const NUM_EXCHANGES: usize = 18;
 
 fn exchange_index(exchange: &Exchange) -> usize {
     match exchange {
@@ -194,6 +202,8 @@ fn exchange_index(exchange: &Exchange) -> usize {
         Exchange::Aerodrome => 13,
         Exchange::Uniswap => 14,
         Exchange::Hibachi => 15,
+        Exchange::Hotstuff => 16,
+        Exchange::ZeroOne => 17,
     }
 }
 

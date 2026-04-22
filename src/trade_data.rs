@@ -155,6 +155,8 @@ pub struct AllTradeData {
     pub aerodrome: Arc<TradeDataCollection>,
     pub uniswap: Arc<TradeDataCollection>,
     pub hibachi: Arc<TradeDataCollection>,
+    pub hotstuff: Arc<TradeDataCollection>,
+    pub zeroone: Arc<TradeDataCollection>,
 }
 
 impl std::fmt::Debug for AllTradeData {
@@ -183,6 +185,8 @@ impl AllTradeData {
             (Aerodrome, &self.aerodrome),
             (Uniswap, &self.uniswap),
             (Hibachi, &self.hibachi),
+            (Hotstuff, &self.hotstuff),
+            (ZeroOne, &self.zeroone),
         ]
         .into_iter()
     }
@@ -205,6 +209,8 @@ impl AllTradeData {
             Exchange::Aerodrome => &self.aerodrome,
             Exchange::Uniswap => &self.uniswap,
             Exchange::Hibachi => &self.hibachi,
+            Exchange::Hotstuff => &self.hotstuff,
+            Exchange::ZeroOne => &self.zeroone,
         }
     }
 
@@ -231,6 +237,8 @@ impl AllTradeData {
             aerodrome: new_coll(),
             uniswap: new_coll(),
             hibachi: new_coll(),
+            hotstuff: new_coll(),
+            zeroone: new_coll(),
         }
     }
 }

@@ -82,4 +82,31 @@ impl OrderBook {
             .next()
             .map(|(price, &size)| (price.0, size))
     }
+
+    pub fn update_bids_f64(&mut self, updates: &[(f64, f64)]) {
+        for &(price, size) in updates {
+            let key = ordered_float::OrderedFloat(price);
+            if size == 0.0 {
+                self.bids.remove(&key);
+            } else {
+                self.bids.insert(key, size);
+            }
+        }
+    }
+
+    pub fn update_asks_f64(&mut self, updates: &[(f64, f64)]) {
+        for &(price, size) in updates {
+            let key = ordered_float::OrderedFloat(price);
+            if size == 0.0 {
+                self.asks.remove(&key);
+            } else {
+                self.asks.insert(key, size);
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.bids.clear();
+        self.asks.clear();
+    }
 }

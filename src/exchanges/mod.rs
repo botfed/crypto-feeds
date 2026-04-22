@@ -11,5 +11,7 @@ pub mod kucoin;
 pub mod bingx;
 pub mod apex;
 pub mod hibachi;
+pub mod hotstuff;
 pub mod hyperliquid;
+pub mod zeroone;
 pub mod connection;

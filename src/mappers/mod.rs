@@ -12,7 +12,9 @@ mod kucoin;
 mod bingx;
 mod apex;
 mod hibachi;
+mod hotstuff;
 mod hyperliquid;
+mod zeroone;
 
 // Re-export the trait
 pub use symbol_mapper::{SymbolMapper, parse_normalized};
@@ -31,7 +33,9 @@ pub use kucoin::KucoinMapper;
 pub use bingx::BingxMapper;
 pub use apex::ApexMapper;
 pub use hibachi::HibachiMapper;
+pub use hotstuff::HotstuffMapper;
 pub use hyperliquid::HyperliquidMapper;
+pub use zeroone::ZeroOneMapper;
 
 use anyhow::Result;
 
@@ -51,7 +55,9 @@ pub fn get_mapper(exchange: &str) -> Result<Box<dyn SymbolMapper>> {
         "bingx" => Ok(Box::new(BingxMapper)),
         "apex" => Ok(Box::new(ApexMapper)),
         "hibachi" => Ok(Box::new(HibachiMapper)),
+        "hotstuff" => Ok(Box::new(HotstuffMapper)),
         "hyperliquid" => Ok(Box::new(HyperliquidMapper)),
+        "zeroone" => Ok(Box::new(ZeroOneMapper)),
         _ => anyhow::bail!("Unsupported exchange: {}", exchange),
     }
 }

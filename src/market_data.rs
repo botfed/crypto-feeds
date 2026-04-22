@@ -155,6 +155,8 @@ pub struct AllMarketData {
     pub aerodrome: Arc<MarketDataCollection>,
     pub uniswap: Arc<MarketDataCollection>,
     pub hibachi: Arc<MarketDataCollection>,
+    pub hotstuff: Arc<MarketDataCollection>,
+    pub zeroone: Arc<MarketDataCollection>,
 }
 
 // Debug impl
@@ -182,6 +184,8 @@ pub enum Exchange {
     Aerodrome,
     Uniswap,
     Hibachi,
+    Hotstuff,
+    ZeroOne,
 }
 
 impl Exchange {
@@ -203,6 +207,8 @@ impl Exchange {
             Exchange::Aerodrome => "aerodrome",
             Exchange::Uniswap => "uniswap",
             Exchange::Hibachi => "hibachi",
+            Exchange::Hotstuff => "hotstuff",
+            Exchange::ZeroOne => "zeroone",
         }
     }
 
@@ -224,6 +230,8 @@ impl Exchange {
             "aerodrome" => Some(Exchange::Aerodrome),
             "uniswap" => Some(Exchange::Uniswap),
             "hibachi" => Some(Exchange::Hibachi),
+            "hotstuff" => Some(Exchange::Hotstuff),
+            "zeroone" => Some(Exchange::ZeroOne),
             _ => None,
         }
     }
@@ -249,6 +257,8 @@ impl AllMarketData {
             (Aerodrome, &self.aerodrome),
             (Uniswap, &self.uniswap),
             (Hibachi, &self.hibachi),
+            (Hotstuff, &self.hotstuff),
+            (ZeroOne, &self.zeroone),
         ]
         .into_iter()
     }
@@ -271,6 +281,8 @@ impl AllMarketData {
             Exchange::Aerodrome => &self.aerodrome,
             Exchange::Uniswap => &self.uniswap,
             Exchange::Hibachi => &self.hibachi,
+            Exchange::Hotstuff => &self.hotstuff,
+            Exchange::ZeroOne => &self.zeroone,
         }
     }
 }
@@ -299,6 +311,8 @@ impl AllMarketData {
             aerodrome: new_coll(),
             uniswap: new_coll(),
             hibachi: new_coll(),
+            hotstuff: new_coll(),
+            zeroone: new_coll(),
         }
     }
 }

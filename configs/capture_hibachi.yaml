@@ -1,9 +1,14 @@
 perp:
-  binance:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
-  bybit:       ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
-  okx:         ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
-  hibachi:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
+  binance:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT", "ZEC_USDT"]
+  bybit:       ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT", "ZEC_USDT"]
+  okx:         ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT", "ZEC_USDT"]
+  hibachi:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT", "ZEC_USDT"]
+  hotstuff:    ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT", "ZEC_USDT"]
+  zeroone:     ["BTC_USDT", "ETH_USDT", "SOL_USDT"]
 
 trades:
-  binance:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
-  bybit:       ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT"]
+  binance:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT", "ZEC_USDT"]
+  bybit:       ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT", "ZEC_USDT"]
+  hibachi:     ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT", "ZEC_USDT"]
+  hotstuff:    ["BTC_USDT", "ETH_USDT", "SOL_USDT", "HYPE_USDT", "SUI_USDT", "BNB_USDT", "XRP_USDT", "ZEC_USDT"]
+  zeroone:     ["BTC_USDT", "ETH_USDT", "SOL_USDT"]

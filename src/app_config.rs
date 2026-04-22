@@ -573,6 +573,26 @@ pub fn load_perp(
             }
         }));
     }
+    if let Some(syms) = perp_syms("hotstuff") {
+        let data = Arc::clone(&market_data.hotstuff);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = hotstuff::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("Hotstuff perp listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = perp_syms("zeroone") {
+        let data = Arc::clone(&market_data.zeroone);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = zeroone::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("ZeroOne perp listener exited with error {:?}", e);
+            }
+        }));
+    }
     Ok(())
 }
 
@@ -602,6 +622,26 @@ pub fn load_trades(
             let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
             if let Err(e) = bybit::listen_perp_trades(data, &symbol_refs, shutdown).await {
                 error!("Bybit perp trades listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = trade_syms("hotstuff") {
+        let data = Arc::clone(&trade_data.hotstuff);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = hotstuff::listen_perp_trades(data, &symbol_refs, shutdown).await {
+                error!("Hotstuff perp trades listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = trade_syms("zeroone") {
+        let data = Arc::clone(&trade_data.zeroone);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = zeroone::listen_perp_trades(data, &symbol_refs, shutdown).await {
+                error!("ZeroOne perp trades listener exited with error {:?}", e);
             }
         }));
     }
