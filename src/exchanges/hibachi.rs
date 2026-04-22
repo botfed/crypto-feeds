@@ -3,6 +3,7 @@ use crate::exchanges::connection::{
     ConnectionConfig, ExchangeFeed, WireMessage, listen_with_reconnect,
 };
 use crate::market_data::{InstrumentType, MarketData, MarketDataCollection};
+use crate::orderbook::SyncBook;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures_util::SinkExt;
@@ -16,20 +17,21 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
 pub fn get_fees() -> ExchangeFees {
-    // Hibachi fee schedule (bps): maker, taker
     ExchangeFees::new(FeeSchedule::new(2.0, 5.0), FeeSchedule::new(2.0, 5.0))
 }
 
-#[derive(Clone)]
 struct HibachiFeed {
     itype: InstrumentType,
     /// Maps hibachi native symbol ("BTC/USDT-P") → registry-compatible symbol ("BTCUSDT")
     native_to_registry: HashMap<String, String>,
+    /// Per-symbol orderbooks (single-writer: one WS task)
+    books: HashMap<String, SyncBook>,
 }
 
 impl HibachiFeed {
     fn new(symbols: &[&str], itype: InstrumentType) -> Self {
         let mut native_to_registry = HashMap::new();
+        let mut books = HashMap::new();
         for sym in symbols {
             let parts: Vec<&str> = sym.split('_').collect();
             let (base, quote) = if parts.len() == 3 {
@@ -44,15 +46,16 @@ impl HibachiFeed {
                 _ => format!("{}/{}", base.to_uppercase(), quote.to_uppercase()),
             };
             let registry = format!("{}{}", base.to_uppercase(), quote.to_uppercase());
-            native_to_registry.insert(native, registry);
+            native_to_registry.insert(native.clone(), registry);
+            books.insert(native, SyncBook::new());
         }
         Self {
             itype,
             native_to_registry,
+            books,
         }
     }
 
-    /// Convert config symbol ("PERP_BTC_USDT" or "BTC_USDT") to hibachi native ("BTC/USDT-P")
     fn to_native(sym: &str, itype: InstrumentType) -> String {
         let parts: Vec<&str> = sym.split('_').collect();
         let (base, quote) = if parts.len() == 3 {
@@ -69,28 +72,45 @@ impl HibachiFeed {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Wire types
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Deserialize)]
-struct HibachiAskBidPrice {
+struct HibachiOrderbookMsg {
     symbol: String,
-    data: HibachiAskBidData,
+    #[serde(rename = "messageType")]
+    message_type: String,
+    #[serde(default)]
+    timestamp_ms: Option<u64>,
+    data: HibachiOrderbookData,
 }
 
 #[derive(Debug, Deserialize)]
-struct HibachiAskBidData {
-    #[serde(rename = "askPrice")]
-    ask_price: String,
-    #[serde(rename = "bidPrice")]
-    bid_price: String,
-    #[serde(rename = "askSize", default)]
-    ask_size: Option<String>,
-    #[serde(rename = "bidSize", default)]
-    bid_size: Option<String>,
+struct HibachiOrderbookData {
+    bid: HibachiSide,
+    ask: HibachiSide,
+}
+
+#[derive(Debug, Deserialize)]
+struct HibachiSide {
+    levels: Vec<HibachiLevel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HibachiLevel {
+    price: String,
+    quantity: String,
 }
 
 #[async_trait::async_trait]
 impl ExchangeFeed for HibachiFeed {
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
+    }
+
+    fn timestamp_dedup(&self) -> bool {
+        false // incremental depth feed
     }
 
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
@@ -106,7 +126,7 @@ impl ExchangeFeed for HibachiFeed {
             .iter()
             .map(|sym| {
                 let native = Self::to_native(sym, self.itype);
-                json!({"symbol": native, "topic": "ask_bid_price"})
+                json!({"symbol": native, "topic": "orderbook"})
             })
             .collect();
 
@@ -128,50 +148,88 @@ impl ExchangeFeed for HibachiFeed {
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
     ) -> Result<Option<(String, MarketData)>> {
-        match msg {
-            WireMessage::Text(text) => {
-                // Quick filter: only parse ask_bid_price messages
-                if !text.contains("\"ask_bid_price\"") {
-                    debug!("Hibachi non-bbo message");
-                    return Ok(None);
-                }
+        let WireMessage::Text(text) = msg else {
+            return Ok(None);
+        };
 
-                let msg: HibachiAskBidPrice = serde_json::from_str(text)?;
-
-                let registry_sym = match self.native_to_registry.get(&msg.symbol) {
-                    Some(s) => s.clone(),
-                    None => {
-                        debug!("Unknown symbol from Hibachi: {}", msg.symbol);
-                        return Ok(None);
-                    }
-                };
-
-                let bid = msg.data.bid_price.parse::<f64>().ok();
-                let ask = msg.data.ask_price.parse::<f64>().ok();
-                let bid_qty = msg.data.bid_size.as_deref().and_then(|s| s.parse::<f64>().ok());
-                let ask_qty = msg.data.ask_size.as_deref().and_then(|s| s.parse::<f64>().ok());
-
-                let market_data = MarketData {
-                    bid,
-                    ask,
-                    bid_qty,
-                    ask_qty,
-                    exchange_ts_raw: None,
-                    exchange_ts: None,
-                    received_ts: Some(received_ts),
-                    received_instant: Some(received_instant),
-                    feed_latency_ns: 0,
-                };
-
-                Ok(Some((registry_sym, market_data)))
-            }
-            WireMessage::Binary(_) => Ok(None),
+        if !text.contains("\"orderbook\"") {
+            return Ok(None);
         }
-    }
 
-    fn timestamp_dedup(&self) -> bool {
-        // ask_bid_price messages may not have timestamps, disable dedup
-        false
+        let ob: HibachiOrderbookMsg = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+
+        let registry_sym = match self.native_to_registry.get(&ob.symbol) {
+            Some(s) => s.clone(),
+            None => {
+                debug!("Unknown symbol from Hibachi: {}", ob.symbol);
+                return Ok(None);
+            }
+        };
+
+        let Some(book_cell) = self.books.get(&ob.symbol) else {
+            return Ok(None);
+        };
+
+        // SAFETY: single writer — one WS task per feed.
+        let book = unsafe { book_cell.get_mut() };
+
+        let is_snapshot = ob.message_type == "Snapshot";
+        if is_snapshot {
+            book.bids.clear();
+            book.asks.clear();
+        }
+
+        if !ob.data.bid.levels.is_empty() {
+            book.update_bids(
+                ob.data.bid.levels.iter()
+                    .map(|l| (l.price.clone(), l.quantity.parse::<f64>().unwrap_or(0.0)))
+                    .collect(),
+            );
+        }
+        if !ob.data.ask.levels.is_empty() {
+            book.update_asks(
+                ob.data.ask.levels.iter()
+                    .map(|l| (l.price.clone(), l.quantity.parse::<f64>().unwrap_or(0.0)))
+                    .collect(),
+            );
+        }
+
+        let (bid, bid_qty) = book.best_bid()
+            .map(|(p, s)| (Some(p), Some(s)))
+            .unwrap_or((None, None));
+        let (ask, ask_qty) = book.best_ask()
+            .map(|(p, s)| (Some(p), Some(s)))
+            .unwrap_or((None, None));
+
+        if bid.is_none() || ask.is_none() {
+            return Ok(None);
+        }
+
+        if let (Some(b), Some(a)) = (bid, ask) {
+            if b >= a {
+                return Ok(None);
+            }
+        }
+
+        let exchange_ts = ob.timestamp_ms
+            .and_then(|ms| DateTime::from_timestamp_millis(ms as i64));
+
+        let md = MarketData {
+            bid,
+            ask,
+            bid_qty,
+            ask_qty,
+            exchange_ts_raw: exchange_ts,
+            exchange_ts: None,
+            received_ts: Some(received_ts),
+            received_instant: Some(received_instant),
+            feed_latency_ns: 0,
+        };
+
+        Ok(Some((registry_sym, md)))
     }
 }
 

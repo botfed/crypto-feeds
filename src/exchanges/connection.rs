@@ -251,6 +251,7 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
     let mut last_message_time = Utc::now();
     let do_ts_dedup = feed.timestamp_dedup();
     let mut last_exchange_ts: HashMap<SymbolId, chrono::DateTime<Utc>> = HashMap::new();
+    let mut warned_symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     let result = loop {
         tokio::select! {
@@ -298,6 +299,8 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                                         md.feed_latency_ns = received_instant.elapsed().as_nanos() as u64;
                                         data.push(&id, md);
                                     }
+                                } else if warned_symbols.insert(sym.clone()) {
+                                    warn!("{}: symbol '{}' not in registry, dropping ticks", feed_name, sym);
                                 }
                             }
                             Ok(None) => {
@@ -330,6 +333,8 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                                         md.feed_latency_ns = received_instant.elapsed().as_nanos() as u64;
                                         data.push(&id, md);
                                     }
+                                } else if warned_symbols.insert(sym.clone()) {
+                                    warn!("{}: symbol '{}' not in registry, dropping ticks", feed_name, sym);
                                 }
                             }
                             Ok(None) => {

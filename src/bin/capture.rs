@@ -259,6 +259,20 @@ async fn main() -> Result<()> {
     let cfg: AppConfig = load_config(&args.config_path)
         .with_context(|| format!("loading {}", args.config_path))?;
 
+    // Register all base assets from config so the symbol registry knows about them.
+    // Must happen before any code touches REGISTRY.
+    {
+        let mut bases = std::collections::HashSet::new();
+        for symbols in cfg.spot.values().chain(cfg.perp.values()) {
+            for sym in symbols {
+                if let Some(base) = sym.split('_').next() {
+                    bases.insert(base.to_uppercase());
+                }
+            }
+        }
+        crypto_feeds::symbol_registry::seed_extra_bases(bases.into_iter().collect());
+    }
+
     std::fs::create_dir_all(&args.output_dir)?;
 
     let market_data = Arc::new(AllMarketData::with_clock_correction(cfg.clock_correction.clone()));
