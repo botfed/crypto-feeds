@@ -9,7 +9,7 @@ use crate::vol_provider::VolProvider;
 use crate::historical_bars::{aggregate_bars, load_1m_bars_with_backfill};
 use crate::market_data::{AllMarketData, Exchange, InstrumentType, MarketDataCollection};
 use crate::snapshot::{AllSnapshotData, SnapshotConfig, run_snapshot_task};
-use crate::symbol_registry::{SymbolId, REGISTRY};
+use crate::symbol_registry::{SymbolId, seed_extra_bases, REGISTRY};
 use crate::vol_engine::VolEngine;
 use crate::vol_params;
 use chrono::{DateTime, Utc};
@@ -891,6 +891,7 @@ impl PyAppConfig {
         let config = load_config(path).map_err(|e| {
             pyo3::exceptions::PyIOError::new_err(format!("Failed to load config: {}", e))
         })?;
+        seed_extra_bases(config.base_assets());
         Ok(Self { config })
     }
 
@@ -919,9 +920,9 @@ impl PyAppConfig {
             }
         }
 
-        Ok(Self {
-            config: AppConfig { spot, perp, sample_interval_ms: 10, onchain: None, vol_models: None, fair_price: Default::default(), clock_correction: Default::default() },
-        })
+        let config = AppConfig { spot, perp, sample_interval_ms: 10, onchain: None, vol_models: None, fair_price: Default::default(), clock_correction: Default::default(), trades: std::collections::HashMap::new() };
+        seed_extra_bases(config.base_assets());
+        Ok(Self { config })
     }
 
     fn to_dict(&self, py: Python) -> PyResult<PyObject> {

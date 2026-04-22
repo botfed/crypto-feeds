@@ -105,6 +105,8 @@ struct HibachiLevel {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for HibachiFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -147,30 +149,30 @@ impl ExchangeFeed for HibachiFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         let WireMessage::Text(text) = msg else {
-            return Ok(None);
+            return Ok(vec![]);
         };
 
         if !text.contains("\"orderbook\"") {
-            return Ok(None);
+            return Ok(vec![]);
         }
 
         let ob: HibachiOrderbookMsg = match serde_json::from_str(text) {
             Ok(v) => v,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(vec![]),
         };
 
         let registry_sym = match self.native_to_registry.get(&ob.symbol) {
             Some(s) => s.clone(),
             None => {
                 debug!("Unknown symbol from Hibachi: {}", ob.symbol);
-                return Ok(None);
+                return Ok(vec![]);
             }
         };
 
         let Some(book_cell) = self.books.get(&ob.symbol) else {
-            return Ok(None);
+            return Ok(vec![]);
         };
 
         // SAFETY: single writer — one WS task per feed.
@@ -205,12 +207,12 @@ impl ExchangeFeed for HibachiFeed {
             .unwrap_or((None, None));
 
         if bid.is_none() || ask.is_none() {
-            return Ok(None);
+            return Ok(vec![]);
         }
 
         if let (Some(b), Some(a)) = (bid, ask) {
             if b >= a {
-                return Ok(None);
+                return Ok(vec![]);
             }
         }
 
@@ -229,7 +231,7 @@ impl ExchangeFeed for HibachiFeed {
             feed_latency_ns: 0,
         };
 
-        Ok(Some((registry_sym, md)))
+        Ok(vec![(registry_sym, md)])
     }
 }
 

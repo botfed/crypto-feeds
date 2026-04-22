@@ -92,6 +92,32 @@ impl MarketData {
     }
 }
 
+/// Trait for data types that can flow through the generic feed infrastructure.
+pub trait FeedItem: Copy + Default + Send + Sync + 'static {
+    fn exchange_ts_raw(&self) -> Option<DateTime<Utc>>;
+    fn set_feed_latency_ns(&mut self, ns: u64);
+}
+
+impl FeedItem for MarketData {
+    fn exchange_ts_raw(&self) -> Option<DateTime<Utc>> {
+        self.exchange_ts_raw
+    }
+    fn set_feed_latency_ns(&mut self, ns: u64) {
+        self.feed_latency_ns = ns;
+    }
+}
+
+/// Trait for collections that can receive feed items from the connection loop.
+pub trait DataSink<T>: Send + Sync {
+    fn push(&self, id: &SymbolId, item: T);
+}
+
+impl DataSink<MarketData> for MarketDataCollection {
+    fn push(&self, id: &SymbolId, item: MarketData) {
+        MarketDataCollection::push(self, id, item);
+    }
+}
+
 struct SymbolSlot {
     ring: OnceLock<Box<RingBuffer<MarketData>>>,
     clock_offset_ewma_ns: AtomicI64,

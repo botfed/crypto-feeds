@@ -197,6 +197,8 @@ fn fetch_contract_multipliers(symbols: &[&str]) -> Result<HashMap<String, f64>> 
 
 #[async_trait::async_trait]
 impl ExchangeFeed for KucoinFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -256,33 +258,33 @@ impl ExchangeFeed for KucoinFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => {
                 let envelope: KucoinMessage = match serde_json::from_str(text) {
                     Ok(m) => m,
                     Err(e) => {
                         error!("KuCoin parse error: {} — {}", e, text);
-                        return Ok(None);
+                        return Ok(vec![]);
                     }
                 };
 
                 match envelope.msg_type.as_str() {
-                    "pong" | "welcome" | "ack" => return Ok(None),
+                    "pong" | "welcome" | "ack" => return Ok(vec![]),
                     "message" => {}
                     other => {
                         debug!("KuCoin unknown type: {}", other);
-                        return Ok(None);
+                        return Ok(vec![]);
                     }
                 }
 
                 let topic = match &envelope.topic {
                     Some(t) => t,
-                    None => return Ok(None),
+                    None => return Ok(vec![]),
                 };
                 let data = match &envelope.data {
                     Some(d) => d,
-                    None => return Ok(None),
+                    None => return Ok(vec![]),
                 };
 
                 if topic.starts_with("/market/ticker:") {
@@ -301,7 +303,7 @@ impl ExchangeFeed for KucoinFeed {
                         .time
                         .and_then(|ms| DateTime::from_timestamp_millis(ms as i64));
 
-                    Ok(Some((
+                    Ok(vec![(
                         symbol,
                         MarketData {
                             bid,
@@ -314,7 +316,7 @@ impl ExchangeFeed for KucoinFeed {
                             received_instant: Some(received_instant),
                     feed_latency_ns: 0,
                         },
-                    )))
+                    )])
                 } else if topic.starts_with("/contractMarket/tickerV2:") {
                     // Futures ticker — native symbol e.g. "XBTUSDTM"
                     // Normalize back to canonical form e.g. "BTC-USDT"
@@ -329,7 +331,7 @@ impl ExchangeFeed for KucoinFeed {
                         .unwrap_or_default();
                     let (symbol, mult) = match self.perp_symbol_map.get(&native) {
                         Some((sym, m)) => (sym.clone(), *m),
-                        None => return Ok(None),
+                        None => return Ok(vec![]),
                     };
 
                     let bid = parse_f64(&ticker.best_bid_price);
@@ -341,7 +343,7 @@ impl ExchangeFeed for KucoinFeed {
                         .ts
                         .and_then(|ns| DateTime::from_timestamp_nanos(ns as i64).into());
 
-                    Ok(Some((
+                    Ok(vec![(
                         symbol,
                         MarketData {
                             bid,
@@ -354,13 +356,13 @@ impl ExchangeFeed for KucoinFeed {
                             received_instant: Some(received_instant),
                     feed_latency_ns: 0,
                         },
-                    )))
+                    )])
                 } else {
                     debug!("KuCoin unknown topic: {}", topic);
-                    Ok(None)
+                    Ok(vec![])
                 }
             }
-            WireMessage::Binary(_) => Ok(None),
+            WireMessage::Binary(_) => Ok(vec![]),
         }
     }
 

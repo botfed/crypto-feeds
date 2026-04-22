@@ -11,6 +11,7 @@ use crate::exchanges::connection::{
 };
 use crate::mappers::{BinanceMapper, SymbolMapper};
 use crate::market_data::{InstrumentType, MarketData, MarketDataCollection};
+use crate::trade_data::{TradeData, TradeDataCollection, TradeSide};
 
 pub fn get_fees() -> ExchangeFees {
     ExchangeFees::new(FeeSchedule::new(10.0, 10.0), FeeSchedule::new(5.0, 2.0))
@@ -75,6 +76,8 @@ impl BinanceFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for BinanceFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -103,7 +106,7 @@ impl ExchangeFeed for BinanceFeed {
         msg: WireMessage<'_>,
         received_ts: chrono::DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         // Some exchanges send non-data frames; Binance combined stream sends JSON objects
         // Return Ok(None) on parse failure? Here we propagate error so caller can log.
         match msg {
@@ -115,7 +118,7 @@ impl ExchangeFeed for BinanceFeed {
                     let mut map = self.last_update_id.lock().unwrap();
                     let last = map.entry(msg.data.symbol.clone()).or_insert(0);
                     if msg.data.u <= *last {
-                        return Ok(None);
+                        return Ok(vec![]);
                     }
                     *last = msg.data.u;
                 }
@@ -132,7 +135,7 @@ impl ExchangeFeed for BinanceFeed {
                             "Invalid quote for {}: bid={} >= ask={}",
                             msg.data.symbol, b, a
                         );
-                        return Ok(None);
+                        return Ok(vec![]);
                     }
                 }
 
@@ -153,9 +156,9 @@ impl ExchangeFeed for BinanceFeed {
                     feed_latency_ns: 0,
                 };
 
-                Ok(Some((msg.data.symbol, market_data)))
+                Ok(vec![(msg.data.symbol, market_data)])
             }
-            WireMessage::Binary(_) => Ok(None),
+            WireMessage::Binary(_) => Ok(vec![]),
         }
     }
 }
@@ -188,6 +191,127 @@ pub async fn listen_perp_bbo(
         symbols,
         feed,
         "binance_perp",
+        ConnectionConfig::default(),
+        shutdown,
+    )
+    .await
+}
+
+// --- Aggregate Trade Feed ---
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct BinanceAggTrade {
+    stream: String,
+    data: BinanceAggTradeData,
+}
+
+#[derive(Debug, Deserialize)]
+struct BinanceAggTradeData {
+    #[serde(rename = "s")]
+    symbol: String,
+    #[serde(rename = "p")]
+    price: String,
+    #[serde(rename = "q")]
+    quantity: String,
+    /// Trade time (ms)
+    #[serde(rename = "T")]
+    trade_time: u64,
+    /// Is the buyer the market maker?
+    #[serde(rename = "m")]
+    buyer_is_maker: bool,
+}
+
+struct BinanceTradeFeed {
+    base_url: &'static str,
+    itype: InstrumentType,
+    mapper: BinanceMapper,
+}
+
+impl BinanceTradeFeed {
+    fn new_perp() -> Self {
+        Self {
+            base_url: "wss://fstream.binance.com/stream",
+            itype: InstrumentType::Perp,
+            mapper: BinanceMapper,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ExchangeFeed for BinanceTradeFeed {
+    type Item = TradeData;
+
+    fn get_itype(&self) -> Result<&InstrumentType> {
+        Ok(&self.itype)
+    }
+
+    fn build_url(&self, symbols: &[&str]) -> Result<String> {
+        let streams: Vec<String> = symbols
+            .iter()
+            .map(|s| {
+                let native = self
+                    .mapper
+                    .denormalize(s, self.itype)
+                    .unwrap()
+                    .to_lowercase();
+                format!("{}@aggTrade", native)
+            })
+            .collect();
+        let streams_str = streams.join("/");
+        Ok(format!("{}?streams={}", self.base_url, streams_str))
+    }
+
+    fn timestamp_dedup(&self) -> bool {
+        false
+    }
+
+    fn parse_message(
+        &self,
+        msg: WireMessage<'_>,
+        received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
+    ) -> Result<Vec<(String, TradeData)>> {
+        match msg {
+            WireMessage::Text(text) => {
+                let msg = serde_json::from_str::<BinanceAggTrade>(text)?;
+                let price = msg.data.price.parse::<f64>()?;
+                let qty = msg.data.quantity.parse::<f64>()?;
+                let side = if msg.data.buyer_is_maker {
+                    TradeSide::Sell
+                } else {
+                    TradeSide::Buy
+                };
+                let exchange_ts = DateTime::from_timestamp_millis(msg.data.trade_time as i64);
+
+                let trade = TradeData {
+                    price,
+                    qty,
+                    side,
+                    exchange_ts_raw: exchange_ts,
+                    exchange_ts: None,
+                    received_ts: Some(received_ts),
+                    received_instant: Some(received_instant),
+                    feed_latency_ns: 0,
+                };
+                Ok(vec![(msg.data.symbol, trade)])
+            }
+            WireMessage::Binary(_) => Ok(vec![]),
+        }
+    }
+}
+
+pub async fn listen_perp_trades(
+    data: Arc<TradeDataCollection>,
+    symbols: &[&str],
+    shutdown: Arc<tokio::sync::Notify>,
+) -> Result<()> {
+    let feed = Arc::new(BinanceTradeFeed::new_perp());
+    listen_with_reconnect(
+        data,
+        symbols,
+        feed,
+        "binance_perp_trades",
         ConnectionConfig::default(),
         shutdown,
     )

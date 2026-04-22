@@ -84,34 +84,34 @@ fn parse_str_or_num(v: &Option<serde_json::Value>) -> Option<f64> {
     }
 }
 
-fn parse_bingx_text(text: &str, received_ts: DateTime<Utc>, received_instant: std::time::Instant) -> Result<Option<(String, MarketData)>> {
+fn parse_bingx_text(text: &str, received_ts: DateTime<Utc>, received_instant: std::time::Instant) -> Result<Vec<(String, MarketData)>> {
     if text == "Ping" || text == "Pong" || text == "ping" || text == "pong" {
-        return Ok(None);
+        return Ok(vec![]);
     }
 
     let envelope: BingxMessage = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(e) => {
             error!("BingX parse error: {} — {}", e, text);
-            return Ok(None);
+            return Ok(vec![]);
         }
     };
 
     // Subscription confirmations or errors
     if envelope.data_type.is_none() {
         debug!("BingX non-data message: {}", text);
-        return Ok(None);
+        return Ok(vec![]);
     }
 
     let data_type = envelope.data_type.as_deref().unwrap_or("");
     if !data_type.ends_with("@bookTicker") {
         debug!("BingX ignoring dataType: {}", data_type);
-        return Ok(None);
+        return Ok(vec![]);
     }
 
     let data_val = match &envelope.data {
         Some(d) => d,
-        None => return Ok(None),
+        None => return Ok(vec![]),
     };
 
     let ticker: BingxBookTickerData = match data_val {
@@ -134,7 +134,7 @@ fn parse_bingx_text(text: &str, received_ts: DateTime<Utc>, received_instant: st
         .event_time
         .and_then(|ms| DateTime::from_timestamp_millis(ms as i64));
 
-    Ok(Some((
+    Ok(vec![(
         symbol,
         MarketData {
             bid,
@@ -147,11 +147,13 @@ fn parse_bingx_text(text: &str, received_ts: DateTime<Utc>, received_instant: st
             received_instant: Some(received_instant),
                     feed_latency_ns: 0,
         },
-    )))
+    )])
 }
 
 #[async_trait::async_trait]
 impl ExchangeFeed for BingxFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -195,7 +197,7 @@ impl ExchangeFeed for BingxFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => parse_bingx_text(text, received_ts, received_instant),
             WireMessage::Binary(data) => {
@@ -203,13 +205,13 @@ impl ExchangeFeed for BingxFeed {
                     Ok(text) => {
                         if text == "Ping" || text == "ping" {
                             self.got_ping.store(true, std::sync::atomic::Ordering::Relaxed);
-                            return Ok(None);
+                            return Ok(vec![]);
                         }
                         parse_bingx_text(&text, received_ts, received_instant)
                     }
                     Err(e) => {
                         error!("BingX gzip decompress error: {}", e);
-                        Ok(None)
+                        Ok(vec![])
                     }
                 }
             }

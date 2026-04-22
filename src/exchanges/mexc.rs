@@ -137,6 +137,8 @@ impl MexcFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for MexcFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -229,7 +231,7 @@ impl ExchangeFeed for MexcFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         match self.itype {
             InstrumentType::Spot => match msg {
                 WireMessage::Binary(bytes) => {
@@ -247,34 +249,34 @@ impl ExchangeFeed for MexcFeed {
                             received_instant: Some(received_instant),
                     feed_latency_ns: 0,
                         };
-                        Ok(Some((symbol, md)))
+                        Ok(vec![(symbol, md)])
                     } else {
-                        Ok(None)
+                        Ok(vec![])
                     }
                 }
                 // spot endpoint also sends text acks/pongs sometimes; ignore
-                _ => Ok(None),
+                _ => Ok(vec![]),
             },
 
             InstrumentType::Perp => {
                 // Futures depth is JSON text per docs. :contentReference[oaicite:8]{index=8}
                 let WireMessage::Text(text) = msg else {
-                    // If you still receive binary here, it’s likely compressed. You can either:
+                    // If you still receive binary here, it's likely compressed. You can either:
                     // 1) keep compress=false as above, or
                     // 2) add decompression logic with flate2.
-                    return Ok(None);
+                    return Ok(vec![]);
                 };
                 // Quick parse just for channel
                 let v: serde_json::Value = match serde_json::from_str(text) {
                     Ok(v) => v,
-                    Err(_) => return Ok(None),
+                    Err(_) => return Ok(vec![]),
                 };
 
                 let Some(channel) = v.get("channel").and_then(|c| c.as_str()) else {
-                    return Ok(None);
+                    return Ok(vec![]);
                 };
                 if channel != "push.depth" && channel != "push.depth.step" {
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
                 // Ignore non-depth pushes (ticker, deal, etc.) unless you want them later.
                 let depth = match serde_json::from_str::<MexcFuturesDepthMsg>(text) {
@@ -282,7 +284,7 @@ impl ExchangeFeed for MexcFeed {
                     Err(e) => {
                         return {
                             error!("Mexc couldn't parse message {} {}", &text, e);
-                            Ok(None)
+                            Ok(vec![])
                         };
                     }
                 };
@@ -290,7 +292,7 @@ impl ExchangeFeed for MexcFeed {
                 // Update order book for this symbol
                 let book_cell = match self.books.get(&depth.symbol) {
                     Some(book) => book,
-                    None => return Ok(None),
+                    None => return Ok(vec![]),
                 };
 
                 // SAFETY: single writer — one WS task per feed.
@@ -302,17 +304,17 @@ impl ExchangeFeed for MexcFeed {
                 // Derive BBO
                 let (bid, bid_qty) = match book.best_bid() {
                     Some(v) => v,
-                    None => return Ok(None),
+                    None => return Ok(vec![]),
                 };
                 let (ask, ask_qty) = match book.best_ask() {
                     Some(v) => v,
-                    None => return Ok(None),
+                    None => return Ok(vec![]),
                 };
 
                 // Basic sanity
                 if bid >= ask {
                     // Can happen transiently if updates arrive out of order / partial
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 let exchange_ts = depth
@@ -331,7 +333,7 @@ impl ExchangeFeed for MexcFeed {
                     feed_latency_ns: 0,
                 };
 
-                Ok(Some((depth.symbol, md)))
+                Ok(vec![(depth.symbol, md)])
             }
             _ => {
                 anyhow::bail!("Unsupported asset class {:?}", self.itype)

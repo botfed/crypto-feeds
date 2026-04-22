@@ -126,6 +126,8 @@ fn fetch_contract_values(symbols: &[&str]) -> Result<HashMap<String, f64>> {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for OkxFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -166,29 +168,29 @@ impl ExchangeFeed for OkxFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => {
                 // OKX sends "pong" as a text response to "ping"
                 if text == "pong" {
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 // Subscription confirmations
                 if text.contains("\"event\"") {
                     debug!("OKX event: {}", text);
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 match serde_json::from_str::<OkxBboResponse>(text) {
                     Ok(response) => {
                         if response.arg.channel != "bbo-tbt" {
-                            return Ok(None);
+                            return Ok(vec![]);
                         }
 
                         let entry = match response.data.first() {
                             Some(d) => d,
-                            None => return Ok(None),
+                            None => return Ok(vec![]),
                         };
 
                         let bid = entry
@@ -243,15 +245,15 @@ impl ExchangeFeed for OkxFeed {
                     feed_latency_ns: 0,
                         };
 
-                        Ok(Some((symbol, market_data)))
+                        Ok(vec![(symbol, market_data)])
                     }
                     Err(e) => {
                         error!("Got error parsing OKX message: {} \n {}", e, text);
-                        Ok(None)
+                        Ok(vec![])
                     }
                 }
             }
-            WireMessage::Binary(_) => Ok(None),
+            WireMessage::Binary(_) => Ok(vec![]),
         }
     }
 

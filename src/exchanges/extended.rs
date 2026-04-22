@@ -52,6 +52,8 @@ struct PriceLevel {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for ExtendedBboFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -72,32 +74,32 @@ impl ExchangeFeed for ExtendedBboFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         let WireMessage::Text(text) = msg else {
-            return Ok(None);
+            return Ok(vec![]);
         };
 
         let ob: BboMsg = match serde_json::from_str(text) {
             Ok(v) => v,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(vec![]),
         };
 
         let best_bid = ob.data.bids.first();
         let best_ask = ob.data.asks.first();
 
         let (Some(bl), Some(al)) = (best_bid, best_ask) else {
-            return Ok(None);
+            return Ok(vec![]);
         };
 
         let (Ok(bid), Ok(bid_qty)) = (bl.price.parse::<f64>(), bl.qty.parse::<f64>()) else {
-            return Ok(None);
+            return Ok(vec![]);
         };
         let (Ok(ask), Ok(ask_qty)) = (al.price.parse::<f64>(), al.qty.parse::<f64>()) else {
-            return Ok(None);
+            return Ok(vec![]);
         };
 
         if bid >= ask {
-            return Ok(None);
+            return Ok(vec![]);
         }
 
         let md = MarketData {
@@ -112,7 +114,7 @@ impl ExchangeFeed for ExtendedBboFeed {
                     feed_latency_ns: 0,
         };
 
-        Ok(Some((self.config_sym.clone(), md)))
+        Ok(vec![(self.config_sym.clone(), md)])
     }
 }
 

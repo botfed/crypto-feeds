@@ -1,5 +1,6 @@
 use crate::exchanges::*;
 use crate::market_data::{AllMarketData, ClockCorrectionConfig};
+use crate::trade_data::AllTradeData;
 use crate::onchain::OnchainConfig;
 use anyhow::{Context, Result};
 use log::error;
@@ -257,10 +258,29 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub clock_correction: ClockCorrectionConfig,
+
+    #[serde(default)]
+    pub trades: HashMap<String, Vec<String>>,
 }
 
 fn default_sample_interval_ms() -> u64 {
     10
+}
+
+impl AppConfig {
+    /// Extract all unique base assets from spot, perp, and trades symbol lists.
+    /// Symbols are expected in `BASE_QUOTE` (underscore-separated) format.
+    pub fn base_assets(&self) -> Vec<String> {
+        let mut bases = std::collections::HashSet::new();
+        for symbols in self.spot.values().chain(self.perp.values()).chain(self.trades.values()) {
+            for sym in symbols {
+                if let Some(base) = sym.split('_').next() {
+                    bases.insert(base.to_uppercase());
+                }
+            }
+        }
+        bases.into_iter().collect()
+    }
 }
 
 pub fn load_config(path: &str) -> Result<AppConfig> {
@@ -550,6 +570,38 @@ pub fn load_perp(
             let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
             if let Err(e) = hibachi::listen_perp_bbo(data, &symbol_refs, shutdown).await {
                 error!("Hibachi perp listener exited with error {:?}", e);
+            }
+        }));
+    }
+    Ok(())
+}
+
+pub fn load_trades(
+    handles: &mut Vec<JoinHandle<()>>,
+    cfg: &AppConfig,
+    trade_data: &Arc<AllTradeData>,
+    shutdown: &Arc<Notify>,
+) -> Result<()> {
+    let trade_syms = |exchange: &str| -> Option<Arc<[String]>> {
+        cfg.trades.get(exchange).cloned().map(Arc::<[String]>::from)
+    };
+    if let Some(syms) = trade_syms("binance") {
+        let data = Arc::clone(&trade_data.binance);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = binance::listen_perp_trades(data, &symbol_refs, shutdown).await {
+                error!("Binance perp trades listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = trade_syms("bybit") {
+        let data = Arc::clone(&trade_data.bybit);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = bybit::listen_perp_trades(data, &symbol_refs, shutdown).await {
+                error!("Bybit perp trades listener exited with error {:?}", e);
             }
         }));
     }

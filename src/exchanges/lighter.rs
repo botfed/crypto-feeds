@@ -159,6 +159,8 @@ fn parse_market_index(channel: &str) -> Option<u32> {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for LighterFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -236,28 +238,28 @@ impl ExchangeFeed for LighterFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         let WireMessage::Text(text) = msg else {
-            return Ok(None);
+            return Ok(vec![]);
         };
 
-        // Fast-path ignore: if no "order_book" substring, it’s probably not data.
+        // Fast-path ignore: if no "order_book" substring, it's probably not data.
         if !text.contains("order_book") {
-            return Ok(None);
+            return Ok(vec![]);
         }
 
         let ob: LighterOrderBookMsg = match serde_json::from_str(text) {
             Ok(v) => v,
-            Err(_) => return Ok(None),
+            Err(_) => return Ok(vec![]),
         };
 
         // Only handle order book updates/snapshots
         if ob.msg_type != "update/order_book" && ob.msg_type != "subscribed/order_book" {
-            return Ok(None);
+            return Ok(vec![]);
         }
 
         let Some(market_index) = parse_market_index(&ob.channel) else {
-            return Ok(None);
+            return Ok(vec![]);
         };
 
         // Map market_index back to the configured symbol
@@ -265,13 +267,13 @@ impl ExchangeFeed for LighterFeed {
             Some(s) => s.as_str(),
             None => {
                 // Unknown index (not one we subscribed to) — ignore.
-                return Ok(None);
+                return Ok(vec![]);
             }
         };
 
         let Some(book_cell) = self.books.get(symbol) else {
             // Shouldn't happen if mappings/books were built from the same symbol list.
-            return Ok(None);
+            return Ok(vec![]);
         };
 
         // SAFETY: single writer — one WS task per feed.
@@ -307,13 +309,13 @@ impl ExchangeFeed for LighterFeed {
 
         // If one side missing, skip emitting
         if bid.is_none() || ask.is_none() {
-            return Ok(None);
+            return Ok(vec![]);
         }
 
         // Optional sanity
         if let (Some(b), Some(a)) = (bid, ask) {
             if b >= a {
-                return Ok(None);
+                return Ok(vec![]);
             }
         }
 
@@ -334,7 +336,7 @@ impl ExchangeFeed for LighterFeed {
                     feed_latency_ns: 0,
         };
 
-        Ok(Some((symbol.to_string(), md)))
+        Ok(vec![(symbol.to_string(), md)])
     }
 }
 

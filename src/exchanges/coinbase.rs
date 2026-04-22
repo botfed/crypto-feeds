@@ -66,6 +66,7 @@ impl CoinbaseFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for CoinbaseFeed {
+    type Item = MarketData;
 
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
@@ -102,7 +103,7 @@ impl ExchangeFeed for CoinbaseFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         // Coinbase sends multiple message types; we parse them all and filter later.
         match msg {
             WireMessage::Text(text) => {
@@ -121,7 +122,7 @@ impl ExchangeFeed for CoinbaseFeed {
                                     "Invalid Coinbase quote for {}: bid={} >= ask={}",
                                     ticker.product_id, b, a
                                 );
-                                return Ok(None);
+                                return Ok(vec![]);
                             }
                         }
 
@@ -141,21 +142,21 @@ impl ExchangeFeed for CoinbaseFeed {
                     feed_latency_ns: 0,
                         };
 
-                        return Ok(Some((ticker.product_id, market_data)));
+                        return Ok(vec![(ticker.product_id, market_data)]);
                     }
                     CoinbaseMessage::Heartbeat(beat) => {
                         debug!("Got heartbeat {}", beat);
-                        return Ok(None);
+                        return Ok(vec![]);
                     }
                     CoinbaseMessage::Subscriptions(_) => {
-                        return Ok(None);
+                        return Ok(vec![]);
                     }
                     CoinbaseMessage::Other => {
-                        return Ok(None);
+                        return Ok(vec![]);
                     }
                 }
             }
-            WireMessage::Binary(_) => Ok(None),
+            WireMessage::Binary(_) => Ok(vec![]),
         }
     }
 }
@@ -219,6 +220,8 @@ impl CoinbaseAdvancedFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for CoinbaseAdvancedFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -255,13 +258,13 @@ impl ExchangeFeed for CoinbaseAdvancedFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => {
                 let msg = serde_json::from_str::<AdvancedTradeMessage>(text)?;
 
                 if msg.channel != "ticker" {
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 for event in &msg.events {
@@ -301,13 +304,13 @@ impl ExchangeFeed for CoinbaseAdvancedFeed {
                     feed_latency_ns: 0,
                         };
 
-                        return Ok(Some((sym, market_data)));
+                        return Ok(vec![(sym, market_data)]);
                     }
                 }
 
-                Ok(None)
+                Ok(vec![])
             }
-            WireMessage::Binary(_) => Ok(None),
+            WireMessage::Binary(_) => Ok(vec![]),
         }
     }
 }

@@ -35,6 +35,8 @@ impl KrakenFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for KrakenFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -69,21 +71,21 @@ impl ExchangeFeed for KrakenFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         match self.itype {
             InstrumentType::Spot => {
                 match msg {
-                    WireMessage::Binary(_) => Ok(None),
+                    WireMessage::Binary(_) => Ok(vec![]),
                     WireMessage::Text(text) => {
                         // Handle subscription confirmation
                         if text.contains("\"event\":\"subscriptionStatus\"") {
                             debug!("Kraken subscription confirmed");
-                            return Ok(None);
+                            return Ok(vec![]);
                         }
 
                         // Handle heartbeat
                         if text.contains("\"event\":\"heartbeat\"") {
-                            return Ok(None);
+                            return Ok(vec![]);
                         }
 
                         // Parse spread data: [channelID, [bid, ask, timestamp, bidVolume, askVolume], "spread", "XBT/USD"]
@@ -144,18 +146,18 @@ impl ExchangeFeed for KrakenFeed {
                                                     received_instant: Some(received_instant),
                     feed_latency_ns: 0,
                                                 };
-                                                return Ok(Some((symbol.to_string(), market_data)));
+                                                return Ok(vec![(symbol.to_string(), market_data)]);
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        return Ok(None);
+                        return Ok(vec![]);
                     }
                 }
             }
-            _ => Ok(None),
+            _ => Ok(vec![]),
         }
     }
 }
@@ -207,6 +209,8 @@ impl KrakenFuturesFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for KrakenFuturesFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -244,21 +248,21 @@ impl ExchangeFeed for KrakenFuturesFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => {
                 // Ignore subscription confirmations and info messages
                 if text.contains("\"event\"") {
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 let ticker: KrakenFuturesTicker = match serde_json::from_str(text) {
                     Ok(t) => t,
-                    Err(_) => return Ok(None),
+                    Err(_) => return Ok(vec![]),
                 };
 
                 if ticker.feed != "ticker" && ticker.feed != "ticker_snapshot" {
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 if ticker.bid >= ticker.ask {
@@ -266,7 +270,7 @@ impl ExchangeFeed for KrakenFuturesFeed {
                         "Invalid Kraken futures quote for {}: bid={} >= ask={}",
                         ticker.product_id, ticker.bid, ticker.ask
                     );
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 let exchange_ts =
@@ -288,9 +292,9 @@ impl ExchangeFeed for KrakenFuturesFeed {
                 let (base, quote) = self.mapper.parse(&ticker.product_id, self.itype)?;
                 let sym = format!("{}{}", base, quote);
 
-                Ok(Some((sym, market_data)))
+                Ok(vec![(sym, market_data)])
             }
-            WireMessage::Binary(_) => Ok(None),
+            WireMessage::Binary(_) => Ok(vec![]),
         }
     }
 }

@@ -9,9 +9,8 @@ use tokio::net::TcpStream;
 use tokio::time::interval;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config, tungstenite::Message, tungstenite::client::IntoClientRequest, tungstenite::http};
 
-use crate::market_data::InstrumentType;
+use crate::market_data::{DataSink, FeedItem, InstrumentType};
 use crate::symbol_registry::{REGISTRY, SymbolId};
-use crate::{MarketDataCollection, market_data::MarketData};
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -50,7 +49,9 @@ pub enum WireMessage<'a> {
 }
 
 #[async_trait]
-pub trait ExchangeFeed {
+pub trait ExchangeFeed: Send + Sync {
+
+    type Item: FeedItem;
 
     fn get_itype(&self) -> Result<&InstrumentType>;
 
@@ -75,7 +76,7 @@ pub trait ExchangeFeed {
 
     /// Whether the generic connection loop should drop messages with
     /// exchange_ts < last seen exchange_ts for that symbol.
-    /// Override to `false` for incremental depth feeds.
+    /// Override to `false` for incremental depth feeds or trade feeds.
     fn timestamp_dedup(&self) -> bool {
         true
     }
@@ -93,19 +94,19 @@ pub trait ExchangeFeed {
     fn build_url(&self, symbols: &[&str]) -> Result<String>;
 
     /// Return:
-    /// - Ok(Some((symbol, MarketData))) for a usable update
-    /// - Ok(None) to ignore the message (heartbeat, sub ack, etc.)
+    /// - Ok(vec![(symbol, item), ...]) for usable update(s)
+    /// - Ok(vec![]) to ignore the message (heartbeat, sub ack, etc.)
     /// - Err(_) for parse/decode failures you want logged
     fn parse_message(
         &self,
         msg: WireMessage<'_>,
         received_ts: chrono::DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>>;
+    ) -> Result<Vec<(String, Self::Item)>>;
 }
 
-pub async fn listen_with_reconnect<F: ExchangeFeed + Send + Sync>(
-    data: Arc<MarketDataCollection>,
+pub async fn listen_with_reconnect<F: ExchangeFeed, S: DataSink<F::Item>>(
+    data: Arc<S>,
     symbols: &[&str],
     feed: Arc<F>,
     feed_name: &str,
@@ -124,7 +125,7 @@ pub async fn listen_with_reconnect<F: ExchangeFeed + Send + Sync>(
                 break;
             }
 
-            res = connect_and_stream(&data, &feed, feed_name, symbols, &config) => {
+            res = connect_and_stream::<F, S>(&data, &feed, feed_name, symbols, &config) => {
                 // Reset backoff only if the connection was stable for >60s
                 let was_long_lived = attempt_start.elapsed() > Duration::from_secs(60);
 
@@ -187,8 +188,8 @@ pub async fn listen_with_reconnect<F: ExchangeFeed + Send + Sync>(
     Ok(())
 }
 
-async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
-    data: &Arc<MarketDataCollection>,
+async fn connect_and_stream<F: ExchangeFeed, S: DataSink<F::Item>>(
+    data: &Arc<S>,
     feed: &Arc<F>,
     feed_name: &str,
     symbols: &[&str],
@@ -285,29 +286,32 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         match feed.parse_message(WireMessage::Text(text.as_str()), received_ts, received_instant) {
-                            Ok(Some((sym, mut md))) => {
-                                if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
-                                    let stale = do_ts_dedup && md.exchange_ts_raw.map_or(false, |ts| {
-                                        last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
-                                    });
-                                    if !stale {
-                                        if do_ts_dedup {
-                                            if let Some(ts) = md.exchange_ts_raw {
-                                                last_exchange_ts.insert(id, ts);
-                                            }
-                                        }
-                                        md.feed_latency_ns = received_instant.elapsed().as_nanos() as u64;
-                                        data.push(&id, md);
-                                    }
-                                } else if warned_symbols.insert(sym.clone()) {
-                                    warn!("{}: symbol '{}' not in registry, dropping ticks", feed_name, sym);
-                                }
-                            }
-                            Ok(None) => {
+                            Ok(items) if items.is_empty() => {
                                 // intentionally ignored (heartbeats, sub acks, etc.)
                                 if let Err(e) = feed.process_other(&mut write, &text).await {
                                     error!("Error processing other: {}", e);
                                     break ConnectionResult::Reconnect;
+                                }
+                            }
+                            Ok(items) => {
+                                let latency_ns = received_instant.elapsed().as_nanos() as u64;
+                                for (sym, mut item) in items {
+                                    if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
+                                        let stale = do_ts_dedup && item.exchange_ts_raw().map_or(false, |ts| {
+                                            last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
+                                        });
+                                        if !stale {
+                                            if do_ts_dedup {
+                                                if let Some(ts) = item.exchange_ts_raw() {
+                                                    last_exchange_ts.insert(id, ts);
+                                                }
+                                            }
+                                            item.set_feed_latency_ns(latency_ns);
+                                            data.push(&id, item);
+                                        }
+                                    } else if warned_symbols.insert(sym.clone()) {
+                                        warn!("{}: symbol '{}' not in registry, dropping ticks", feed_name, sym);
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -319,26 +323,29 @@ async fn connect_and_stream<F: ExchangeFeed + Sync + Send>(
 
                     Some(Ok(Message::Binary(bytes))) => {
                         match feed.parse_message(WireMessage::Binary(&bytes), received_ts, received_instant) {
-                            Ok(Some((sym, mut md))) => {
-                                if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
-                                    let stale = do_ts_dedup && md.exchange_ts_raw.map_or(false, |ts| {
-                                        last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
-                                    });
-                                    if !stale {
-                                        if do_ts_dedup {
-                                            if let Some(ts) = md.exchange_ts_raw {
-                                                last_exchange_ts.insert(id, ts);
-                                            }
-                                        }
-                                        md.feed_latency_ns = received_instant.elapsed().as_nanos() as u64;
-                                        data.push(&id, md);
-                                    }
-                                } else if warned_symbols.insert(sym.clone()) {
-                                    warn!("{}: symbol '{}' not in registry, dropping ticks", feed_name, sym);
-                                }
-                            }
-                            Ok(None) => {
+                            Ok(items) if items.is_empty() => {
                                 // intentionally ignored
+                            }
+                            Ok(items) => {
+                                let latency_ns = received_instant.elapsed().as_nanos() as u64;
+                                for (sym, mut item) in items {
+                                    if let Some(&id) = REGISTRY.lookup(&sym, &itype) {
+                                        let stale = do_ts_dedup && item.exchange_ts_raw().map_or(false, |ts| {
+                                            last_exchange_ts.get(&id).map_or(false, |&last| ts < last)
+                                        });
+                                        if !stale {
+                                            if do_ts_dedup {
+                                                if let Some(ts) = item.exchange_ts_raw() {
+                                                    last_exchange_ts.insert(id, ts);
+                                                }
+                                            }
+                                            item.set_feed_latency_ns(latency_ns);
+                                            data.push(&id, item);
+                                        }
+                                    } else if warned_symbols.insert(sym.clone()) {
+                                        warn!("{}: symbol '{}' not in registry, dropping ticks", feed_name, sym);
+                                    }
+                                }
                             }
                             Err(e) => {
                                 error!("{} parse error (binary): {}", feed_name, e);

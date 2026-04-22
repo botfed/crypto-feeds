@@ -9,13 +9,15 @@ use tokio::signal;
 use tokio::sync::Notify;
 use tokio::time::{self, MissedTickBehavior};
 
-use crypto_feeds::app_config::{load_config, load_onchain, load_perp, load_spot, AppConfig};
+use crypto_feeds::app_config::{load_config, load_onchain, load_perp, load_spot, load_trades, AppConfig};
+use crypto_feeds::trade_data::AllTradeData;
 use crypto_feeds::fair_price::{
     DiagWriter, FairPriceConfig, FairPriceEngine, FairPriceGroupConfig, FairPriceOutputs,
     GroupMember, run_fair_price_task,
 };
 use crypto_feeds::market_data::{AllMarketData, Exchange, InstrumentType, MarketDataCollection};
 use crypto_feeds::symbol_registry::{REGISTRY, SymbolId};
+use crypto_feeds::trade_data::TradeDataCollection;
 
 /// One entry in our sampling plan: which exchange + symbol to read each tick.
 struct SampleTarget {
@@ -82,6 +84,43 @@ fn build_targets(cfg: &AppConfig, market_data: &AllMarketData) -> Vec<SampleTarg
     }
 
     targets
+}
+
+struct TradeSampleTarget {
+    exchange_name: &'static str,
+    canonical: String,
+    collection: Arc<TradeDataCollection>,
+    symbol_id: SymbolId,
+}
+
+fn build_trade_targets(cfg: &AppConfig, trade_data: &AllTradeData) -> Vec<TradeSampleTarget> {
+    let mut targets = Vec::new();
+    for (exchange, coll) in trade_data.iter() {
+        let name = exchange.as_str();
+        if let Some(syms) = cfg.trades.get(name) {
+            for raw in syms {
+                // Trade feeds are perp by default
+                if let Some(&id) = REGISTRY.lookup(raw, &InstrumentType::Perp) {
+                    let canonical = REGISTRY.get_symbol(id).unwrap_or(raw).to_string();
+                    targets.push(TradeSampleTarget {
+                        exchange_name: name,
+                        canonical,
+                        collection: Arc::clone(coll),
+                        symbol_id: id,
+                    });
+                }
+            }
+        }
+    }
+    targets
+}
+
+fn format_side(side: crypto_feeds::TradeSide) -> &'static str {
+    match side {
+        crypto_feeds::TradeSide::Buy => "buy",
+        crypto_feeds::TradeSide::Sell => "sell",
+        crypto_feeds::TradeSide::Unknown => "",
+    }
 }
 
 fn format_ts(ts: Option<chrono::DateTime<Utc>>) -> String {
@@ -261,17 +300,7 @@ async fn main() -> Result<()> {
 
     // Register all base assets from config so the symbol registry knows about them.
     // Must happen before any code touches REGISTRY.
-    {
-        let mut bases = std::collections::HashSet::new();
-        for symbols in cfg.spot.values().chain(cfg.perp.values()) {
-            for sym in symbols {
-                if let Some(base) = sym.split('_').next() {
-                    bases.insert(base.to_uppercase());
-                }
-            }
-        }
-        crypto_feeds::symbol_registry::seed_extra_bases(bases.into_iter().collect());
-    }
+    crypto_feeds::symbol_registry::seed_extra_bases(cfg.base_assets());
 
     std::fs::create_dir_all(&args.output_dir)?;
 
@@ -285,8 +314,12 @@ async fn main() -> Result<()> {
         log::warn!("Onchain feeds not started: {}", e);
     }
 
+    let trade_data = Arc::new(AllTradeData::with_clock_correction(cfg.clock_correction.clone()));
+    load_trades(&mut handles, &cfg, &trade_data, &shutdown)?;
+
     let targets = build_targets(&cfg, &market_data);
-    eprintln!("Discovered {} sample targets", targets.len());
+    let trade_targets = build_trade_targets(&cfg, &trade_data);
+    eprintln!("Discovered {} sample targets, {} trade targets", targets.len(), trade_targets.len());
 
     // Set up FP engine if needed
     let has_capture = args.interval_ms.is_some();
@@ -535,6 +568,69 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Trade capture task — auto-enabled when trades: config is non-empty
+    let trade_handle = if let Some(interval_ms) = args.interval_ms {
+        if !trade_targets.is_empty() {
+            let trade_targets_arc = Arc::new(trade_targets);
+            let shutdown_clone = Arc::clone(&shutdown);
+            let output_dir = args.output_dir.clone();
+
+            Some(tokio::spawn(async move {
+                let ts = Utc::now().format("%Y%m%d_%H%M%S");
+                let output_path = format!("{}/trades_{}.csv.gz", output_dir, ts);
+                let file = std::fs::File::create(&output_path).expect("create trades file");
+                let gz = GzEncoder::new(file, Compression::fast());
+                let mut wtr = BufWriter::new(gz);
+
+                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,price,qty,side,exchange_ts,exchange_ts_raw,received_ts").unwrap();
+
+                let mut interval = time::interval(Duration::from_millis(interval_ms));
+                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+                let shutdown_fut = shutdown_clone.notified();
+                tokio::pin!(shutdown_fut);
+
+                let mut row_count: u64 = 0;
+
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {}
+                        _ = &mut shutdown_fut => {
+                            eprintln!("Trade capture: {} rows written to {}", row_count, output_path);
+                            let gz = wtr.into_inner().expect("flush");
+                            let _ = gz.finish();
+                            return;
+                        }
+                    }
+
+                    let sample_ts = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+
+                    for t in trade_targets_arc.iter() {
+                        let td = match t.collection.latest(&t.symbol_id) {
+                            Some(td) => td,
+                            None => continue,
+                        };
+
+                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{}",
+                            sample_ts, t.canonical, t.exchange_name,
+                            td.price, td.qty, format_side(td.side),
+                            format_ts(td.exchange_ts), format_ts(td.exchange_ts_raw),
+                            format_ts(td.received_ts));
+                        row_count += 1;
+                    }
+
+                    if row_count % 10_000 == 0 {
+                        let _ = wtr.flush();
+                    }
+                }
+            }))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     if args.tick_dump && !args.interval_ms.is_some() {
         eprintln!("Tick dump active (no snapshot interval). Press Ctrl-C to stop.");
     } else if let Some(interval_ms) = args.interval_ms {
@@ -552,6 +648,9 @@ async fn main() -> Result<()> {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         if let Some(h) = snap_handle {
+            let _ = h.await;
+        }
+        if let Some(h) = trade_handle {
             let _ = h.await;
         }
         for h in handles {

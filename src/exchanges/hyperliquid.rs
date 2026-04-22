@@ -65,6 +65,8 @@ impl HyperliquidFeed {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for HyperliquidFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&self.itype)
     }
@@ -103,18 +105,18 @@ impl ExchangeFeed for HyperliquidFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => {
                 if text.contains("\"channel\":\"subscriptionResponse\"")
                     || text.contains("\"channel\":\"pong\"")
                 {
                     debug!("Hyperliquid control message");
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 if !text.contains("\"channel\":\"l2Book\"") {
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 let response: HyperliquidL2Book = serde_json::from_str(text)?;
@@ -124,7 +126,7 @@ impl ExchangeFeed for HyperliquidFeed {
                     Some(s) => s.clone(),
                     None => {
                         debug!("Unknown coin from Hyperliquid: {}", coin);
-                        return Ok(None);
+                        return Ok(vec![]);
                     }
                 };
 
@@ -152,9 +154,9 @@ impl ExchangeFeed for HyperliquidFeed {
                     feed_latency_ns: 0,
                 };
 
-                Ok(Some((registry_sym, market_data)))
+                Ok(vec![(registry_sym, market_data)])
             }
-            WireMessage::Binary(_) => Ok(None),
+            WireMessage::Binary(_) => Ok(vec![]),
         }
     }
 }

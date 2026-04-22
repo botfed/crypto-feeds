@@ -103,6 +103,8 @@ struct ApexOrderbookMsg {
 
 #[async_trait::async_trait]
 impl ExchangeFeed for ApexFeed {
+    type Item = MarketData;
+
     fn get_itype(&self) -> Result<&InstrumentType> {
         Ok(&InstrumentType::Perp)
     }
@@ -160,14 +162,14 @@ impl ExchangeFeed for ApexFeed {
         msg: WireMessage<'_>,
         received_ts: DateTime<Utc>,
         received_instant: std::time::Instant,
-    ) -> Result<Option<(String, MarketData)>> {
+    ) -> Result<Vec<(String, MarketData)>> {
         match msg {
             WireMessage::Text(text) => {
                 if text.contains("\"success\":true") || text.contains("\"op\":\"pong\"") {
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
                 if text.contains("\"op\":\"ping\"") {
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 let response: ApexOrderbookMsg = match serde_json::from_str(text) {
@@ -176,13 +178,13 @@ impl ExchangeFeed for ApexFeed {
                         if !text.contains("\"op\"") {
                             error!("Apex parse error: {} — {}", e, &text[..text.len().min(200)]);
                         }
-                        return Ok(None);
+                        return Ok(vec![]);
                     }
                 };
 
                 if !response.topic.starts_with("orderBook") {
                     debug!("Apex ignoring topic: {}", response.topic);
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 let is_snapshot = response
@@ -209,7 +211,7 @@ impl ExchangeFeed for ApexFeed {
                     .ts
                     .and_then(|us| DateTime::from_timestamp_micros(us as i64));
 
-                Ok(Some((
+                Ok(vec![(
                     symbol,
                     MarketData {
                         bid,
@@ -222,9 +224,9 @@ impl ExchangeFeed for ApexFeed {
                         received_instant: Some(received_instant),
                     feed_latency_ns: 0,
                     },
-                )))
+                )])
             }
-            WireMessage::Binary(_) => Ok(None),
+            WireMessage::Binary(_) => Ok(vec![]),
         }
     }
 
