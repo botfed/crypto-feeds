@@ -45,7 +45,7 @@ struct BinanceBookTickerData {
 /// Binance feed implemented using the generic connection abstraction.
 struct BinanceFeed {
     /// "wss://stream.binance.com:9443/stream" for spot
-    /// "wss://fstream.binance.com/stream" for perp
+    /// "wss://fstream.binance.com/public/stream" for perp (bookTicker is /public)
     base_url: &'static str,
     itype: InstrumentType,
     mapper: BinanceMapper,
@@ -66,7 +66,7 @@ impl BinanceFeed {
 
     fn new_perp() -> Self {
         Self {
-            base_url: "wss://fstream.binance.com/stream",
+            base_url: "wss://fstream.binance.com/public/stream",
             itype: InstrumentType::Perp,
             mapper: BinanceMapper,
             last_update_id: std::sync::Mutex::new(HashMap::new()),
@@ -231,7 +231,7 @@ struct BinanceTradeFeed {
 impl BinanceTradeFeed {
     fn new_perp() -> Self {
         Self {
-            base_url: "wss://fstream.binance.com/stream",
+            base_url: "wss://fstream.binance.com/market/stream",
             itype: InstrumentType::Perp,
             mapper: BinanceMapper,
         }

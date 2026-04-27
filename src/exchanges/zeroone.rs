@@ -170,21 +170,44 @@ impl ExchangeFeed for ZeroOneBboFeed {
     }
 }
 
+/// Max symbols per WS connection. ZeroOne silently drops connections when too
+/// many (or any unsupported) streams are requested in a single URL.
+const MAX_STREAMS_PER_WS: usize = 5;
+
 pub async fn listen_perp_bbo(
     data: Arc<MarketDataCollection>,
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    let feed = Arc::new(ZeroOneBboFeed::new(symbols, InstrumentType::Perp));
-    listen_with_reconnect(
-        data,
-        symbols,
-        feed,
-        "zeroone_perp",
-        ConnectionConfig::default(),
-        shutdown,
-    )
-    .await
+    if symbols.len() <= MAX_STREAMS_PER_WS {
+        let feed = Arc::new(ZeroOneBboFeed::new(symbols, InstrumentType::Perp));
+        return listen_with_reconnect(
+            data, symbols, feed, "zeroone_perp",
+            ConnectionConfig::default(), shutdown,
+        ).await;
+    }
+
+    let mut handles = Vec::new();
+    for (i, chunk) in symbols.chunks(MAX_STREAMS_PER_WS).enumerate() {
+        let owned: Vec<String> = chunk.iter().map(|s| s.to_string()).collect();
+        let feed = Arc::new(ZeroOneBboFeed::new(chunk, InstrumentType::Perp));
+        let data = Arc::clone(&data);
+        let shutdown = Arc::clone(&shutdown);
+        let feed_name = format!("zeroone_perp_{}", i);
+        handles.push(tokio::spawn(async move {
+            let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = listen_with_reconnect(
+                data, &refs, feed, &feed_name,
+                ConnectionConfig::default(), shutdown,
+            ).await {
+                log::error!("{} error: {:?}", feed_name, e);
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+    Ok(())
 }
 
 // --- Trade Feed ---
@@ -287,14 +310,33 @@ pub async fn listen_perp_trades(
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    let feed = Arc::new(ZeroOneTradeFeed::new(symbols, InstrumentType::Perp));
-    listen_with_reconnect(
-        data,
-        symbols,
-        feed,
-        "zeroone_perp_trades",
-        ConnectionConfig::default(),
-        shutdown,
-    )
-    .await
+    if symbols.len() <= MAX_STREAMS_PER_WS {
+        let feed = Arc::new(ZeroOneTradeFeed::new(symbols, InstrumentType::Perp));
+        return listen_with_reconnect(
+            data, symbols, feed, "zeroone_perp_trades",
+            ConnectionConfig::default(), shutdown,
+        ).await;
+    }
+
+    let mut handles = Vec::new();
+    for (i, chunk) in symbols.chunks(MAX_STREAMS_PER_WS).enumerate() {
+        let owned: Vec<String> = chunk.iter().map(|s| s.to_string()).collect();
+        let feed = Arc::new(ZeroOneTradeFeed::new(chunk, InstrumentType::Perp));
+        let data = Arc::clone(&data);
+        let shutdown = Arc::clone(&shutdown);
+        let feed_name = format!("zeroone_perp_trades_{}", i);
+        handles.push(tokio::spawn(async move {
+            let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = listen_with_reconnect(
+                data, &refs, feed, &feed_name,
+                ConnectionConfig::default(), shutdown,
+            ).await {
+                log::error!("{} error: {:?}", feed_name, e);
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+    Ok(())
 }

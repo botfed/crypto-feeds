@@ -174,6 +174,10 @@ pub async fn listen_perp_bbo(
 // Trade feed
 // ---------------------------------------------------------------------------
 
+// Wire format (from docs):
+// GET /stream.extended.exchange/v1/publicTrades/{market}
+// {"ts":1701563440000,"data":[{"m":"BTC-USD","S":"BUY","tT":"TRADE","T":1701563440000,"p":"25670","q":"0.1","i":25124}],"seq":2}
+
 struct ExtendedTradeFeed {
     native_market: String,
     config_sym: String,
@@ -182,18 +186,21 @@ struct ExtendedTradeFeed {
 
 #[derive(Debug, Deserialize)]
 struct ExtendedTradeMsg {
-    data: ExtendedTradeData,
+    #[allow(dead_code)]
     ts: u64,
+    data: Vec<ExtendedTradeEntry>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ExtendedTradeData {
+struct ExtendedTradeEntry {
+    #[serde(rename = "S")]
+    side: String,
+    #[serde(rename = "T")]
+    trade_ts: u64,
     #[serde(rename = "p")]
     price: String,
     #[serde(rename = "q")]
     qty: String,
-    #[serde(rename = "s")]
-    side: String,
 }
 
 #[async_trait::async_trait]
@@ -214,7 +221,7 @@ impl ExchangeFeed for ExtendedTradeFeed {
 
     fn build_url(&self, _symbols: &[&str]) -> Result<String> {
         Ok(format!(
-            "wss://api.starknet.extended.exchange/stream.extended.exchange/v1/trades/{}",
+            "wss://api.starknet.extended.exchange/stream.extended.exchange/v1/publicTrades/{}",
             self.native_market
         ))
     }
@@ -234,31 +241,35 @@ impl ExchangeFeed for ExtendedTradeFeed {
             Err(_) => return Ok(vec![]),
         };
 
-        let price = trade_msg.data.price.parse::<f64>()?;
-        let qty = trade_msg.data.qty.parse::<f64>()?;
-        let side = match trade_msg.data.side.to_lowercase().as_str() {
-            "buy" | "b" => TradeSide::Buy,
-            "sell" | "s" => TradeSide::Sell,
-            _ => TradeSide::Unknown,
-        };
-        let exchange_ts = DateTime::from_timestamp_millis(trade_msg.ts as i64);
+        let mut results = Vec::with_capacity(trade_msg.data.len());
+        for entry in &trade_msg.data {
+            let price = entry.price.parse::<f64>()?;
+            let qty = entry.qty.parse::<f64>()?;
+            let side = match entry.side.as_str() {
+                "BUY" => TradeSide::Buy,
+                "SELL" => TradeSide::Sell,
+                _ => TradeSide::Unknown,
+            };
+            let exchange_ts = DateTime::from_timestamp_millis(entry.trade_ts as i64);
 
-        let trade = TradeData {
-            price,
-            qty,
-            side,
-            exchange_ts_raw: exchange_ts,
-            exchange_ts: None,
-            received_ts: Some(received_ts),
-            received_instant: Some(received_instant),
-            feed_latency_ns: 0,
-        };
+            results.push((self.config_sym.clone(), TradeData {
+                price,
+                qty,
+                side,
+                exchange_ts_raw: exchange_ts,
+                exchange_ts: None,
+                received_ts: Some(received_ts),
+                received_instant: Some(received_instant),
+                feed_latency_ns: 0,
+            }));
+        }
 
-        Ok(vec![(self.config_sym.clone(), trade)])
+        Ok(results)
     }
 }
 
-/// Spawns one WebSocket connection per symbol for trade feeds.
+/// Single WS for all symbols — publicTrades with no market param streams all markets.
+/// Per-symbol connections also work via /publicTrades/{market}.
 pub async fn listen_perp_trades(
     data: Arc<TradeDataCollection>,
     symbols: &[&str],

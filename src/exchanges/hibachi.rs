@@ -274,19 +274,27 @@ pub async fn listen_spot_bbo(
 // Trade feed
 // ---------------------------------------------------------------------------
 
+// Wire format:
+// {"data":{"trade":{"price":"77070.89","quantity":"0.003","takerSide":"Buy","timestamp":1777330560}},"symbol":"BTC/USDT-P","topic":"trades"}
+
 #[derive(Debug, Deserialize)]
 struct HibachiTradeMsg {
     symbol: String,
-    #[serde(default)]
-    timestamp_ms: Option<u64>,
-    data: HibachiTradeData,
+    data: HibachiTradeWrapper,
+}
+
+#[derive(Debug, Deserialize)]
+struct HibachiTradeWrapper {
+    trade: HibachiTradeData,
 }
 
 #[derive(Debug, Deserialize)]
 struct HibachiTradeData {
     price: String,
     quantity: String,
-    side: String,
+    #[serde(rename = "takerSide")]
+    taker_side: String,
+    timestamp: u64,
 }
 
 struct HibachiTradeFeed {
@@ -385,15 +393,15 @@ impl ExchangeFeed for HibachiTradeFeed {
             }
         };
 
-        let price = trade_msg.data.price.parse::<f64>()?;
-        let qty = trade_msg.data.quantity.parse::<f64>()?;
-        let side = match trade_msg.data.side.to_lowercase().as_str() {
-            "buy" => TradeSide::Buy,
-            "sell" => TradeSide::Sell,
+        let t = &trade_msg.data.trade;
+        let price = t.price.parse::<f64>()?;
+        let qty = t.quantity.parse::<f64>()?;
+        let side = match t.taker_side.as_str() {
+            "Buy" => TradeSide::Buy,
+            "Sell" => TradeSide::Sell,
             _ => TradeSide::Unknown,
         };
-        let exchange_ts = trade_msg.timestamp_ms
-            .and_then(|ms| DateTime::from_timestamp_millis(ms as i64));
+        let exchange_ts = DateTime::from_timestamp_millis(t.timestamp as i64 * 1000);
 
         let trade = TradeData {
             price,
