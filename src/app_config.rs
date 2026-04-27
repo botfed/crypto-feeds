@@ -675,5 +675,15 @@ pub fn load_trades(
             }
         }));
     }
+    if let Some(syms) = trade_syms("hyperliquid") {
+        let data = Arc::clone(&trade_data.hyperliquid);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = hyperliquid::listen_perp_trades(data, &symbol_refs, shutdown).await {
+                error!("Hyperliquid perp trades listener exited with error {:?}", e);
+            }
+        }));
+    }
     Ok(())
 }
