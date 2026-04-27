@@ -164,6 +164,16 @@ pub async fn print_bbo_data(market_data: Arc<AllMarketData>, shutdown: Arc<Notif
                     write_market_collection(&mut buf, "Aero    ", &md.aerodrome, None, 12, false, &mut s[12], &mut scratch, &mut no_cache);
                     write_market_collection(&mut buf, "Uniswap ", &md.uniswap, None, 13, false, &mut s[13], &mut scratch, &mut no_cache);
                     let (_, rows) = term_size();
+                    let log_reserve = 12;
+                    let data_budget = rows.saturating_sub(log_reserve);
+                    let n_lines = buf.lines().count();
+                    if n_lines > data_budget {
+                        let truncated = n_lines - data_budget + 1;
+                        let keep: String = buf.lines().take(data_budget.saturating_sub(1)).collect::<Vec<_>>().join("\n");
+                        buf = keep;
+                        let _ = writeln!(buf);
+                        let _ = writeln!(buf, "  ... {} more rows (terminal too small)", truncated);
+                    }
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
                     write_log_section(&mut buf, remaining);
@@ -259,6 +269,16 @@ pub async fn print_bbo_with_analytics(
                     let _ = writeln!(buf, "{}", perf_line);
 
                     let (_, rows) = term_size();
+                    let log_reserve = 12;
+                    let data_budget = rows.saturating_sub(log_reserve);
+                    let n_lines = buf.lines().count();
+                    if n_lines > data_budget {
+                        let truncated = n_lines - data_budget + 1;
+                        let keep: String = buf.lines().take(data_budget.saturating_sub(1)).collect::<Vec<_>>().join("\n");
+                        buf = keep;
+                        let _ = writeln!(buf);
+                        let _ = writeln!(buf, "  ... {} more rows (terminal too small)", truncated);
+                    }
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
                     write_log_section(&mut buf, remaining);

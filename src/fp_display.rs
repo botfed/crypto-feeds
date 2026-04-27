@@ -327,6 +327,16 @@ pub async fn run_display(
                     }
 
                     let (_, rows) = term_size();
+                    let log_reserve = 12;
+                    let data_budget = rows.saturating_sub(log_reserve);
+                    let n_lines = buf.lines().count();
+                    if n_lines > data_budget {
+                        let truncated = n_lines - data_budget + 1;
+                        let keep: String = buf.lines().take(data_budget.saturating_sub(1)).collect::<Vec<_>>().join("\n");
+                        buf = keep;
+                        let _ = writeln!(buf);
+                        let _ = writeln!(buf, "  ... {} more rows (terminal too small)", truncated);
+                    }
                     let used = buf.lines().count();
                     let remaining = rows.saturating_sub(used);
                     write_log_section(&mut buf, remaining);
