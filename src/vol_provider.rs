@@ -271,6 +271,7 @@ impl VolProvider {
             }
             VolProvider::Har { states } => {
                 let s = &mut states[group_idx];
+                if s.har_params.max_window() == 0 { return; }
                 let ts_ms = snap_ts_ns / 1_000_000;
                 s.bar_builder.feed(fair_price, ts_ms);
 

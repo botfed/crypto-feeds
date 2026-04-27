@@ -10,6 +10,7 @@ use crate::exchanges::connection::{
 };
 use crate::mappers::{ExtendedMapper, SymbolMapper};
 use crate::market_data::{InstrumentType, MarketData, MarketDataCollection};
+use crate::trade_data::{TradeData, TradeDataCollection, TradeSide};
 
 pub fn get_fees() -> ExchangeFees {
     // 0 bps maker, 2.5 bps taker
@@ -162,6 +163,144 @@ pub async fn listen_perp_bbo(
     }
 
     // Wait for all per-symbol tasks
+    for h in handles {
+        let _ = h.await;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Trade feed
+// ---------------------------------------------------------------------------
+
+struct ExtendedTradeFeed {
+    native_market: String,
+    config_sym: String,
+    itype: InstrumentType,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtendedTradeMsg {
+    data: ExtendedTradeData,
+    ts: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtendedTradeData {
+    #[serde(rename = "p")]
+    price: String,
+    #[serde(rename = "q")]
+    qty: String,
+    #[serde(rename = "s")]
+    side: String,
+}
+
+#[async_trait::async_trait]
+impl ExchangeFeed for ExtendedTradeFeed {
+    type Item = TradeData;
+
+    fn get_itype(&self) -> Result<&InstrumentType> {
+        Ok(&self.itype)
+    }
+
+    fn extra_headers(&self) -> Vec<(&str, &str)> {
+        vec![("User-Agent", "crypto-feeds/0.1")]
+    }
+
+    fn timestamp_dedup(&self) -> bool {
+        false
+    }
+
+    fn build_url(&self, _symbols: &[&str]) -> Result<String> {
+        Ok(format!(
+            "wss://api.starknet.extended.exchange/stream.extended.exchange/v1/trades/{}",
+            self.native_market
+        ))
+    }
+
+    fn parse_message(
+        &self,
+        msg: WireMessage<'_>,
+        received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
+    ) -> Result<Vec<(String, TradeData)>> {
+        let WireMessage::Text(text) = msg else {
+            return Ok(vec![]);
+        };
+
+        let trade_msg: ExtendedTradeMsg = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(_) => return Ok(vec![]),
+        };
+
+        let price = trade_msg.data.price.parse::<f64>()?;
+        let qty = trade_msg.data.qty.parse::<f64>()?;
+        let side = match trade_msg.data.side.to_lowercase().as_str() {
+            "buy" | "b" => TradeSide::Buy,
+            "sell" | "s" => TradeSide::Sell,
+            _ => TradeSide::Unknown,
+        };
+        let exchange_ts = DateTime::from_timestamp_millis(trade_msg.ts as i64);
+
+        let trade = TradeData {
+            price,
+            qty,
+            side,
+            exchange_ts_raw: exchange_ts,
+            exchange_ts: None,
+            received_ts: Some(received_ts),
+            received_instant: Some(received_instant),
+            feed_latency_ns: 0,
+        };
+
+        Ok(vec![(self.config_sym.clone(), trade)])
+    }
+}
+
+/// Spawns one WebSocket connection per symbol for trade feeds.
+pub async fn listen_perp_trades(
+    data: Arc<TradeDataCollection>,
+    symbols: &[&str],
+    shutdown: Arc<tokio::sync::Notify>,
+) -> Result<()> {
+    let mapper = ExtendedMapper;
+    let itype = InstrumentType::Perp;
+
+    let mut handles = Vec::with_capacity(symbols.len());
+
+    for &sym in symbols {
+        let native_market = mapper.denormalize(sym, itype)?;
+        let config_sym = sym.to_string();
+
+        let feed = Arc::new(ExtendedTradeFeed {
+            native_market: native_market.clone(),
+            config_sym,
+            itype,
+        });
+
+        let data = Arc::clone(&data);
+        let shutdown = Arc::clone(&shutdown);
+        let feed_name = format!("extended_perp_trades_{}", native_market);
+        let sym_owned = sym.to_string();
+
+        handles.push(tokio::spawn(async move {
+            let sym_refs: Vec<&str> = vec![sym_owned.as_str()];
+            if let Err(e) = listen_with_reconnect(
+                data,
+                &sym_refs,
+                feed,
+                &feed_name,
+                ConnectionConfig::default(),
+                shutdown,
+            )
+            .await
+            {
+                error!("Extended {} listener error: {:?}", feed_name, e);
+            }
+        }));
+    }
+
     for h in handles {
         let _ = h.await;
     }

@@ -16,6 +16,7 @@ use crate::exchanges::connection::{ConnectionConfig, calculate_backoff};
 use crate::mappers::{NadoMapper, SymbolMapper};
 use crate::market_data::{InstrumentType, MarketData, MarketDataCollection};
 use crate::symbol_registry::REGISTRY;
+use crate::trade_data::{TradeData, TradeDataCollection, TradeSide};
 
 const X18: f64 = 1e18;
 const FEED_NAME: &str = "nado_perp";
@@ -369,5 +370,234 @@ pub async fn listen_perp_bbo(
     }
 
     info!("Stopped {}", FEED_NAME);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Trade feed
+// ---------------------------------------------------------------------------
+
+const TRADE_FEED_NAME: &str = "nado_perp_trades";
+
+#[derive(Debug, Deserialize)]
+struct NadoTradeEvent {
+    #[serde(default)]
+    r#type: Option<String>,
+    #[serde(default)]
+    product_id: Option<u32>,
+    #[serde(default)]
+    price: Option<String>,
+    #[serde(default)]
+    quantity: Option<String>,
+    #[serde(default)]
+    is_buyer_maker: Option<bool>,
+    #[serde(default)]
+    timestamp: Option<String>,
+}
+
+fn parse_trade(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>, received_instant: std::time::Instant) -> Option<(String, TradeData)> {
+    if !text.contains("\"trade\"") {
+        return None;
+    }
+
+    let evt: NadoTradeEvent = serde_json::from_str(text).ok()?;
+
+    if evt.r#type.as_deref() != Some("trade") {
+        return None;
+    }
+
+    let pid = evt.product_id?;
+    let config_sym = feed.id_to_config.get(&pid)?;
+
+    let price = evt.price.as_deref().and_then(parse_x18)?;
+    let qty = evt.quantity.as_deref().and_then(parse_x18)?;
+
+    if price <= 0.0 || qty <= 0.0 {
+        return None;
+    }
+
+    let side = match evt.is_buyer_maker {
+        Some(true) => TradeSide::Sell,
+        Some(false) => TradeSide::Buy,
+        None => TradeSide::Unknown,
+    };
+
+    let exchange_ts = evt.timestamp.as_deref()
+        .and_then(|s| s.parse::<i64>().ok())
+        .and_then(|ns| DateTime::from_timestamp(ns / 1_000_000_000, (ns % 1_000_000_000) as u32));
+
+    Some((config_sym.to_string(), TradeData {
+        price,
+        qty,
+        side,
+        exchange_ts_raw: exchange_ts,
+        exchange_ts: None,
+        received_ts: Some(received_ts),
+        received_instant: Some(received_instant),
+        feed_latency_ns: 0,
+    }))
+}
+
+async fn connect_and_stream_trades(
+    data: &Arc<TradeDataCollection>,
+    feed: &NadoFeed,
+    config: &ConnectionConfig,
+) -> Result<bool> {
+    let ws_stream = match tokio::time::timeout(
+        config.message_timeout,
+        nado_ws::connect(WS_URL),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            error!("Failed to connect to {}: {}", TRADE_FEED_NAME, e);
+            return Ok(false);
+        }
+        Err(_) => {
+            error!("Connect timed out for {}", TRADE_FEED_NAME);
+            return Ok(false);
+        }
+    };
+
+    info!("Connected to {}", TRADE_FEED_NAME);
+
+    let (mut write, mut read) = ws_stream.split();
+
+    for (i, (&pid, sym)) in feed.id_to_config.iter().enumerate() {
+        let msg = json!({
+            "method": "subscribe",
+            "stream": {
+                "type": "trade",
+                "product_id": pid,
+            },
+            "id": i + 1,
+        });
+        debug!("Nado trade sub: {}", msg);
+        if let Err(e) = write
+            .send(Message::Text(msg.to_string().into()))
+            .await
+        {
+            error!("Failed to subscribe to Nado trades {} (product {}): {}", sym, pid, e);
+            close_nado(write, read).await;
+            return Ok(false);
+        }
+    }
+
+    let mut heartbeat = tokio::time::interval(config.heartbeat_interval);
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_message_time = Utc::now();
+
+    let result = loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                let elapsed = Utc::now() - last_message_time;
+                if elapsed > chrono::Duration::from_std(config.message_timeout)? {
+                    warn!("No messages for {:?} on {}, reconnecting", config.message_timeout, TRADE_FEED_NAME);
+                    break false;
+                }
+                if let Err(e) = write.send(Message::Ping(vec![].into())).await {
+                    error!("Failed heartbeat on {}: {}", TRADE_FEED_NAME, e);
+                    break false;
+                }
+            }
+
+            msg = read.next() => {
+                let received_ts = Utc::now();
+                last_message_time = received_ts;
+
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        let received_instant = std::time::Instant::now();
+                        if let Some((sym, trade)) = parse_trade(feed, text.as_str(), received_ts, received_instant) {
+                            if let Some(&id) = REGISTRY.lookup(&sym, &feed.itype) {
+                                data.push(&id, trade);
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Binary(_))) => {}
+                    Some(Ok(Message::Ping(payload))) => {
+                        let _ = write.send(Message::Pong(payload)).await;
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) => {
+                        warn!("{} socket closed.", TRADE_FEED_NAME);
+                        break false;
+                    }
+                    Some(Err(e)) => {
+                        error!("{} socket error: {}", TRADE_FEED_NAME, e);
+                        break false;
+                    }
+                    None => {
+                        warn!("{} stream ended.", TRADE_FEED_NAME);
+                        break false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    close_nado(write, read).await;
+    Ok(result)
+}
+
+pub async fn listen_perp_trades(
+    data: Arc<TradeDataCollection>,
+    symbols: &[&str],
+    shutdown: Arc<tokio::sync::Notify>,
+) -> Result<()> {
+    let feed = NadoFeed::new_perp(symbols).await?;
+
+    let mut config = ConnectionConfig::default();
+    config.heartbeat_interval = Duration::from_secs(15);
+
+    let mut retry_count: u32 = 0;
+
+    loop {
+        debug!("Connecting feed {} attempt {}", TRADE_FEED_NAME, retry_count + 1);
+        let attempt_start = std::time::Instant::now();
+
+        tokio::select! {
+            _ = shutdown.notified() => {
+                info!("Shutdown received for feed {}", TRADE_FEED_NAME);
+                break;
+            }
+
+            res = connect_and_stream_trades(&data, &feed, &config) => {
+                let was_long_lived = attempt_start.elapsed() > Duration::from_secs(60);
+
+                match res {
+                    Ok(true) => break,
+                    Ok(false) => {
+                        if was_long_lived { retry_count = 0; } else { retry_count += 1; }
+                        let backoff = calculate_backoff(retry_count, config.initial_backoff, config.max_retry_delay);
+                        error!("{} disconnected. Reconnecting in {:?}", TRADE_FEED_NAME, backoff);
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = shutdown.notified() => {
+                                info!("Shutdown during backoff for {}", TRADE_FEED_NAME);
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if was_long_lived { retry_count = 0; } else { retry_count += 1; }
+                        let backoff = calculate_backoff(retry_count, config.initial_backoff, config.max_retry_delay);
+                        error!("{} error: {}. Reconnecting in {:?}", TRADE_FEED_NAME, e, backoff);
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = shutdown.notified() => {
+                                info!("Shutdown during backoff for {}", TRADE_FEED_NAME);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    info!("Stopped {}", TRADE_FEED_NAME);
     Ok(())
 }

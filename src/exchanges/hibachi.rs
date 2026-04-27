@@ -3,6 +3,7 @@ use crate::exchanges::connection::{
     ConnectionConfig, ExchangeFeed, WireMessage, listen_with_reconnect,
 };
 use crate::market_data::{InstrumentType, MarketData, MarketDataCollection};
+use crate::trade_data::{TradeData, TradeDataCollection, TradeSide};
 use crate::orderbook::SyncBook;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -263,6 +264,163 @@ pub async fn listen_spot_bbo(
         symbols,
         feed,
         "hibachi_spot",
+        ConnectionConfig::default(),
+        shutdown,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Trade feed
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct HibachiTradeMsg {
+    symbol: String,
+    #[serde(default)]
+    timestamp_ms: Option<u64>,
+    data: HibachiTradeData,
+}
+
+#[derive(Debug, Deserialize)]
+struct HibachiTradeData {
+    price: String,
+    quantity: String,
+    side: String,
+}
+
+struct HibachiTradeFeed {
+    itype: InstrumentType,
+    native_to_registry: HashMap<String, String>,
+}
+
+impl HibachiTradeFeed {
+    fn new(symbols: &[&str], itype: InstrumentType) -> Self {
+        let mut native_to_registry = HashMap::new();
+        for sym in symbols {
+            let parts: Vec<&str> = sym.split('_').collect();
+            let (base, quote) = if parts.len() == 3 {
+                (parts[1], parts[2])
+            } else if parts.len() == 2 {
+                (parts[0], parts[1])
+            } else {
+                continue;
+            };
+            let native = match itype {
+                InstrumentType::Perp => format!("{}/{}-P", base.to_uppercase(), quote.to_uppercase()),
+                _ => format!("{}/{}", base.to_uppercase(), quote.to_uppercase()),
+            };
+            let registry = format!("{}{}", base.to_uppercase(), quote.to_uppercase());
+            native_to_registry.insert(native, registry);
+        }
+        Self { itype, native_to_registry }
+    }
+}
+
+#[async_trait::async_trait]
+impl ExchangeFeed for HibachiTradeFeed {
+    type Item = TradeData;
+
+    fn get_itype(&self) -> Result<&InstrumentType> {
+        Ok(&self.itype)
+    }
+
+    fn timestamp_dedup(&self) -> bool {
+        false
+    }
+
+    fn build_url(&self, _symbols: &[&str]) -> Result<String> {
+        Ok("wss://data-api.hibachi.xyz/ws/market".to_string())
+    }
+
+    async fn send_subscription(
+        &self,
+        write: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+        symbols: &[&str],
+    ) -> Result<()> {
+        let subscriptions: Vec<serde_json::Value> = symbols
+            .iter()
+            .map(|sym| {
+                let native = HibachiFeed::to_native(sym, self.itype);
+                json!({"symbol": native, "topic": "trades"})
+            })
+            .collect();
+
+        let sub_msg = json!({
+            "method": "subscribe",
+            "parameters": {
+                "subscriptions": subscriptions
+            }
+        });
+        write
+            .send(Message::Text(sub_msg.to_string().into()))
+            .await?;
+        Ok(())
+    }
+
+    fn parse_message(
+        &self,
+        msg: WireMessage<'_>,
+        received_ts: DateTime<Utc>,
+        received_instant: std::time::Instant,
+    ) -> Result<Vec<(String, TradeData)>> {
+        let WireMessage::Text(text) = msg else {
+            return Ok(vec![]);
+        };
+
+        if !text.contains("\"trades\"") {
+            return Ok(vec![]);
+        }
+
+        let trade_msg: HibachiTradeMsg = match serde_json::from_str(text) {
+            Ok(v) => v,
+            Err(_) => return Ok(vec![]),
+        };
+
+        let registry_sym = match self.native_to_registry.get(&trade_msg.symbol) {
+            Some(s) => s.clone(),
+            None => {
+                debug!("Unknown symbol from Hibachi trades: {}", trade_msg.symbol);
+                return Ok(vec![]);
+            }
+        };
+
+        let price = trade_msg.data.price.parse::<f64>()?;
+        let qty = trade_msg.data.quantity.parse::<f64>()?;
+        let side = match trade_msg.data.side.to_lowercase().as_str() {
+            "buy" => TradeSide::Buy,
+            "sell" => TradeSide::Sell,
+            _ => TradeSide::Unknown,
+        };
+        let exchange_ts = trade_msg.timestamp_ms
+            .and_then(|ms| DateTime::from_timestamp_millis(ms as i64));
+
+        let trade = TradeData {
+            price,
+            qty,
+            side,
+            exchange_ts_raw: exchange_ts,
+            exchange_ts: None,
+            received_ts: Some(received_ts),
+            received_instant: Some(received_instant),
+            feed_latency_ns: 0,
+        };
+
+        Ok(vec![(registry_sym, trade)])
+    }
+}
+
+pub async fn listen_perp_trades(
+    data: Arc<TradeDataCollection>,
+    symbols: &[&str],
+    shutdown: Arc<tokio::sync::Notify>,
+) -> Result<()> {
+    let feed = Arc::new(HibachiTradeFeed::new(symbols, InstrumentType::Perp));
+    listen_with_reconnect(
+        data,
+        symbols,
+        feed,
+        "hibachi_perp_trades",
         ConnectionConfig::default(),
         shutdown,
     )

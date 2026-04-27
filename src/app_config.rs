@@ -645,5 +645,35 @@ pub fn load_trades(
             }
         }));
     }
+    if let Some(syms) = trade_syms("hibachi") {
+        let data = Arc::clone(&trade_data.hibachi);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = hibachi::listen_perp_trades(data, &symbol_refs, shutdown).await {
+                error!("Hibachi perp trades listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = trade_syms("extended") {
+        let data = Arc::clone(&trade_data.extended);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = extended::listen_perp_trades(data, &symbol_refs, shutdown).await {
+                error!("Extended perp trades listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = trade_syms("nado") {
+        let data = Arc::clone(&trade_data.nado);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = nado::listen_perp_trades(data, &symbol_refs, shutdown).await {
+                error!("Nado perp trades listener exited with error {:?}", e);
+            }
+        }));
+    }
     Ok(())
 }
