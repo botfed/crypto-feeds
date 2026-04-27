@@ -379,6 +379,9 @@ pub async fn listen_perp_bbo(
 
 const TRADE_FEED_NAME: &str = "nado_perp_trades";
 
+// Wire: {"type":"trade","timestamp":"1676151190656903000","product_id":1,
+//        "price":"25000000000000000000000","taker_qty":"1000000000000000000",
+//        "maker_qty":"1000000000000000000","is_taker_buyer":true}
 #[derive(Debug, Deserialize)]
 struct NadoTradeEvent {
     #[serde(default)]
@@ -388,9 +391,9 @@ struct NadoTradeEvent {
     #[serde(default)]
     price: Option<String>,
     #[serde(default)]
-    quantity: Option<String>,
+    taker_qty: Option<String>,
     #[serde(default)]
-    is_buyer_maker: Option<bool>,
+    is_taker_buyer: Option<bool>,
     #[serde(default)]
     timestamp: Option<String>,
 }
@@ -410,15 +413,15 @@ fn parse_trade(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>, received
     let config_sym = feed.id_to_config.get(&pid)?;
 
     let price = evt.price.as_deref().and_then(parse_x18)?;
-    let qty = evt.quantity.as_deref().and_then(parse_x18)?;
+    let qty = evt.taker_qty.as_deref().and_then(parse_x18)?;
 
     if price <= 0.0 || qty <= 0.0 {
         return None;
     }
 
-    let side = match evt.is_buyer_maker {
-        Some(true) => TradeSide::Sell,
-        Some(false) => TradeSide::Buy,
+    let side = match evt.is_taker_buyer {
+        Some(true) => TradeSide::Buy,
+        Some(false) => TradeSide::Sell,
         None => TradeSide::Unknown,
     };
 
