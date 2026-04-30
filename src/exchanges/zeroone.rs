@@ -71,7 +71,7 @@ fn build_native_to_registry(symbols: &[&str]) -> HashMap<String, String> {
         let native = to_native(sym);
         let parts: Vec<&str> = sym.split('_').collect();
         let base = if parts.len() == 3 { parts[1] } else if parts.len() == 2 { parts[0] } else { continue };
-        let registry = format!("{}USDT", base.to_uppercase());
+        let registry = format!("{}USD", base.to_uppercase());
         map.insert(native, registry);
     }
     map

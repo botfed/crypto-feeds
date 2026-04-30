@@ -35,6 +35,8 @@ impl Default for ConnectionConfig {
 pub enum ConnectionResult {
     Shutdown,
     Reconnect,
+    /// Server sent Retry-After header (e.g. 429). Backoff for at least this long.
+    RetryAfter(Duration),
     InvalidConfig,
 }
 
@@ -132,6 +134,18 @@ pub async fn listen_with_reconnect<F: ExchangeFeed, S: DataSink<F::Item>>(
                 match res {
                     Ok(ConnectionResult::Shutdown | ConnectionResult::InvalidConfig) => break,
 
+                    Ok(ConnectionResult::RetryAfter(delay)) => {
+                        retry_count = 0; // server told us when, reset exponential
+                        warn!("{} rate limited. Waiting {:?} (retry-after)", feed_name, delay);
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            _ = shutdown.notified() => {
+                                info!("Shutdown during retry-after for {}", feed_name);
+                                break;
+                            }
+                        }
+                    }
+
                     Ok(ConnectionResult::Reconnect) => {
                         if was_long_lived {
                             retry_count = 0;
@@ -227,6 +241,18 @@ async fn connect_and_stream<F: ExchangeFeed, S: DataSink<F::Item>>(
     {
         Ok(Ok((stream, _))) => stream,
         Ok(Err(e)) => {
+            // Extract Retry-After from HTTP 429 responses
+            if let tokio_tungstenite::tungstenite::Error::Http(ref resp) = e {
+                if resp.status() == 429 {
+                    let retry_secs = resp.headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(60);
+                    error!("Failed to connect to {} HTTP error: 429 Too Many Requests (retry-after: {}s)", feed_name, retry_secs);
+                    return Ok(ConnectionResult::RetryAfter(Duration::from_secs(retry_secs)));
+                }
+            }
             error!("Failed to connect to {} {}", feed_name, e);
             return Ok(ConnectionResult::Reconnect);
         }
