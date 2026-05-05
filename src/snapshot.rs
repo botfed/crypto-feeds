@@ -100,6 +100,7 @@ pub struct AllSnapshotData {
     pub hibachi: Arc<SnapshotCollection>,
     pub hotstuff: Arc<SnapshotCollection>,
     pub zeroone: Arc<SnapshotCollection>,
+    pub risex: Arc<SnapshotCollection>,
 }
 
 impl std::fmt::Debug for AllSnapshotData {
@@ -130,6 +131,7 @@ impl AllSnapshotData {
             hibachi: new_coll(),
             hotstuff: new_coll(),
             zeroone: new_coll(),
+            risex: new_coll(),
         }
     }
 
@@ -153,6 +155,7 @@ impl AllSnapshotData {
             Exchange::Hibachi => &self.hibachi,
             Exchange::Hotstuff => &self.hotstuff,
             Exchange::ZeroOne => &self.zeroone,
+            Exchange::RiseX => &self.risex,
         }
     }
 
@@ -177,12 +180,13 @@ impl AllSnapshotData {
             (Hibachi, &self.hibachi),
             (Hotstuff, &self.hotstuff),
             (ZeroOne, &self.zeroone),
+            (RiseX, &self.risex),
         ]
         .into_iter()
     }
 }
 
-const NUM_EXCHANGES: usize = 18;
+const NUM_EXCHANGES: usize = 19;
 
 fn exchange_index(exchange: &Exchange) -> usize {
     match exchange {
@@ -204,6 +208,7 @@ fn exchange_index(exchange: &Exchange) -> usize {
         Exchange::Hibachi => 15,
         Exchange::Hotstuff => 16,
         Exchange::ZeroOne => 17,
+        Exchange::RiseX => 18,
     }
 }
 

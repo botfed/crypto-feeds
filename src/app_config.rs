@@ -593,6 +593,16 @@ pub fn load_perp(
             }
         }));
     }
+    if let Some(syms) = perp_syms("risex") {
+        let data = Arc::clone(&market_data.risex);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = risex::listen_perp_bbo(data, &symbol_refs, shutdown).await {
+                error!("RiseX perp listener exited with error {:?}", e);
+            }
+        }));
+    }
     Ok(())
 }
 
@@ -642,6 +652,16 @@ pub fn load_trades(
             let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
             if let Err(e) = zeroone::listen_perp_trades(data, &symbol_refs, shutdown).await {
                 error!("ZeroOne perp trades listener exited with error {:?}", e);
+            }
+        }));
+    }
+    if let Some(syms) = trade_syms("risex") {
+        let data = Arc::clone(&trade_data.risex);
+        let shutdown = shutdown.clone();
+        handles.push(tokio::spawn(async move {
+            let symbol_refs: Vec<&str> = syms.iter().map(|s| s.as_str()).collect();
+            if let Err(e) = risex::listen_perp_trades(data, &symbol_refs, shutdown).await {
+                error!("RiseX perp trades listener exited with error {:?}", e);
             }
         }));
     }

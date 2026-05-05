@@ -13,5 +13,6 @@ pub mod apex;
 pub mod hibachi;
 pub mod hotstuff;
 pub mod hyperliquid;
+pub mod risex;
 pub mod zeroone;
 pub mod connection;

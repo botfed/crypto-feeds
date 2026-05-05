@@ -157,6 +157,7 @@ pub struct AllMarketData {
     pub hibachi: Arc<MarketDataCollection>,
     pub hotstuff: Arc<MarketDataCollection>,
     pub zeroone: Arc<MarketDataCollection>,
+    pub risex: Arc<MarketDataCollection>,
 }
 
 // Debug impl
@@ -186,6 +187,7 @@ pub enum Exchange {
     Hibachi,
     Hotstuff,
     ZeroOne,
+    RiseX,
 }
 
 impl Exchange {
@@ -209,6 +211,7 @@ impl Exchange {
             Exchange::Hibachi => "hibachi",
             Exchange::Hotstuff => "hotstuff",
             Exchange::ZeroOne => "zeroone",
+            Exchange::RiseX => "risex",
         }
     }
 
@@ -232,6 +235,7 @@ impl Exchange {
             "hibachi" => Some(Exchange::Hibachi),
             "hotstuff" => Some(Exchange::Hotstuff),
             "zeroone" => Some(Exchange::ZeroOne),
+            "risex" | "rise" => Some(Exchange::RiseX),
             _ => None,
         }
     }
@@ -259,6 +263,7 @@ impl AllMarketData {
             (Hibachi, &self.hibachi),
             (Hotstuff, &self.hotstuff),
             (ZeroOne, &self.zeroone),
+            (RiseX, &self.risex),
         ]
         .into_iter()
     }
@@ -283,6 +288,7 @@ impl AllMarketData {
             Exchange::Hibachi => &self.hibachi,
             Exchange::Hotstuff => &self.hotstuff,
             Exchange::ZeroOne => &self.zeroone,
+            Exchange::RiseX => &self.risex,
         }
     }
 }
@@ -313,6 +319,7 @@ impl AllMarketData {
             hibachi: new_coll(),
             hotstuff: new_coll(),
             zeroone: new_coll(),
+            risex: new_coll(),
         }
     }
 }
