@@ -9,7 +9,6 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures_util::SinkExt;
 use futures_util::stream::SplitSink;
-use log::debug;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -90,6 +89,7 @@ struct RiseObLevel {
     price: String,
     quantity: String,
     #[serde(default)]
+    #[allow(dead_code)]
     order_count: Option<u32>,
 }
 
@@ -273,6 +273,7 @@ struct RiseTradeMsg {
 #[derive(Debug, Deserialize)]
 struct RiseTradeData {
     #[serde(default)]
+    #[allow(dead_code)]
     id: Option<String>,
     #[serde(default)]
     maker_side: Option<u32>,
