@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{TimeDelta, Utc};
-use log::{info, warn};
+use log::{info, warn, debug};
 use std::path::Path;
 
 /// A completed OHLCV bar.
@@ -152,13 +152,13 @@ pub async fn load_1m_bars_with_backfill(
     let gap_minutes = (now_ms - fetch_from) / 60_000;
 
     if gap_minutes > 1 {
-        info!(
+        debug!(
             "{}: disk bars end {}m ago, fetching from Binance API",
             symbol, gap_minutes
         );
         match fetch_binance_1m_bars(symbol, fetch_from).await {
             Ok(mut fetched) => {
-                info!("{}: fetched {} bars from Binance", symbol, fetched.len());
+                debug!("{}: fetched {} bars from Binance", symbol, fetched.len());
                 bars.append(&mut fetched);
                 bars.sort_by_key(|b| b.open_time_ms);
                 bars.dedup_by_key(|b| b.open_time_ms);
