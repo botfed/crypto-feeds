@@ -47,9 +47,15 @@ pub struct ClockCorrectionConfig {
     pub ewma_decay: f64,
 }
 
-fn default_cc_method() -> String { "ewma".to_string() }
-fn default_min_latency_ms() -> f64 { 1.0 }
-fn default_ewma_decay() -> f64 { 0.999 }
+fn default_cc_method() -> String {
+    "ewma".to_string()
+}
+fn default_min_latency_ms() -> f64 {
+    1.0
+}
+fn default_ewma_decay() -> f64 {
+    0.999
+}
 
 impl Default for ClockCorrectionConfig {
     fn default() -> Self {
@@ -89,6 +95,18 @@ impl InstrumentType {
 impl MarketData {
     pub fn midquote(&self) -> Option<f64> {
         return Some((self.bid? + self.ask?) / 2.0);
+    }
+    pub fn microprice(&self) -> Option<f64> {
+        let bid = self.bid?;
+        let ask = self.ask?;
+        let bid_qty = self.bid_qty?;
+        let ask_qty = self.ask_qty?;
+        let sum = bid_qty + ask_qty;
+        if sum > 0.0 {
+            Some((bid * ask_qty + ask * bid_qty) / (bid_qty + ask_qty))
+        } else {
+            None
+        }
     }
 }
 
@@ -381,7 +399,11 @@ impl MarketDataCollection {
 
     /// Number of ticks written for this symbol. Use to detect new data.
     pub fn write_count(&self, id: &SymbolId) -> u64 {
-        self.slots[*id].ring.get().map(|r| r.write_count()).unwrap_or(0)
+        self.slots[*id]
+            .ring
+            .get()
+            .map(|r| r.write_count())
+            .unwrap_or(0)
     }
 
     /// Direct access to the underlying ring buffer for a symbol.
@@ -394,6 +416,20 @@ impl MarketDataCollection {
         let bid = md.bid?;
         let ask = md.ask?;
         Some((bid + ask) / 2.0)
+    }
+
+    pub fn get_microprice(&self, id: &SymbolId) -> Option<f64> {
+        let md = self.latest(id)?;
+        let bid = md.bid?;
+        let ask = md.ask?;
+        let bid_qty = md.bid_qty?;
+        let ask_qty = md.ask_qty?;
+        let sum = bid_qty + ask_qty;
+        if sum > 0.0 {
+            Some((bid * ask_qty + ask * bid_qty) / (bid_qty + ask_qty))
+        } else {
+            None
+        }
     }
 
     /// Blocking latest with retries — for diagnostic/non-hot-path reads.
