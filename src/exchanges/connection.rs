@@ -93,6 +93,11 @@ pub trait ExchangeFeed: Send + Sync {
         None
     }
 
+    /// Called after a new WS connection is established and subscribed.
+    /// Feeds with stateful books should clear them here so the first
+    /// message (snapshot) rebuilds from scratch.
+    fn on_connected(&self) {}
+
     fn build_url(&self, symbols: &[&str]) -> Result<String>;
 
     /// Return:
@@ -271,6 +276,8 @@ async fn connect_and_stream<F: ExchangeFeed, S: DataSink<F::Item>>(
         close_stream(write, read, feed_name).await;
         return Ok(ConnectionResult::Reconnect);
     }
+
+    feed.on_connected();
 
     let mut heartbeat = interval(config.heartbeat_interval);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

@@ -115,6 +115,10 @@ impl ExchangeFeed for ZeroOneBboFeed {
         false
     }
 
+    fn on_connected(&self) {
+        self.books.lock().unwrap().values_mut().for_each(|b| b.clear());
+    }
+
     fn parse_message(
         &self,
         msg: WireMessage<'_>,
