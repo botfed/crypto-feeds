@@ -5,10 +5,12 @@ use crate::exchanges::connection::{
 use crate::market_data::{InstrumentType, MarketData, MarketDataCollection};
 use crate::trade_data::{TradeData, TradeDataCollection, TradeSide};
 use crate::orderbook::SyncBook;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use futures_util::SinkExt;
 use futures_util::stream::SplitSink;
+use log::warn;
+use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -24,13 +26,72 @@ pub fn get_fees() -> ExchangeFees {
 // Symbol mapping: config "BTC_USDC" → RiseX market_id, registry "BTCUSDC"
 // ---------------------------------------------------------------------------
 
-/// Map from config symbol (e.g. "BTC_USDC") to (market_id, registry_symbol).
-fn build_symbol_maps(symbols: &[&str]) -> (HashMap<u32, String>, Vec<u32>) {
-    // Known market IDs from RiseX mainnet
-    let known: &[(&str, u32)] = &[
-        ("BTC", 1), ("ETH", 2), ("BNB", 3), ("SOL", 4),
-        ("HYPE", 5), ("XRP", 6), ("TAO", 7), ("ZEC", 8),
-    ];
+const API_URL: &str = "https://api.rise.trade";
+
+#[derive(Debug, Deserialize)]
+struct ApiWrapper {
+    data: ApiMarketsData,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiMarketsData {
+    markets: Vec<ApiMarketRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiMarketRow {
+    market_id: String,
+    display_name: String,
+}
+
+/// Fetch market list from Rise REST API with retries.
+async fn fetch_markets(client: &Client) -> Result<Vec<ApiMarketRow>> {
+    let url = format!("{}/v1/markets", API_URL);
+    let mut last_err = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+        }
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.context("read response body")?;
+                if !status.is_success() {
+                    last_err = Some(anyhow::anyhow!("GET /v1/markets -> {status}: {body}"));
+                    continue;
+                }
+                let wrapper: ApiWrapper =
+                    serde_json::from_str(&body).context("decode markets JSON")?;
+                return Ok(wrapper.data.markets);
+            }
+            Err(e) => {
+                last_err = Some(e.into());
+            }
+        }
+    }
+    Err(last_err.unwrap())
+}
+
+/// Parse display_name like "BTC/USDC" → base "BTC".
+fn base_from_display_name(name: &str) -> Option<&str> {
+    name.split('/').next()
+}
+
+/// Build symbol maps dynamically from the REST API.
+/// Maps config symbols (e.g. "BTC_USDC" or "PERP_BTC_USDC") to market_ids.
+async fn build_symbol_maps(symbols: &[&str]) -> Result<(HashMap<u32, String>, Vec<u32>)> {
+    let client = Client::new();
+    let rows = fetch_markets(&client).await?;
+
+    // base asset (uppercase) -> market_id
+    let api_map: HashMap<String, u32> = rows
+        .iter()
+        .filter_map(|r| {
+            let base = base_from_display_name(&r.display_name)?;
+            let mid: u32 = r.market_id.parse().ok()?;
+            Some((base.to_uppercase(), mid))
+        })
+        .collect();
 
     let mut id_to_registry = HashMap::new();
     let mut market_ids = Vec::new();
@@ -46,14 +107,16 @@ fn build_symbol_maps(symbols: &[&str]) -> (HashMap<u32, String>, Vec<u32>) {
         };
 
         let base_upper = base.to_uppercase();
-        if let Some(&(_, mid)) = known.iter().find(|(b, _)| *b == base_upper) {
+        if let Some(&mid) = api_map.get(&base_upper) {
             let registry = format!("{}{}", base_upper, quote.to_uppercase());
             id_to_registry.insert(mid, registry);
             market_ids.push(mid);
+        } else {
+            warn!("RiseX: symbol '{}' (base={}) not found in /v1/markets", sym, base_upper);
         }
     }
 
-    (id_to_registry, market_ids)
+    Ok((id_to_registry, market_ids))
 }
 
 // ---------------------------------------------------------------------------
@@ -101,13 +164,13 @@ struct RiseXBboFeed {
 }
 
 impl RiseXBboFeed {
-    fn new(symbols: &[&str], itype: InstrumentType) -> Self {
-        let (id_to_registry, market_ids) = build_symbol_maps(symbols);
+    async fn new(symbols: &[&str], itype: InstrumentType) -> Result<Self> {
+        let (id_to_registry, market_ids) = build_symbol_maps(symbols).await?;
         let mut books = HashMap::new();
         for &mid in &market_ids {
             books.insert(mid, SyncBook::new());
         }
-        Self { itype, id_to_registry, market_ids, books }
+        Ok(Self { itype, id_to_registry, market_ids, books })
     }
 }
 
@@ -245,7 +308,7 @@ pub async fn listen_perp_bbo(
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    let feed = Arc::new(RiseXBboFeed::new(symbols, InstrumentType::Perp));
+    let feed = Arc::new(RiseXBboFeed::new(symbols, InstrumentType::Perp).await?);
     listen_with_reconnect(
         data, symbols, feed, "risex_perp",
         ConnectionConfig::default(), shutdown,
@@ -290,9 +353,9 @@ struct RiseXTradeFeed {
 }
 
 impl RiseXTradeFeed {
-    fn new(symbols: &[&str], itype: InstrumentType) -> Self {
-        let (id_to_registry, market_ids) = build_symbol_maps(symbols);
-        Self { itype, id_to_registry, market_ids }
+    async fn new(symbols: &[&str], itype: InstrumentType) -> Result<Self> {
+        let (id_to_registry, market_ids) = build_symbol_maps(symbols).await?;
+        Ok(Self { itype, id_to_registry, market_ids })
     }
 }
 
@@ -403,7 +466,7 @@ pub async fn listen_perp_trades(
     symbols: &[&str],
     shutdown: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    let feed = Arc::new(RiseXTradeFeed::new(symbols, InstrumentType::Perp));
+    let feed = Arc::new(RiseXTradeFeed::new(symbols, InstrumentType::Perp).await?);
     listen_with_reconnect(
         data, symbols, feed, "risex_trades",
         ConnectionConfig::default(), shutdown,
