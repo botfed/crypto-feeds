@@ -96,7 +96,14 @@ pub async fn listen_onchain(
     rpc_url: String,
     shutdown: Arc<Notify>,
 ) -> Result<()> {
-    let rpc_label = rpc_url.split(&['?', '#'][..]).next().unwrap_or(&rpc_url);
+    // Show scheme + host only — strip path to avoid leaking API keys (e.g. /v3/<key>)
+    let rpc_label = if let Some(idx) = rpc_url.find("://") {
+        let after_scheme = &rpc_url[idx + 3..];
+        let host_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+        &rpc_url[..idx + 3 + host_end]
+    } else {
+        &rpc_url
+    };
     let mut retry_count = 0u32;
 
     loop {
