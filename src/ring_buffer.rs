@@ -297,6 +297,7 @@ mod tests {
             exchange_ts_raw: None,
             exchange_ts: None,
             received_ts: Some(Utc::now()),
+            ..Default::default()
         }
     }
 

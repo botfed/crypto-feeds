@@ -1330,6 +1330,7 @@ mod tests {
                 exchange_ts_raw: Some(now),
                 exchange_ts: None,
                 received_ts: Some(now),
+                ..Default::default()
             },
         );
         tick_data.coinbase.push(
@@ -1342,6 +1343,7 @@ mod tests {
                 exchange_ts_raw: Some(now),
                 exchange_ts: None,
                 received_ts: Some(now),
+                ..Default::default()
             },
         );
 

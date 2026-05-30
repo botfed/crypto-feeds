@@ -96,6 +96,7 @@ pub async fn listen_onchain(
     rpc_url: String,
     shutdown: Arc<Notify>,
 ) -> Result<()> {
+    let rpc_label = rpc_url.split(&['?', '#'][..]).next().unwrap_or(&rpc_url);
     let mut retry_count = 0u32;
 
     loop {
@@ -103,7 +104,7 @@ pub async fn listen_onchain(
 
         let result = tokio::select! {
             _ = shutdown.notified() => {
-                info!("Onchain feed shutdown");
+                info!("Onchain feed shutdown (rpc={})", rpc_label);
                 return Ok(());
             }
             result = async {
@@ -164,11 +165,11 @@ pub async fn listen_onchain(
         match result {
             Ok(()) => break,
             Err(e) => {
-                error!("Onchain feed error: {:#}. Reconnecting in {:?}", e, backoff);
+                error!("Onchain feed error (rpc={}): {:#}. Reconnecting in {:?}", rpc_label, e, backoff);
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = shutdown.notified() => {
-                        info!("Onchain shutdown during backoff");
+                        info!("Onchain shutdown during backoff (rpc={})", rpc_label);
                         break;
                     }
                 }

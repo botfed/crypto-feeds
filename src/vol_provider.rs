@@ -478,6 +478,7 @@ mod tests {
                 exchange_ts_raw: None,
                 exchange_ts: None,
                 received_ts: None,
+                ..Default::default()
             },
         );
 
