@@ -24,6 +24,9 @@ pub mod volume_fetcher;
 #[cfg(feature = "python")]
 pub mod python;
 
+#[cfg(feature = "hft")]
+pub mod hft;
+
 pub use exchange_fees::{ExchangeFees, FeeSchedule};
 pub use market_data::{AllMarketData, MarketData, MarketDataCollection};
 pub use trade_data::{AllTradeData, TradeData, TradeDataCollection, TradeSide};
