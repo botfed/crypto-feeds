@@ -136,6 +136,12 @@ impl DataSink<MarketData> for MarketDataCollection {
     }
 }
 
+impl DataSink<MarketData> for Arc<MarketDataCollection> {
+    fn push(&self, id: &SymbolId, item: MarketData) {
+        MarketDataCollection::push(self, id, item);
+    }
+}
+
 struct SymbolSlot {
     ring: OnceLock<Box<RingBuffer<MarketData>>>,
     clock_offset_ewma_ns: AtomicI64,

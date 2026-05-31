@@ -1662,11 +1662,14 @@ dependencies = [
  "pyo3",
  "reqwest",
  "rustc-hash",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "serde_yaml",
  "tokio",
  "tokio-tungstenite 0.28.0",
+ "webpki-roots 1.0.4",
 ]
 
 [[package]]
