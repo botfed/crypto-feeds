@@ -483,6 +483,7 @@ async fn main() -> Result<()> {
 
     let cfg: AppConfig = load_config(&args.config_path)
         .with_context(|| format!("loading {}", args.config_path))?;
+    eprintln!("Config: {}", args.config_path);
 
     crypto_feeds::symbol_registry::seed_extra_bases(cfg.base_assets());
 
