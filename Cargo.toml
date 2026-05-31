@@ -22,6 +22,8 @@ csv = "1.3"
 dotenv = "0.15.0"
 env_logger = "0.11.8"
 flate2 = "1"
+arrow = { version = "54", features = ["chrono-tz"] }
+parquet = { version = "54", features = ["snap", "zstd"] }
 futures-util = "0.3.31"
 libc = "0.2"
 log = "0.4.29"

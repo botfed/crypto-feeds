@@ -1,13 +1,19 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use flate2::write::GzEncoder;
-use flate2::Compression;
-use std::io::{BufWriter, Write};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 use tokio::sync::Notify;
 use tokio::time::{self, MissedTickBehavior};
+
+use arrow::array::{
+    Float64Builder, Int64Builder, StringBuilder,
+};
+use arrow::datatypes::{DataType, Field, Schema};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
 
 use crypto_feeds::app_config::{load_config, load_onchain, load_perp, load_spot, load_trades, AppConfig};
 use crypto_feeds::trade_data::AllTradeData;
@@ -25,6 +31,7 @@ struct SampleTarget {
     canonical: String,
     collection: Arc<MarketDataCollection>,
     symbol_id: SymbolId,
+    prev_write_pos: u64,
 }
 
 fn build_targets(cfg: &AppConfig, market_data: &AllMarketData) -> Vec<SampleTarget> {
@@ -41,6 +48,7 @@ fn build_targets(cfg: &AppConfig, market_data: &AllMarketData) -> Vec<SampleTarg
                         canonical,
                         collection: Arc::clone(coll),
                         symbol_id: id,
+                        prev_write_pos: 0,
                     });
                 }
             }
@@ -54,6 +62,7 @@ fn build_targets(cfg: &AppConfig, market_data: &AllMarketData) -> Vec<SampleTarg
                         canonical,
                         collection: Arc::clone(coll),
                         symbol_id: id,
+                        prev_write_pos: 0,
                     });
                 }
             }
@@ -76,6 +85,7 @@ fn build_targets(cfg: &AppConfig, market_data: &AllMarketData) -> Vec<SampleTarg
                             canonical,
                             collection: Arc::clone(coll),
                             symbol_id: id,
+                            prev_write_pos: 0,
                         });
                     }
                 }
@@ -91,6 +101,7 @@ struct TradeSampleTarget {
     canonical: String,
     collection: Arc<TradeDataCollection>,
     symbol_id: SymbolId,
+    prev_write_pos: u64,
 }
 
 fn build_trade_targets(cfg: &AppConfig, trade_data: &AllTradeData) -> Vec<TradeSampleTarget> {
@@ -99,7 +110,6 @@ fn build_trade_targets(cfg: &AppConfig, trade_data: &AllTradeData) -> Vec<TradeS
         let name = exchange.as_str();
         if let Some(syms) = cfg.trades.get(name) {
             for raw in syms {
-                // Trade feeds are perp by default
                 if let Some(&id) = REGISTRY.lookup(raw, &InstrumentType::Perp) {
                     let canonical = REGISTRY.get_symbol(id).unwrap_or(raw).to_string();
                     targets.push(TradeSampleTarget {
@@ -107,6 +117,7 @@ fn build_trade_targets(cfg: &AppConfig, trade_data: &AllTradeData) -> Vec<TradeS
                         canonical,
                         collection: Arc::clone(coll),
                         symbol_id: id,
+                        prev_write_pos: 0,
                     });
                 }
             }
@@ -123,11 +134,8 @@ fn format_side(side: crypto_feeds::TradeSide) -> &'static str {
     }
 }
 
-fn format_ts(ts: Option<chrono::DateTime<Utc>>) -> String {
-    match ts {
-        Some(t) => t.timestamp_nanos_opt().map_or(String::new(), |n| n.to_string()),
-        None => String::new(),
-    }
+fn ts_nanos(ts: Option<chrono::DateTime<Utc>>) -> i64 {
+    ts.and_then(|t| t.timestamp_nanos_opt()).unwrap_or(0)
 }
 
 fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
@@ -231,11 +239,197 @@ fn auto_discover_groups(cfg: &AppConfig) -> Vec<FairPriceGroupConfig> {
     groups
 }
 
+// ── Parquet schemas ──────────────────────────────────────────
+
+fn bbo_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("tick_ts_ns", DataType::Int64, false),
+        Field::new("exchange", DataType::Utf8, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("bid", DataType::Float64, true),
+        Field::new("ask", DataType::Float64, true),
+        Field::new("bid_qty", DataType::Float64, true),
+        Field::new("ask_qty", DataType::Float64, true),
+        Field::new("exchange_ts_ns", DataType::Int64, true),
+        Field::new("received_ts_ns", DataType::Int64, true),
+    ])
+}
+
+fn trade_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("tick_ts_ns", DataType::Int64, false),
+        Field::new("exchange", DataType::Utf8, false),
+        Field::new("symbol", DataType::Utf8, false),
+        Field::new("price", DataType::Float64, false),
+        Field::new("qty", DataType::Float64, false),
+        Field::new("side", DataType::Utf8, false),
+        Field::new("exchange_ts_ns", DataType::Int64, true),
+        Field::new("received_ts_ns", DataType::Int64, true),
+    ])
+}
+
+// ── Parquet row-group buffer ─────────────────────────────────
+
+const ROW_GROUP_SIZE: usize = 65536;
+
+struct BboBuffer {
+    tick_ts: Int64Builder,
+    exchange: StringBuilder,
+    symbol: StringBuilder,
+    bid: Float64Builder,
+    ask: Float64Builder,
+    bid_qty: Float64Builder,
+    ask_qty: Float64Builder,
+    exchange_ts: Int64Builder,
+    received_ts: Int64Builder,
+    len: usize,
+}
+
+impl BboBuffer {
+    fn new() -> Self {
+        Self {
+            tick_ts: Int64Builder::with_capacity(ROW_GROUP_SIZE),
+            exchange: StringBuilder::with_capacity(ROW_GROUP_SIZE, ROW_GROUP_SIZE * 10),
+            symbol: StringBuilder::with_capacity(ROW_GROUP_SIZE, ROW_GROUP_SIZE * 16),
+            bid: Float64Builder::with_capacity(ROW_GROUP_SIZE),
+            ask: Float64Builder::with_capacity(ROW_GROUP_SIZE),
+            bid_qty: Float64Builder::with_capacity(ROW_GROUP_SIZE),
+            ask_qty: Float64Builder::with_capacity(ROW_GROUP_SIZE),
+            exchange_ts: Int64Builder::with_capacity(ROW_GROUP_SIZE),
+            received_ts: Int64Builder::with_capacity(ROW_GROUP_SIZE),
+            len: 0,
+        }
+    }
+
+    fn append(
+        &mut self,
+        ts: i64,
+        exch: &str,
+        sym: &str,
+        md: &crypto_feeds::market_data::MarketData,
+    ) {
+        self.tick_ts.append_value(ts);
+        self.exchange.append_value(exch);
+        self.symbol.append_value(sym);
+        match md.bid {
+            Some(v) => self.bid.append_value(v),
+            None => self.bid.append_null(),
+        }
+        match md.ask {
+            Some(v) => self.ask.append_value(v),
+            None => self.ask.append_null(),
+        }
+        match md.bid_qty {
+            Some(v) => self.bid_qty.append_value(v),
+            None => self.bid_qty.append_null(),
+        }
+        match md.ask_qty {
+            Some(v) => self.ask_qty.append_value(v),
+            None => self.ask_qty.append_null(),
+        }
+        self.exchange_ts.append_value(ts_nanos(md.exchange_ts));
+        self.received_ts.append_value(ts_nanos(md.received_ts));
+        self.len += 1;
+    }
+
+    fn flush(&mut self, writer: &mut ArrowWriter<std::fs::File>) -> Result<()> {
+        if self.len == 0 {
+            return Ok(());
+        }
+        let batch = RecordBatch::try_new(
+            Arc::new(bbo_schema()),
+            vec![
+                Arc::new(self.tick_ts.finish()),
+                Arc::new(self.exchange.finish()),
+                Arc::new(self.symbol.finish()),
+                Arc::new(self.bid.finish()),
+                Arc::new(self.ask.finish()),
+                Arc::new(self.bid_qty.finish()),
+                Arc::new(self.ask_qty.finish()),
+                Arc::new(self.exchange_ts.finish()),
+                Arc::new(self.received_ts.finish()),
+            ],
+        )?;
+        writer.write(&batch)?;
+        self.len = 0;
+        Ok(())
+    }
+}
+
+struct TradeBuffer {
+    tick_ts: Int64Builder,
+    exchange: StringBuilder,
+    symbol: StringBuilder,
+    price: Float64Builder,
+    qty: Float64Builder,
+    side: StringBuilder,
+    exchange_ts: Int64Builder,
+    received_ts: Int64Builder,
+    len: usize,
+}
+
+impl TradeBuffer {
+    fn new() -> Self {
+        Self {
+            tick_ts: Int64Builder::with_capacity(ROW_GROUP_SIZE),
+            exchange: StringBuilder::with_capacity(ROW_GROUP_SIZE, ROW_GROUP_SIZE * 10),
+            symbol: StringBuilder::with_capacity(ROW_GROUP_SIZE, ROW_GROUP_SIZE * 16),
+            price: Float64Builder::with_capacity(ROW_GROUP_SIZE),
+            qty: Float64Builder::with_capacity(ROW_GROUP_SIZE),
+            side: StringBuilder::with_capacity(ROW_GROUP_SIZE, ROW_GROUP_SIZE * 4),
+            exchange_ts: Int64Builder::with_capacity(ROW_GROUP_SIZE),
+            received_ts: Int64Builder::with_capacity(ROW_GROUP_SIZE),
+            len: 0,
+        }
+    }
+
+    fn append(
+        &mut self,
+        ts: i64,
+        exch: &str,
+        sym: &str,
+        td: &crypto_feeds::trade_data::TradeData,
+    ) {
+        self.tick_ts.append_value(ts);
+        self.exchange.append_value(exch);
+        self.symbol.append_value(sym);
+        self.price.append_value(td.price);
+        self.qty.append_value(td.qty);
+        self.side.append_value(format_side(td.side));
+        self.exchange_ts.append_value(ts_nanos(td.exchange_ts));
+        self.received_ts.append_value(ts_nanos(td.received_ts));
+        self.len += 1;
+    }
+
+    fn flush(&mut self, writer: &mut ArrowWriter<std::fs::File>) -> Result<()> {
+        if self.len == 0 {
+            return Ok(());
+        }
+        let batch = RecordBatch::try_new(
+            Arc::new(trade_schema()),
+            vec![
+                Arc::new(self.tick_ts.finish()),
+                Arc::new(self.exchange.finish()),
+                Arc::new(self.symbol.finish()),
+                Arc::new(self.price.finish()),
+                Arc::new(self.qty.finish()),
+                Arc::new(self.side.finish()),
+                Arc::new(self.exchange_ts.finish()),
+                Arc::new(self.received_ts.finish()),
+            ],
+        )?;
+        writer.write(&batch)?;
+        self.len = 0;
+        Ok(())
+    }
+}
+
+// ── Args ─────────────────────────────────────────────────────
+
 struct Args {
     config_path: String,
     output_dir: String,
-    interval_ms: Option<u64>,
-    tick_dump: bool,
+    interval_ms: u64,
     with_fp: bool,
     display: bool,
     warmup_secs: u64,
@@ -245,8 +439,7 @@ fn parse_args() -> Args {
     let mut args = Args {
         config_path: "configs/capture.yaml".to_string(),
         output_dir: "data/capture".to_string(),
-        interval_ms: None,
-        tick_dump: false,
+        interval_ms: 0,
         with_fp: false,
         display: false,
         warmup_secs: 5,
@@ -257,18 +450,16 @@ fn parse_args() -> Args {
         match argv[i].as_str() {
             "--config" if i + 1 < argv.len() => { args.config_path = argv[i + 1].clone(); i += 2; }
             "--output-dir" if i + 1 < argv.len() => { args.output_dir = argv[i + 1].clone(); i += 2; }
-            "--interval-ms" if i + 1 < argv.len() => { args.interval_ms = argv[i + 1].parse().ok(); i += 2; }
-            "--tick-dump" => { args.tick_dump = true; i += 1; }
+            "--interval-ms" if i + 1 < argv.len() => { args.interval_ms = argv[i + 1].parse().unwrap_or(0); i += 2; }
             "--with-fp" => { args.with_fp = true; i += 1; }
             "--display" => { args.display = true; i += 1; }
             "--warmup-secs" if i + 1 < argv.len() => { args.warmup_secs = argv[i + 1].parse().unwrap_or(5); i += 2; }
             "--help" | "-h" => {
-                eprintln!("Usage: capture [--interval-ms N] [--tick-dump] [--with-fp] [--display] [--output-dir DIR] [--config PATH] [--warmup-secs N]");
+                eprintln!("Usage: capture [--interval-ms N] [--with-fp] [--display] [--output-dir DIR] [--config PATH] [--warmup-secs N]");
                 eprintln!();
-                eprintln!("  --interval-ms N   Snap BBOs at N ms interval (e.g. 10)");
-                eprintln!("  --tick-dump        Full tick-level filter diagnostics (requires FP engine)");
-                eprintln!("  --with-fp          Add fair price columns (starts FP engine)");
-                eprintln!("  --display          Live fair price TUI display (starts FP engine)");
+                eprintln!("  --interval-ms N    Poll interval in ms (default: 0 = tick-by-tick on change)");
+                eprintln!("  --with-fp          Start FP engine and write tick diagnostics");
+                eprintln!("  --display          Live TUI display");
                 eprintln!("  --output-dir DIR   Output directory (default: data/capture)");
                 eprintln!("  --config PATH      Exchange/symbol config (default: configs/capture.yaml)");
                 eprintln!("  --warmup-secs N    Wait N seconds before capturing (default: 5)");
@@ -276,10 +467,6 @@ fn parse_args() -> Args {
             }
             _ => { i += 1; }
         }
-    }
-    if args.interval_ms.is_none() && !args.tick_dump && !args.display {
-        eprintln!("Error: at least one of --interval-ms, --tick-dump, or --display is required");
-        std::process::exit(1);
     }
     args
 }
@@ -293,13 +480,10 @@ async fn main() -> Result<()> {
     } else {
         env_logger::init();
     }
-    let needs_fp = args.with_fp || args.tick_dump;
 
     let cfg: AppConfig = load_config(&args.config_path)
         .with_context(|| format!("loading {}", args.config_path))?;
 
-    // Register all base assets from config so the symbol registry knows about them.
-    // Must happen before any code touches REGISTRY.
     crypto_feeds::symbol_registry::seed_extra_bases(cfg.base_assets());
 
     std::fs::create_dir_all(&args.output_dir)?;
@@ -317,23 +501,20 @@ async fn main() -> Result<()> {
     let trade_data = Arc::new(AllTradeData::with_clock_correction(cfg.clock_correction.clone()));
     load_trades(&mut handles, &cfg, &trade_data, &shutdown)?;
 
-    let targets = build_targets(&cfg, &market_data);
-    let trade_targets = build_trade_targets(&cfg, &trade_data);
-    eprintln!("Discovered {} sample targets, {} trade targets", targets.len(), trade_targets.len());
+    let mut targets = build_targets(&cfg, &market_data);
+    let mut trade_targets = build_trade_targets(&cfg, &trade_data);
+    eprintln!("Discovered {} BBO targets, {} trade targets", targets.len(), trade_targets.len());
 
-    // Set up FP engine if needed
-    let has_capture = args.interval_ms.is_some();
-    let (outputs, fp_engine): (Option<Arc<FairPriceOutputs>>, Option<Arc<FairPriceEngine>>) = if needs_fp {
+    // Set up FP engine if requested
+    if args.with_fp {
         let volumes = Arc::new(crypto_feeds::volume_fetcher::fetch_all_volumes(&cfg).await);
         let mut groups = auto_discover_groups(&cfg);
-        // Apply 24h volume data to group members and precompute vol_adj
         for group in &mut groups {
             for m in &mut group.members {
                 let reg_sym = REGISTRY.get_symbol(m.symbol_id).unwrap_or("?");
                 if let Some(&vol) = volumes.get(&(m.exchange, reg_sym.to_string())) {
                     m.vol_24h = vol;
                 }
-                // Apply per-exchange volume trust factor (penalizes wash trading)
                 let trust = cfg.fair_price.volume_adjustments
                     .get(m.exchange.as_str()).copied().unwrap_or(1.0);
                 m.vol_24h *= trust;
@@ -348,10 +529,7 @@ async fn main() -> Result<()> {
                 };
             }
         }
-        if groups.is_empty() {
-            eprintln!("Warning: no FP groups discovered, --with-fp will have no effect");
-            (None, None)
-        } else {
+        if !groups.is_empty() {
             let group_names: Vec<String> = groups.iter().map(|g| g.name.clone()).collect();
             let vol_provider = cfg.fair_price.to_vol_provider(&group_names);
             let drain_interval_ms = cfg.fair_price.drain_interval_ms;
@@ -361,63 +539,28 @@ async fn main() -> Result<()> {
                 groups,
                 vol_provider,
             };
-
             for g in &fp_config.groups {
                 eprintln!("FP group '{}': {} members", g.name, g.members.len());
             }
-
             let out = Arc::new(FairPriceOutputs::new(&fp_config));
-
-            let diag = if args.tick_dump {
-                Some(DiagWriter::new(&args.output_dir)
-                    .with_context(|| format!("creating DiagWriter at {}", args.output_dir))?)
-            } else {
-                None
-            };
-
+            let diag = Some(DiagWriter::new(&args.output_dir)
+                .with_context(|| format!("creating DiagWriter at {}", args.output_dir))?);
             let engine = Arc::new(FairPriceEngine::new(
                 Arc::clone(&market_data),
                 Arc::clone(&out),
                 fp_config,
                 diag,
             ));
-
-            // Spawn timer task for background drain unless disabled (-1).
             if drain_interval_ms > 0 {
                 let sd = Arc::clone(&shutdown);
                 handles.push(tokio::spawn(run_fair_price_task(Arc::clone(&engine), sd)));
             }
-
-            // Capture also gets a clone to call update() for freshest FP.
-            let engine_for_capture = if has_capture {
-                Some(Arc::clone(&engine))
-            } else {
-                None
-            };
-
-            if args.display {
-                let md = Arc::clone(&market_data);
-                let out_display = Arc::clone(&out);
-                let sd = Arc::clone(&shutdown);
-                let model_str = format!("{}_{}", cfg.fair_price.model, cfg.fair_price.sigma_mode);
-                let ve = &cfg.fair_price.vol_engine;
-                let ve_str = format!("{} hl={}s", ve.engine_type, ve.halflife_s);
-                handles.push(tokio::spawn(async move {
-                    if let Err(e) = crypto_feeds::fp_display::run_display(md, out_display, sd, model_str, ve_str, drain_interval_ms.max(1) as u64).await {
-                        log::error!("display error: {:?}", e);
-                    }
-                }));
-            }
-
-            (Some(out), engine_for_capture)
         }
-    } else {
-        (None, None)
-    };
+    }
 
-    // Non-FP feed health display
+    // Display
     let cfg = Arc::new(cfg);
-    if args.display && !needs_fp {
+    if args.display {
         let md = Arc::clone(&market_data);
         let sd = Arc::clone(&shutdown);
         let cfg_arc = Arc::clone(&cfg);
@@ -434,133 +577,134 @@ async fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_secs(args.warmup_secs)).await;
     }
 
-    // Snapshot capture task
-    let snap_handle = if let Some(interval_ms) = args.interval_ms {
-        let targets_arc = Arc::new(targets);
+    // ── BBO capture ──────────────────────────────────────────
+    let bbo_handle = {
         let shutdown_clone = Arc::clone(&shutdown);
         let output_dir = args.output_dir.clone();
-        let with_fp = args.with_fp;
-        let outputs_clone = outputs.clone();
-        let fp_engine = fp_engine;
+        let interval_ms = args.interval_ms;
 
-        Some(tokio::spawn(async move {
+        tokio::spawn(async move {
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let output_path = format!("{}/snapshots_{}.csv.gz", output_dir, ts);
-            let file = std::fs::File::create(&output_path).expect("create snapshot file");
-            let gz = GzEncoder::new(file, Compression::fast());
-            let mut wtr = BufWriter::new(gz);
+            let output_path = format!("{}/bbo_{}.parquet", output_dir, ts);
+            let file = std::fs::File::create(&output_path).expect("create BBO parquet file");
 
-            // Header
-            if with_fp {
-                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,exchange_ts_raw,received_ts,fp_group,fp,fp_y,fp_p,fp_p_pre,fp_vol_ann_pct,fp_bias,fp_sigma_k,fp_snap_ts_ns,fp_mid,fp_tick_exchange_ts,fp_tick_received_ts,fp_half_spread_bps").unwrap();
-            } else {
-                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,bid,ask,bid_qty,ask_qty,exchange_ts,exchange_ts_raw,received_ts").unwrap();
-            }
+            let props = WriterProperties::builder()
+                .set_compression(Compression::ZSTD(Default::default()))
+                .set_max_row_group_size(ROW_GROUP_SIZE)
+                .build();
+            let mut writer = ArrowWriter::try_new(file, Arc::new(bbo_schema()), Some(props))
+                .expect("create ArrowWriter");
+            let mut buf = BboBuffer::new();
+            let mut row_count: u64 = 0;
 
-            let mut interval = time::interval(Duration::from_millis(interval_ms));
+            let poll_ms = if interval_ms == 0 { 1 } else { interval_ms };
+            let mut interval = time::interval(Duration::from_millis(poll_ms));
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
             let shutdown_fut = shutdown_clone.notified();
             tokio::pin!(shutdown_fut);
 
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = &mut shutdown_fut => {
+                        let _ = buf.flush(&mut writer);
+                        writer.close().expect("close BBO parquet");
+                        eprintln!("BBO capture: {} rows -> {}", row_count, output_path);
+                        return;
+                    }
+                }
+
+                let now_ns = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+
+                for t in targets.iter_mut() {
+                    let ring = match t.collection.get_buffer(&t.symbol_id) {
+                        Some(b) => b,
+                        None => continue,
+                    };
+                    let cur_pos = ring.write_pos();
+                    if cur_pos <= t.prev_write_pos {
+                        continue;
+                    }
+                    // Drain all new ticks since last poll
+                    let start = t.prev_write_pos;
+                    let count = (cur_pos - start).min(1000) as usize;
+                    for i in 0..count {
+                        if let Some(md) = ring.read_at(start + i as u64) {
+                            buf.append(now_ns, t.exchange_name, &t.canonical, &md);
+                            row_count += 1;
+                            if buf.len >= ROW_GROUP_SIZE {
+                                buf.flush(&mut writer).expect("flush BBO row group");
+                            }
+                        }
+                    }
+                    t.prev_write_pos = cur_pos;
+                }
+            }
+        })
+    };
+
+    // ── Trade capture ────────────────────────────────────────
+    let trade_handle = if !trade_targets.is_empty() {
+        let shutdown_clone = Arc::clone(&shutdown);
+        let output_dir = args.output_dir.clone();
+        let interval_ms = args.interval_ms;
+
+        Some(tokio::spawn(async move {
+            let ts = Utc::now().format("%Y%m%d_%H%M%S");
+            let output_path = format!("{}/trades_{}.parquet", output_dir, ts);
+            let file = std::fs::File::create(&output_path).expect("create trades parquet file");
+
+            let props = WriterProperties::builder()
+                .set_compression(Compression::ZSTD(Default::default()))
+                .set_max_row_group_size(ROW_GROUP_SIZE)
+                .build();
+            let mut writer = ArrowWriter::try_new(file, Arc::new(trade_schema()), Some(props))
+                .expect("create ArrowWriter");
+            let mut buf = TradeBuffer::new();
             let mut row_count: u64 = 0;
+
+            let poll_ms = if interval_ms == 0 { 1 } else { interval_ms };
+            let mut interval = time::interval(Duration::from_millis(poll_ms));
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            let shutdown_fut = shutdown_clone.notified();
+            tokio::pin!(shutdown_fut);
 
             loop {
                 tokio::select! {
                     _ = interval.tick() => {}
                     _ = &mut shutdown_fut => {
-                        eprintln!("Snapshot capture: {} rows written to {}", row_count, output_path);
-                        let gz = wtr.into_inner().expect("flush");
-                        let _ = gz.finish();
+                        let _ = buf.flush(&mut writer);
+                        writer.close().expect("close trades parquet");
+                        eprintln!("Trade capture: {} rows -> {}", row_count, output_path);
                         return;
                     }
                 }
 
-                if let Some(ref engine) = fp_engine {
-                    engine.update();
-                }
+                let now_ns = Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
-                let sample_ts = Utc::now().timestamp_nanos_opt().unwrap_or(0);
-
-                for t in targets_arc.iter() {
-                    let md = match t.collection.latest(&t.symbol_id) {
-                        Some(md) => md,
+                for t in trade_targets.iter_mut() {
+                    let ring = match t.collection.get_buffer(&t.symbol_id) {
+                        Some(b) => b,
                         None => continue,
                     };
-
-                    let bid = md.bid.map_or(String::new(), |v| v.to_string());
-                    let ask = md.ask.map_or(String::new(), |v| v.to_string());
-                    let bid_qty = md.bid_qty.map_or(String::new(), |v| v.to_string());
-                    let ask_qty = md.ask_qty.map_or(String::new(), |v| v.to_string());
-                    let exchange_ts = format_ts(md.exchange_ts);
-                    let exchange_ts_raw = format_ts(md.exchange_ts_raw);
-                    let received_ts = format_ts(md.received_ts);
-
-                    if with_fp {
-                        // Find FP group + per-member params + tick snapshot
-                        let empty = String::new;
-                        let (group, fp, y, p, p_pre, vol, bias, sigma_k, fp_snap_ts,
-                             fp_mid, fp_tick_exch_ts, fp_tick_recv_ts, fp_hs) =
-                        if let Some(ref out) = outputs_clone {
-                            let base = t.canonical.split('-').nth(1).unwrap_or("");
-                            if let Some(gi) = out.find_group(base) {
-                                let fp_cols = if let Some(fp_out) = out.latest(gi) {
-                                    (fp_out.fair_price.to_string(),
-                                     fp_out.log_fair_price.to_string(),
-                                     format!("{:.16e}", (fp_out.uncertainty_bps / 1e4).powi(2)),
-                                     format!("{:.16e}", fp_out.p_pre),
-                                     format!("{:.4}", fp_out.vol_ann_pct),
-                                     fp_out.snap_ts_ns.to_string())
-                                } else {
-                                    (empty(), empty(), empty(), empty(), empty(), empty())
-                                };
-                                let ex = Exchange::from_str(t.exchange_name);
-                                let mi = ex.and_then(|e| out.find_member(gi, &e, t.symbol_id));
-                                // Per-member bias and sigma_k
-                                let (bias_s, sk_s) = mi
-                                    .and_then(|mi| out.get_member_params(gi, mi))
-                                    .map(|(b, nv)| (format!("{:.10e}", b), format!("{:.10e}", nv.sqrt())))
-                                    .unwrap_or_else(|| (empty(), empty()));
-                                // Per-member tick snapshot from engine
-                                let tick_snap = mi.and_then(|mi| {
-                                    fp_engine.as_ref()?.member_tick_snapshot(gi, mi)
-                                });
-                                let (fm, ft_e, ft_r, fhs) = match tick_snap {
-                                    Some(s) => (
-                                        s.raw_mid.to_string(),
-                                        s.exchange_ts_ns.to_string(),
-                                        s.received_ts_ns.to_string(),
-                                        format!("{:.4}", s.half_spread_bps),
-                                    ),
-                                    None => (empty(), empty(), empty(), empty()),
-                                };
-                                (base.to_string(), fp_cols.0, fp_cols.1, fp_cols.2, fp_cols.3,
-                                 fp_cols.4, bias_s, sk_s, fp_cols.5, fm, ft_e, ft_r, fhs)
-                            } else {
-                                (empty(), empty(), empty(), empty(), empty(), empty(),
-                                 empty(), empty(), empty(), empty(), empty(), empty(), empty())
-                            }
-                        } else {
-                            (empty(), empty(), empty(), empty(), empty(), empty(),
-                             empty(), empty(), empty(), empty(), empty(), empty(), empty())
-                        };
-
-                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-                            sample_ts, t.canonical, t.exchange_name,
-                            bid, ask, bid_qty, ask_qty, exchange_ts, exchange_ts_raw, received_ts,
-                            group, fp, y, p, p_pre, vol, bias, sigma_k, fp_snap_ts,
-                            fp_mid, fp_tick_exch_ts, fp_tick_recv_ts, fp_hs);
-                    } else {
-                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{},{}",
-                            sample_ts, t.canonical, t.exchange_name,
-                            bid, ask, bid_qty, ask_qty, exchange_ts, exchange_ts_raw, received_ts);
+                    let cur_pos = ring.write_pos();
+                    if cur_pos <= t.prev_write_pos {
+                        continue;
                     }
-
-                    row_count += 1;
-                }
-
-                if row_count % 10_000 == 0 {
-                    let _ = wtr.flush();
+                    let start = t.prev_write_pos;
+                    let count = (cur_pos - start).min(1000) as usize;
+                    for i in 0..count {
+                        if let Some(td) = ring.read_at(start + i as u64) {
+                            buf.append(now_ns, t.exchange_name, &t.canonical, &td);
+                            row_count += 1;
+                            if buf.len >= ROW_GROUP_SIZE {
+                                buf.flush(&mut writer).expect("flush trade row group");
+                            }
+                        }
+                    }
+                    t.prev_write_pos = cur_pos;
                 }
             }
         }))
@@ -568,78 +712,10 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Trade capture task — auto-enabled when trades: config is non-empty
-    let trade_handle = if let Some(interval_ms) = args.interval_ms {
-        if !trade_targets.is_empty() {
-            let trade_targets_arc = Arc::new(trade_targets);
-            let shutdown_clone = Arc::clone(&shutdown);
-            let output_dir = args.output_dir.clone();
-
-            Some(tokio::spawn(async move {
-                let ts = Utc::now().format("%Y%m%d_%H%M%S");
-                let output_path = format!("{}/trades_{}.csv.gz", output_dir, ts);
-                let file = std::fs::File::create(&output_path).expect("create trades file");
-                let gz = GzEncoder::new(file, Compression::fast());
-                let mut wtr = BufWriter::new(gz);
-
-                writeln!(wtr, "sample_ts_ns,canonical_symbol,exchange,price,qty,side,exchange_ts,exchange_ts_raw,received_ts").unwrap();
-
-                let mut interval = time::interval(Duration::from_millis(interval_ms));
-                interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-                let shutdown_fut = shutdown_clone.notified();
-                tokio::pin!(shutdown_fut);
-
-                let mut row_count: u64 = 0;
-
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {}
-                        _ = &mut shutdown_fut => {
-                            eprintln!("Trade capture: {} rows written to {}", row_count, output_path);
-                            let gz = wtr.into_inner().expect("flush");
-                            let _ = gz.finish();
-                            return;
-                        }
-                    }
-
-                    let sample_ts = Utc::now().timestamp_nanos_opt().unwrap_or(0);
-
-                    for t in trade_targets_arc.iter() {
-                        let td = match t.collection.latest(&t.symbol_id) {
-                            Some(td) => td,
-                            None => continue,
-                        };
-
-                        let _ = writeln!(wtr, "{},{},{},{},{},{},{},{},{}",
-                            sample_ts, t.canonical, t.exchange_name,
-                            td.price, td.qty, format_side(td.side),
-                            format_ts(td.exchange_ts), format_ts(td.exchange_ts_raw),
-                            format_ts(td.received_ts));
-                        row_count += 1;
-                    }
-
-                    if row_count % 10_000 == 0 {
-                        let _ = wtr.flush();
-                    }
-                }
-            }))
-        } else {
-            None
-        }
+    if args.interval_ms == 0 {
+        eprintln!("Capturing tick-by-tick -> {}/", args.output_dir);
     } else {
-        None
-    };
-
-    if args.tick_dump && !args.interval_ms.is_some() {
-        eprintln!("Tick dump active (no snapshot interval). Press Ctrl-C to stop.");
-    } else if let Some(interval_ms) = args.interval_ms {
-        eprintln!(
-            "Capturing every {}ms{} -> {}/",
-            interval_ms,
-            if args.with_fp { " (with FP)" } else { "" },
-            args.output_dir
-        );
+        eprintln!("Capturing every {}ms -> {}/", args.interval_ms, args.output_dir);
     }
 
     signal::ctrl_c().await?;
@@ -647,9 +723,7 @@ async fn main() -> Result<()> {
     shutdown.notify_waiters();
 
     tokio::time::timeout(Duration::from_secs(5), async {
-        if let Some(h) = snap_handle {
-            let _ = h.await;
-        }
+        let _ = bbo_handle.await;
         if let Some(h) = trade_handle {
             let _ = h.await;
         }
