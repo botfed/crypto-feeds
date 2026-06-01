@@ -571,6 +571,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_string_market_id() {
+        let mut feed = test_feed();
+        // market_id as quoted string (RiseX sends this in some messages)
+        let msg = r#"{"channel":"orderbook","type":"snapshot","market_id":"12","data":{"bids":[{"price":"100.0","quantity":"1.0"}],"asks":[{"price":"101.0","quantity":"1.0"}]},"timestamp":"1"}"#;
+        let mut scratch = TickScratch::<MarketData>::new();
+        feed.parse_orderbook(msg.as_bytes(), Instant::now(), &mut scratch);
+        assert_eq!(scratch.len(), 1);
+        assert_eq!(scratch.as_slice()[0].item.bid.unwrap(), 100.0);
+        assert_eq!(scratch.as_slice()[0].item.ask.unwrap(), 101.0);
+    }
+
+    #[test]
+    fn update_with_string_market_id() {
+        let mut feed = test_feed();
+        // Snapshot with numeric market_id
+        let snapshot = r#"{"channel":"orderbook","type":"snapshot","market_id":12,"data":{"bids":[{"price":"100.0","quantity":"1.0"}],"asks":[{"price":"101.0","quantity":"1.0"}]},"timestamp":"1"}"#;
+        let mut scratch = TickScratch::<MarketData>::new();
+        feed.parse_orderbook(snapshot.as_bytes(), Instant::now(), &mut scratch);
+        assert_eq!(scratch.as_slice()[0].item.bid.unwrap(), 100.0);
+
+        // Update with string market_id — must not be silently dropped
+        let update = r#"{"channel":"orderbook","type":"update","market_id":"12","data":{"bids":[{"price":"100.5","quantity":"2.0"}],"asks":[]},"timestamp":"2"}"#;
+        scratch.clear();
+        feed.parse_orderbook(update.as_bytes(), Instant::now(), &mut scratch);
+        assert_eq!(scratch.len(), 1, "update with string market_id must not be dropped");
+        assert_eq!(scratch.as_slice()[0].item.bid.unwrap(), 100.5);
+    }
+
+    #[test]
     fn different_markets() {
         let mut feed = test_feed();
 
