@@ -87,6 +87,7 @@ async fn build_symbol_maps(symbols: &[&str]) -> Result<(HashMap<u32, String>, Ve
     let api_map: HashMap<String, u32> = rows
         .iter()
         .filter_map(|r| {
+            if r.display_name.contains("[deprecated") { return None; }
             let base = base_from_display_name(&r.display_name)?;
             let mid: u32 = r.market_id.parse().ok()?;
             Some((base.to_uppercase(), mid))
