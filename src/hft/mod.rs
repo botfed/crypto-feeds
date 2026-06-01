@@ -179,9 +179,13 @@ pub fn extract_str_after<'a>(json: &'a [u8], pattern: &[u8]) -> Option<&'a str> 
 #[inline]
 pub fn extract_u64_after(json: &[u8], pattern: &[u8]) -> Option<u64> {
     let pos = find_bytes(json, pattern)?;
-    let start = pos + pattern.len();
+    let mut start = pos + pattern.len();
     if start >= json.len() {
         return None;
+    }
+    // Skip optional leading quote (handles "key":"123" string form)
+    if json[start] == b'"' {
+        start += 1;
     }
     let mut val = 0u64;
     let mut i = start;
@@ -243,6 +247,16 @@ mod tests {
     fn test_extract_u64_after_at_end() {
         let json = br#"{"u":42}"#;
         assert_eq!(extract_u64_after(json, b"\"u\":"), Some(42));
+    }
+
+    #[test]
+    fn test_extract_u64_after_quoted_string() {
+        // RiseX sends market_id as string: "market_id":"12"
+        let json = br#"{"market_id":"12","channel":"orderbook"}"#;
+        assert_eq!(extract_u64_after(json, b"\"market_id\":"), Some(12));
+        // Also works with unquoted number
+        let json2 = br#"{"market_id":12,"channel":"orderbook"}"#;
+        assert_eq!(extract_u64_after(json2, b"\"market_id\":"), Some(12));
     }
 
     #[test]

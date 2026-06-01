@@ -652,6 +652,20 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
             return;
         }
 
+        // Inject any remaining bytes (WS frames bundled with the HTTP response)
+        // into the framer so they aren't lost.
+        if let Some(hdr_end_pos) = response_buf[..response_len]
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+        {
+            let after_hdr = hdr_end_pos + 4;
+            if after_hdr < response_len {
+                self.connections[idx]
+                    .framer
+                    .inject(&response_buf[after_hdr..response_len]);
+            }
+        }
+
         info!("Connected to {} (ws://)", self.connections[idx].url);
 
         // Notify feed of successful connection (e.g. reset dedup state)
