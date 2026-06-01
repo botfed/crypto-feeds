@@ -29,13 +29,13 @@ const EVENT_TIME_KEY: &[u8] = b"\"E\":";
 const BOOK_TICKER_MARKER: &[u8] = b"bookTicker";
 
 pub struct BinanceHftFeed {
-    pub(crate) itype: InstrumentType,
+    pub(crate) _itype: InstrumentType,
     /// Native Binance symbol (e.g. "BTCUSDT") → SymbolId. Read-only after init.
     pub(crate) symbol_to_id: FxHashMap<String, SymbolId>,
     /// Pre-allocated dedup state: last update ID per SymbolId.
     pub(crate) last_update_id: [u64; MAX_SYMBOLS],
     /// Subscription stream names, built at startup.
-    pub(crate) streams: Vec<String>,
+    pub(crate) _streams: Vec<String>,
     /// Full WS URL, built at startup.
     pub(crate) url: String,
     /// Subscribe JSON messages, built at startup.
@@ -78,10 +78,10 @@ impl BinanceHftFeed {
         let url = format!("{}?streams={}", base_url, streams_param);
 
         Self {
-            itype,
+            _itype: itype,
             symbol_to_id,
             last_update_id: [0u64; MAX_SYMBOLS],
-            streams,
+            _streams: streams,
             url,
             sub_messages: vec![], // Binance combined stream subscribes via URL, not messages
         }
@@ -94,10 +94,10 @@ impl BinanceHftFeed {
         symbol_to_id: FxHashMap<String, SymbolId>,
     ) -> Self {
         Self {
-            itype,
+            _itype: itype,
             symbol_to_id,
             last_update_id: [0u64; MAX_SYMBOLS],
-            streams: vec![],
+            _streams: vec![],
             url: String::new(),
             sub_messages: vec![],
         }
@@ -293,10 +293,10 @@ mod tests {
     /// Create a test-only feed with a custom lookup table.
     fn test_feed() -> BinanceHftFeed {
         BinanceHftFeed {
-            itype: InstrumentType::Perp,
+            _itype: InstrumentType::Perp,
             symbol_to_id: test_lookup(),
             last_update_id: [0u64; MAX_SYMBOLS],
-            streams: vec![],
+            _streams: vec![],
             url: String::new(),
             sub_messages: vec![],
         }
