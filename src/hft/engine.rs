@@ -264,9 +264,8 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
                     if now.duration_since(self.connections[i].last_message)
                         >= self.config.message_timeout
                     {
-                        warn!(
-                            "Connection {} timed out, reconnecting",
-                            self.connections[i].url
+                        warn!("HFT feed disconnect: reason=MSG_TIMEOUT age={}s",
+                            now.duration_since(self.connections[i].last_message).as_secs()
                         );
                         self.disconnect(i);
                         self.try_connect(i);
@@ -310,7 +309,7 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
 
             match conn.framer.recv(stream) {
                 Ok(0) => {
-                    warn!("Connection {} closed (EOF)", conn.url);
+                    warn!("HFT feed disconnect: reason=EOF");
                     self.disconnect(idx);
                     return dispatched;
                 }
@@ -321,7 +320,7 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
                     break; // No more data available — return to epoll
                 }
                 Err(e) => {
-                    error!("Connection {} read error: {}", conn.url, e);
+                    warn!("HFT feed disconnect: reason=READ_ERR err={e}");
                     self.disconnect(idx);
                     return dispatched;
                 }
@@ -400,7 +399,7 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
                 }
                 OP_CLOSE => {
                     drop(frame);
-                    warn!("Connection {} received close frame", self.connections[idx].url);
+                    warn!("HFT feed disconnect: reason=CLOSE_FRAME");
                     self.disconnect(idx);
                     return dispatched;
                 }
