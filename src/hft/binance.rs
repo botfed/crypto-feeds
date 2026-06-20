@@ -187,6 +187,7 @@ impl BinanceHftFeed {
                 exchange_ts: None,
                 received_ts: None,
                 received_instant: Some(received_instant),
+                update_id: Some(update_id),
                 feed_latency_ns: 0,
             },
         );

@@ -239,10 +239,9 @@ impl ExchangeFeed for OkxFeed {
                             bid_qty,
                             ask_qty,
                             exchange_ts_raw: exchange_ts,
-                            exchange_ts: None,
                             received_ts: Some(received_ts),
                             received_instant: Some(received_instant),
-                    feed_latency_ns: 0,
+                            ..Default::default()
                         };
 
                         Ok(vec![(symbol, market_data)])

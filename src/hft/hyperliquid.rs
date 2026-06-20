@@ -149,7 +149,7 @@ impl HyperliquidHftFeed {
                 exchange_ts: None,
                 received_ts: None,
                 received_instant: Some(received_instant),
-                feed_latency_ns: 0,
+                ..Default::default()
             },
         );
     }

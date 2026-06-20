@@ -160,11 +160,9 @@ impl ExchangeFeed for ZeroOneBboFeed {
                     ask: ask.map(|(p, _)| p),
                     bid_qty: bid.map(|(_, q)| q),
                     ask_qty: ask.map(|(_, q)| q),
-                    exchange_ts_raw: None,
-                    exchange_ts: None,
                     received_ts: Some(received_ts),
                     received_instant: Some(received_instant),
-                    feed_latency_ns: 0,
+                    ..Default::default()
                 };
 
                 Ok(vec![(registry_sym, market_data)])
@@ -294,10 +292,9 @@ impl ExchangeFeed for ZeroOneTradeFeed {
                             qty: entry.qty,
                             side,
                             exchange_ts_raw: exchange_ts,
-                            exchange_ts: None,
                             received_ts: Some(received_ts),
                             received_instant: Some(received_instant),
-                            feed_latency_ns: 0,
+                            ..Default::default()
                         },
                     ));
                 }

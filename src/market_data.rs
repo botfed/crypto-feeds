@@ -17,6 +17,8 @@ pub struct MarketData {
     pub exchange_ts: Option<DateTime<Utc>>,
     pub received_ts: Option<DateTime<Utc>>,
     pub received_instant: Option<Instant>,
+    /// Exchange-specific monotonic update sequence (e.g. Binance `u` field).
+    pub update_id: Option<u64>,
     /// Feed processing latency: WS recv → ring buffer write (nanoseconds)
     pub feed_latency_ns: u64,
 }
@@ -32,6 +34,7 @@ impl Default for MarketData {
             exchange_ts: None,
             received_ts: None,
             received_instant: None,
+            update_id: None,
             feed_latency_ns: 0,
         }
     }

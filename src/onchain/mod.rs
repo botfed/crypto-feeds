@@ -201,10 +201,8 @@ impl PoolState {
             bid_qty: Some(bid_qty),
             ask_qty: Some(ask_qty),
             exchange_ts_raw: Some(self.block_ts),
-            exchange_ts: None,
             received_ts: Some(received_ts),
-            received_instant: None,
-            feed_latency_ns: 0,
+            ..Default::default()
         }
     }
 }

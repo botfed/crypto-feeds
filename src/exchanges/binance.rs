@@ -150,10 +150,9 @@ impl ExchangeFeed for BinanceFeed {
                     bid_qty,
                     ask_qty,
                     exchange_ts_raw: exchange_ts,
-                    exchange_ts: None,
                     received_ts: Some(received_ts),
                     received_instant: Some(received_instant),
-                    feed_latency_ns: 0,
+                    ..Default::default()
                 };
 
                 Ok(vec![(msg.data.symbol, market_data)])
@@ -289,10 +288,9 @@ impl ExchangeFeed for BinanceTradeFeed {
                     qty,
                     side,
                     exchange_ts_raw: exchange_ts,
-                    exchange_ts: None,
                     received_ts: Some(received_ts),
                     received_instant: Some(received_instant),
-                    feed_latency_ns: 0,
+                    ..Default::default()
                 };
                 Ok(vec![(msg.data.symbol, trade)])
             }

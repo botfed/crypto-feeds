@@ -156,10 +156,9 @@ fn parse_bbo(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>, received_i
         bid_qty,
         ask_qty,
         exchange_ts_raw: exchange_ts,
-        exchange_ts: None,
         received_ts: Some(received_ts),
         received_instant: Some(received_instant),
-                    feed_latency_ns: 0,
+        ..Default::default()
     };
 
     Some((config_sym.to_string(), md))
@@ -434,10 +433,9 @@ fn parse_trade(feed: &NadoFeed, text: &str, received_ts: DateTime<Utc>, received
         qty,
         side,
         exchange_ts_raw: exchange_ts,
-        exchange_ts: None,
         received_ts: Some(received_ts),
         received_instant: Some(received_instant),
-        feed_latency_ns: 0,
+        ..Default::default()
     }))
 }
 
