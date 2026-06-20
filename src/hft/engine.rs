@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Configuration for the HFT engine.
+#[derive(Clone)]
 pub struct HftEngineConfig {
     /// How long to wait in epoll before checking heartbeats/shutdown.
     pub poll_timeout: Duration,
@@ -709,6 +710,18 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
             conn.retry_count = 0;
         } else {
             conn.retry_count += 1;
+        }
+    }
+
+    /// Force-disconnect all connections. They will reconnect on the next
+    /// `maintain()` call via the normal backoff path (with retry_count reset
+    /// so reconnection is fast).
+    pub fn force_reconnect_all(&mut self) {
+        for i in 0..self.connections.len() {
+            if matches!(self.connections[i].state, ConnState::Connected) {
+                self.disconnect(i);
+                self.connections[i].retry_count = 0; // fast reconnect
+            }
         }
     }
 

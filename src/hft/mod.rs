@@ -20,6 +20,7 @@ pub mod binance;
 pub mod hyperliquid;
 pub mod risex;
 pub mod engine;
+pub mod multi_conn;
 pub mod alloc_guard;
 
 use crate::market_data::FeedItem;
