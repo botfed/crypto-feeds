@@ -1,0 +1,7 @@
+perp:
+  binance:     [BTC_USDT, ETH_USDT, SOL_USDT, HYPE_USDT]
+  hyperliquid: [HYPE_USDC]
+
+trades:
+  binance:     [BTC_USDT, ETH_USDT, SOL_USDT, HYPE_USDT]
+  hyperliquid: [HYPE_USDC]

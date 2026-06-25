@@ -586,7 +586,7 @@ async fn main() -> Result<()> {
 
         tokio::spawn(async move {
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let output_path = format!("{}/bbo_{}.parquet", output_dir, ts);
+            let output_path = format!("{}/bbo_{interval_ms}ms_{ts}.parquet", output_dir);
             let file = std::fs::File::create(&output_path).expect("create BBO parquet file");
 
             let props = WriterProperties::builder()
@@ -653,7 +653,7 @@ async fn main() -> Result<()> {
 
         Some(tokio::spawn(async move {
             let ts = Utc::now().format("%Y%m%d_%H%M%S");
-            let output_path = format!("{}/trades_{}.parquet", output_dir, ts);
+            let output_path = format!("{}/trades_{interval_ms}ms_{ts}.parquet", output_dir);
             let file = std::fs::File::create(&output_path).expect("create trades parquet file");
 
             let props = WriterProperties::builder()
