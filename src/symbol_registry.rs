@@ -139,6 +139,26 @@ impl SymbolRegistry {
     pub fn get_symbol(&self, id: SymbolId) -> Option<&str> {
         self.to_symbol[id].as_deref()
     }
+
+    /// Resolve a config-style symbol name (e.g. "PERP_BTC_USDT", "SPOT_ETH_USDC")
+    /// to a SymbolId. Strips the PERP_/SPOT_ prefix and infers the instrument type.
+    /// Logs a warning on miss so silent failures don't happen.
+    pub fn resolve(&self, name: &str) -> Option<SymbolId> {
+        let (itype, key) = if let Some(rest) = name.strip_prefix("PERP_") {
+            (InstrumentType::Perp, rest)
+        } else if let Some(rest) = name.strip_prefix("SPOT_") {
+            (InstrumentType::Spot, rest)
+        } else {
+            (InstrumentType::Perp, name)
+        };
+        match self.lookup(key, &itype) {
+            Some(&id) => Some(id),
+            None => {
+                eprintln!("symbol_registry: '{}' (key='{}') not found", name, key);
+                None
+            }
+        }
+    }
 }
 
 fn generate_aliases(base: &str, quote: &str, instrument: &InstrumentType) -> Vec<String> {
