@@ -1,7 +1,9 @@
 perp:
   binance:     [BTC_USDT, ETH_USDT, SOL_USDT, HYPE_USDT]
+  risex:       [BTC_USDC, ETH_USDC, SOL_USDC, HYPE_USDC]
   hyperliquid: [HYPE_USDC]
 
 trades:
   binance:     [BTC_USDT, ETH_USDT, SOL_USDT, HYPE_USDT]
+  risex:       [BTC_USDC, ETH_USDC, SOL_USDC, HYPE_USDC]
   hyperliquid: [HYPE_USDC]
