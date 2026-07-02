@@ -172,6 +172,41 @@ pub async fn fetch_binance_daily_bars(symbol: &str, days: u32) -> Result<Vec<Bar
     Ok(bars)
 }
 
+/// Fetch hourly bars from Binance perpetual futures kline API.
+/// Returns the last `hours` hourly bars sorted ascending.
+pub async fn fetch_binance_hourly_bars(symbol: &str, hours: u32) -> Result<Vec<Bar>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let binance_symbol = format!("{}USDT", symbol.to_uppercase());
+    let url = format!(
+        "https://fapi.binance.com/fapi/v1/klines?symbol={}&interval=1h&limit={}",
+        binance_symbol, hours
+    );
+    let resp = client.get(&url).send().await
+        .with_context(|| format!("fetching hourly klines for {}", binance_symbol))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("Binance API error {}: {}", resp.status(), resp.text().await.unwrap_or_default());
+    }
+    let data: Vec<Vec<serde_json::Value>> = resp.json().await
+        .context("parsing Binance hourly kline response")?;
+
+    let mut bars = Vec::with_capacity(data.len());
+    for row in &data {
+        if row.len() < 6 { continue; }
+        let open_time_ms = row[0].as_i64().unwrap_or(0);
+        let open: f64 = row[1].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+        let high: f64 = row[2].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+        let low: f64 = row[3].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+        let close: f64 = row[4].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+        let volume: f64 = row[5].as_str().unwrap_or("0").parse().unwrap_or(0.0);
+        if open > 0.0 {
+            bars.push(Bar { open_time_ms, open, high, low, close, volume });
+        }
+    }
+    Ok(bars)
+}
+
 /// Load 1m bars from disk, then backfill any gap to now from Binance API.
 pub async fn load_1m_bars_with_backfill(
     bar_data_dir: &Path,
