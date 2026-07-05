@@ -19,6 +19,7 @@ pub mod ws_framer;
 pub mod binance;
 pub mod hyperliquid;
 pub mod risex;
+pub mod zeroone;
 pub mod engine;
 pub mod multi_conn;
 pub mod alloc_guard;
