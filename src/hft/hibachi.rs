@@ -147,6 +147,7 @@ pub struct HibachiHftFeed {
     symbol_count: usize,
     books: Vec<FixedBook>,
     sub_message: String,
+    debug_count: u32,
 }
 
 impl HibachiHftFeed {
@@ -191,6 +192,7 @@ impl HibachiHftFeed {
             symbol_count: count,
             books,
             sub_message,
+            debug_count: 0,
         }
     }
 
@@ -375,6 +377,13 @@ impl HftFeed for HibachiHftFeed {
         received_instant: Instant,
         scratch: &mut TickScratch<MarketData>,
     ) {
+        // TODO: remove after debugging wire format
+        if self.debug_count < 5 {
+            if let Ok(s) = std::str::from_utf8(payload) {
+                eprintln!("HIBACHI_HFT_RAW[{}]: {}", self.debug_count, &s[..s.len().min(500)]);
+            }
+            self.debug_count += 1;
+        }
         self.parse_orderbook(payload, received_instant, scratch);
     }
 }
