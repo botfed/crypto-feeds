@@ -27,8 +27,9 @@ const ORDERBOOK_MARKER: &[u8] = b"\"orderbook\"";
 const SYMBOL_KEY: &[u8] = b"\"symbol\":\"";
 const MESSAGE_TYPE_KEY: &[u8] = b"\"messageType\":\"";
 const SNAPSHOT_VAL: &[u8] = b"Snapshot";
-const BID_LEVELS_MARKER: &[u8] = b"\"bid\":{\"levels\":[";
-const ASK_LEVELS_MARKER: &[u8] = b"\"ask\":{\"levels\":[";
+const BID_MARKER: &[u8] = b"\"bid\":{";
+const ASK_MARKER: &[u8] = b"\"ask\":{";
+const LEVELS_MARKER: &[u8] = b"\"levels\":[";
 const PRICE_KEY: &[u8] = b"\"price\":\"";
 const QTY_KEY: &[u8] = b"\"quantity\":\"";
 
@@ -250,18 +251,24 @@ impl HibachiHftFeed {
             book.clear();
         }
 
-        // Parse bid levels
-        if let Some(bids_start) = find_bytes(json, BID_LEVELS_MARKER) {
-            let section = &json[bids_start + BID_LEVELS_MARKER.len()..];
-            let end = find_closing_bracket(section);
-            parse_levels(&section[..end], book, true);
+        // Parse bid levels: find "bid":{ then "levels":[ within it
+        if let Some(bid_start) = find_bytes(json, BID_MARKER) {
+            let bid_section = &json[bid_start + BID_MARKER.len()..];
+            if let Some(levels_off) = find_bytes(bid_section, LEVELS_MARKER) {
+                let section = &bid_section[levels_off + LEVELS_MARKER.len()..];
+                let end = find_closing_bracket(section);
+                parse_levels(&section[..end], book, true);
+            }
         }
 
-        // Parse ask levels
-        if let Some(asks_start) = find_bytes(json, ASK_LEVELS_MARKER) {
-            let section = &json[asks_start + ASK_LEVELS_MARKER.len()..];
-            let end = find_closing_bracket(section);
-            parse_levels(&section[..end], book, false);
+        // Parse ask levels: find "ask":{ then "levels":[ within it
+        if let Some(ask_start) = find_bytes(json, ASK_MARKER) {
+            let ask_section = &json[ask_start + ASK_MARKER.len()..];
+            if let Some(levels_off) = find_bytes(ask_section, LEVELS_MARKER) {
+                let section = &ask_section[levels_off + LEVELS_MARKER.len()..];
+                let end = find_closing_bracket(section);
+                parse_levels(&section[..end], book, false);
+            }
         }
 
         let bid = book.best_bid();
@@ -434,7 +441,8 @@ mod tests {
     #[test]
     fn parse_snapshot_bbo() {
         let mut feed = test_feed();
-        let msg = r#"{"symbol":"BTC/USDT-P","messageType":"Snapshot","topic":"orderbook","timestamp_ms":1700000000123,"data":{"bid":{"levels":[{"price":"67432.10","quantity":"1.234"},{"price":"67431.00","quantity":"2.0"}]},"ask":{"levels":[{"price":"67432.50","quantity":"0.567"},{"price":"67433.00","quantity":"1.0"}]}}}"#;
+        // Real wire format: endPrice/startPrice/depth/granularity fields present
+        let msg = r#"{"data":{"ask":{"endPrice":"67433.00","levels":[{"price":"67432.50","quantity":"0.567"},{"price":"67433.00","quantity":"1.0"}],"startPrice":"67432.50"},"bid":{"endPrice":"67431.00","levels":[{"price":"67432.10","quantity":"1.234"},{"price":"67431.00","quantity":"2.0"}],"startPrice":"67432.10"}},"depth":20,"granularity":"0.1","messageType":"Snapshot","symbol":"BTC/USDT-P","timestamp_ms":1700000000123,"topic":"orderbook"}"#;
 
         let mut scratch = TickScratch::<MarketData>::new();
         feed.parse_orderbook(msg.as_bytes(), Instant::now(), &mut scratch);
@@ -453,13 +461,13 @@ mod tests {
         let mut feed = test_feed();
 
         // Initial snapshot
-        let d1 = r#"{"symbol":"BTC/USDT-P","messageType":"Snapshot","topic":"orderbook","data":{"bid":{"levels":[{"price":"100.0","quantity":"1.0"}]},"ask":{"levels":[{"price":"101.0","quantity":"1.0"}]}}}"#;
+        let d1 = r#"{"data":{"ask":{"endPrice":"101.0","levels":[{"price":"101.0","quantity":"1.0"}],"startPrice":"101.0"},"bid":{"endPrice":"100.0","levels":[{"price":"100.0","quantity":"1.0"}],"startPrice":"100.0"}},"depth":20,"granularity":"0.1","messageType":"Snapshot","symbol":"BTC/USDT-P","timestamp_ms":1,"topic":"orderbook"}"#;
         let mut scratch = TickScratch::<MarketData>::new();
         feed.parse_orderbook(d1.as_bytes(), Instant::now(), &mut scratch);
         assert_eq!(scratch.as_slice()[0].item.bid.unwrap(), 100.0);
 
         // Update: new better bid
-        let d2 = r#"{"symbol":"BTC/USDT-P","messageType":"Update","topic":"orderbook","data":{"bid":{"levels":[{"price":"100.5","quantity":"2.0"}]},"ask":{"levels":[]}}}"#;
+        let d2 = r#"{"data":{"ask":{"endPrice":"101.0","levels":[],"startPrice":"101.0"},"bid":{"endPrice":"100.5","levels":[{"price":"100.5","quantity":"2.0"}],"startPrice":"100.5"}},"depth":20,"granularity":"0.1","messageType":"Update","symbol":"BTC/USDT-P","timestamp_ms":2,"topic":"orderbook"}"#;
         scratch.clear();
         feed.parse_orderbook(d2.as_bytes(), Instant::now(), &mut scratch);
         assert_eq!(scratch.as_slice()[0].item.bid.unwrap(), 100.5);
@@ -470,13 +478,13 @@ mod tests {
     fn parse_update_removes_level() {
         let mut feed = test_feed();
 
-        let d1 = r#"{"symbol":"BTC/USDT-P","messageType":"Snapshot","topic":"orderbook","data":{"bid":{"levels":[{"price":"102.0","quantity":"1.0"},{"price":"101.0","quantity":"2.0"}]},"ask":{"levels":[{"price":"103.0","quantity":"1.0"}]}}}"#;
+        let d1 = r#"{"data":{"ask":{"endPrice":"103.0","levels":[{"price":"103.0","quantity":"1.0"}],"startPrice":"103.0"},"bid":{"endPrice":"101.0","levels":[{"price":"102.0","quantity":"1.0"},{"price":"101.0","quantity":"2.0"}],"startPrice":"102.0"}},"depth":20,"granularity":"0.1","messageType":"Snapshot","symbol":"BTC/USDT-P","timestamp_ms":1,"topic":"orderbook"}"#;
         let mut scratch = TickScratch::<MarketData>::new();
         feed.parse_orderbook(d1.as_bytes(), Instant::now(), &mut scratch);
         assert_eq!(scratch.as_slice()[0].item.bid.unwrap(), 102.0);
 
         // Remove best bid (qty=0)
-        let d2 = r#"{"symbol":"BTC/USDT-P","messageType":"Update","topic":"orderbook","data":{"bid":{"levels":[{"price":"102.0","quantity":"0"}]},"ask":{"levels":[]}}}"#;
+        let d2 = r#"{"data":{"ask":{"endPrice":"103.0","levels":[],"startPrice":"103.0"},"bid":{"endPrice":"102.0","levels":[{"price":"102.0","quantity":"0"}],"startPrice":"102.0"}},"depth":20,"granularity":"0.1","messageType":"Update","symbol":"BTC/USDT-P","timestamp_ms":2,"topic":"orderbook"}"#;
         scratch.clear();
         feed.parse_orderbook(d2.as_bytes(), Instant::now(), &mut scratch);
         assert_eq!(scratch.as_slice()[0].item.bid.unwrap(), 101.0);
@@ -486,11 +494,11 @@ mod tests {
     fn snapshot_resets_book() {
         let mut feed = test_feed();
 
-        let snap1 = r#"{"symbol":"BTC/USDT-P","messageType":"Snapshot","topic":"orderbook","data":{"bid":{"levels":[{"price":"100.0","quantity":"1.0"}]},"ask":{"levels":[{"price":"101.0","quantity":"1.0"}]}}}"#;
+        let snap1 = r#"{"data":{"ask":{"endPrice":"101.0","levels":[{"price":"101.0","quantity":"1.0"}],"startPrice":"101.0"},"bid":{"endPrice":"100.0","levels":[{"price":"100.0","quantity":"1.0"}],"startPrice":"100.0"}},"depth":20,"granularity":"0.1","messageType":"Snapshot","symbol":"BTC/USDT-P","timestamp_ms":1,"topic":"orderbook"}"#;
         let mut scratch = TickScratch::<MarketData>::new();
         feed.parse_orderbook(snap1.as_bytes(), Instant::now(), &mut scratch);
 
-        let snap2 = r#"{"symbol":"BTC/USDT-P","messageType":"Snapshot","topic":"orderbook","data":{"bid":{"levels":[{"price":"200.0","quantity":"5.0"}]},"ask":{"levels":[{"price":"201.0","quantity":"5.0"}]}}}"#;
+        let snap2 = r#"{"data":{"ask":{"endPrice":"201.0","levels":[{"price":"201.0","quantity":"5.0"}],"startPrice":"201.0"},"bid":{"endPrice":"200.0","levels":[{"price":"200.0","quantity":"5.0"}],"startPrice":"200.0"}},"depth":20,"granularity":"0.1","messageType":"Snapshot","symbol":"BTC/USDT-P","timestamp_ms":2,"topic":"orderbook"}"#;
         scratch.clear();
         feed.parse_orderbook(snap2.as_bytes(), Instant::now(), &mut scratch);
         assert_eq!(scratch.as_slice()[0].item.bid.unwrap(), 200.0);
@@ -504,8 +512,8 @@ mod tests {
     fn different_symbols() {
         let mut feed = test_feed();
 
-        let btc = r#"{"symbol":"BTC/USDT-P","messageType":"Snapshot","topic":"orderbook","data":{"bid":{"levels":[{"price":"67000.0","quantity":"1.0"}]},"ask":{"levels":[{"price":"67001.0","quantity":"1.0"}]}}}"#;
-        let eth = r#"{"symbol":"ETH/USDT-P","messageType":"Snapshot","topic":"orderbook","data":{"bid":{"levels":[{"price":"3500.0","quantity":"10.0"}]},"ask":{"levels":[{"price":"3501.0","quantity":"10.0"}]}}}"#;
+        let btc = r#"{"data":{"ask":{"endPrice":"67001.0","levels":[{"price":"67001.0","quantity":"1.0"}],"startPrice":"67001.0"},"bid":{"endPrice":"67000.0","levels":[{"price":"67000.0","quantity":"1.0"}],"startPrice":"67000.0"}},"depth":20,"granularity":"0.1","messageType":"Snapshot","symbol":"BTC/USDT-P","timestamp_ms":1,"topic":"orderbook"}"#;
+        let eth = r#"{"data":{"ask":{"endPrice":"3501.0","levels":[{"price":"3501.0","quantity":"10.0"}],"startPrice":"3501.0"},"bid":{"endPrice":"3500.0","levels":[{"price":"3500.0","quantity":"10.0"}],"startPrice":"3500.0"}},"depth":20,"granularity":"0.1","messageType":"Snapshot","symbol":"ETH/USDT-P","timestamp_ms":1,"topic":"orderbook"}"#;
 
         let mut scratch = TickScratch::<MarketData>::new();
         feed.parse_orderbook(btc.as_bytes(), Instant::now(), &mut scratch);
@@ -523,7 +531,7 @@ mod tests {
             "",
             "{}",
             r#"{"topic":"trades"}"#,
-            r#"{"symbol":"UNKNOWN/USDT-P","messageType":"Snapshot","topic":"orderbook","data":{"bid":{"levels":[{"price":"100","quantity":"1"}]},"ask":{"levels":[{"price":"101","quantity":"1"}]}}}"#,
+            r#"{"data":{"ask":{"endPrice":"101","levels":[{"price":"101","quantity":"1"}],"startPrice":"101"},"bid":{"endPrice":"100","levels":[{"price":"100","quantity":"1"}],"startPrice":"100"}},"depth":20,"granularity":"0.1","messageType":"Snapshot","symbol":"UNKNOWN/USDT-P","timestamp_ms":1,"topic":"orderbook"}"#,
         ];
         for &msg in garbage {
             let mut scratch = TickScratch::<MarketData>::new();
@@ -536,7 +544,7 @@ mod tests {
     fn reconnect_clears_books() {
         let mut feed = test_feed();
 
-        let d1 = r#"{"symbol":"BTC/USDT-P","messageType":"Snapshot","topic":"orderbook","data":{"bid":{"levels":[{"price":"100.0","quantity":"1.0"}]},"ask":{"levels":[{"price":"101.0","quantity":"1.0"}]}}}"#;
+        let d1 = r#"{"data":{"ask":{"endPrice":"101.0","levels":[{"price":"101.0","quantity":"1.0"}],"startPrice":"101.0"},"bid":{"endPrice":"100.0","levels":[{"price":"100.0","quantity":"1.0"}],"startPrice":"100.0"}},"depth":20,"granularity":"0.1","messageType":"Snapshot","symbol":"BTC/USDT-P","timestamp_ms":1,"topic":"orderbook"}"#;
         let mut scratch = TickScratch::<MarketData>::new();
         feed.parse_orderbook(d1.as_bytes(), Instant::now(), &mut scratch);
         assert_eq!(scratch.len(), 1);
@@ -544,7 +552,7 @@ mod tests {
         feed.on_connected(0);
 
         // After reconnect, book should be empty
-        let d2 = r#"{"symbol":"BTC/USDT-P","messageType":"Update","topic":"orderbook","data":{"bid":{"levels":[]},"ask":{"levels":[]}}}"#;
+        let d2 = r#"{"data":{"ask":{"endPrice":"101.0","levels":[],"startPrice":"101.0"},"bid":{"endPrice":"100.0","levels":[],"startPrice":"100.0"}},"depth":20,"granularity":"0.1","messageType":"Update","symbol":"BTC/USDT-P","timestamp_ms":2,"topic":"orderbook"}"#;
         scratch.clear();
         feed.parse_orderbook(d2.as_bytes(), Instant::now(), &mut scratch);
         let tick = &scratch.as_slice()[0];
@@ -564,7 +572,7 @@ mod tests {
 
     #[test]
     fn parse_latency_under_1us() {
-        let msg = r#"{"symbol":"BTC/USDT-P","messageType":"Snapshot","topic":"orderbook","timestamp_ms":1700000000123,"data":{"bid":{"levels":[{"price":"67432.10","quantity":"1.234"},{"price":"67431.00","quantity":"2.0"}]},"ask":{"levels":[{"price":"67432.50","quantity":"0.567"},{"price":"67433.00","quantity":"1.0"}]}}}"#;
+        let msg = r#"{"data":{"ask":{"endPrice":"67433.00","levels":[{"price":"67432.50","quantity":"0.567"},{"price":"67433.00","quantity":"1.0"}],"startPrice":"67432.50"},"bid":{"endPrice":"67431.00","levels":[{"price":"67432.10","quantity":"1.234"},{"price":"67431.00","quantity":"2.0"}],"startPrice":"67432.10"}},"depth":20,"granularity":"0.1","messageType":"Snapshot","symbol":"BTC/USDT-P","timestamp_ms":1700000000123,"topic":"orderbook"}"#;
 
         let mut feed = test_feed();
         let payload = msg.as_bytes();
