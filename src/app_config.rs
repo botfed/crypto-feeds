@@ -14,8 +14,10 @@ use tokio::task::JoinHandle;
 #[derive(Debug, Deserialize, Clone)]
 pub struct VolModelConfig {
     /// Directory containing per-symbol YAML param files.
+    #[serde(default)]
     pub params_dir: String,
     /// Directory containing 1m CSV bar data (per-symbol subdirectories).
+    #[serde(default)]
     pub bar_data_dir: String,
     /// Which HAR variant to use: "har_ols" or "har_qlike".
     #[serde(default = "default_har_model")]
@@ -23,6 +25,9 @@ pub struct VolModelConfig {
     /// Number of days of historical bars to load for warmup.
     #[serde(default = "default_warmup_days")]
     pub warmup_days: u32,
+    /// EWMA halflife in milliseconds (only used when model="ewma"). Default 300000 (5min).
+    #[serde(default = "default_ewma_halflife")]
+    pub ewma_halflife_ms: f64,
 }
 
 fn default_har_model() -> String {
@@ -31,6 +36,10 @@ fn default_har_model() -> String {
 
 fn default_warmup_days() -> u32 {
     2
+}
+
+fn default_ewma_halflife() -> f64 {
+    300_000.0 // 5 minutes
 }
 
 /// Per-asset vol config within the vol_engine section.
