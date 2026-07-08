@@ -185,6 +185,7 @@ pub struct AllMarketData {
     pub hotstuff: Arc<MarketDataCollection>,
     pub zeroone: Arc<MarketDataCollection>,
     pub risex: Arc<MarketDataCollection>,
+    pub bulk: Arc<MarketDataCollection>,
 }
 
 // Debug impl
@@ -215,6 +216,7 @@ pub enum Exchange {
     Hotstuff,
     ZeroOne,
     RiseX,
+    Bulk,
 }
 
 impl Exchange {
@@ -239,6 +241,7 @@ impl Exchange {
             Exchange::Hotstuff => "hotstuff",
             Exchange::ZeroOne => "zeroone",
             Exchange::RiseX => "risex",
+            Exchange::Bulk => "bulk",
         }
     }
 
@@ -263,6 +266,7 @@ impl Exchange {
             "hotstuff" => Some(Exchange::Hotstuff),
             "zeroone" => Some(Exchange::ZeroOne),
             "risex" | "rise" => Some(Exchange::RiseX),
+            "bulk" => Some(Exchange::Bulk),
             _ => None,
         }
     }
@@ -291,6 +295,7 @@ impl AllMarketData {
             (Hotstuff, &self.hotstuff),
             (ZeroOne, &self.zeroone),
             (RiseX, &self.risex),
+            (Bulk, &self.bulk),
         ]
         .into_iter()
     }
@@ -316,6 +321,7 @@ impl AllMarketData {
             Exchange::Hotstuff => &self.hotstuff,
             Exchange::ZeroOne => &self.zeroone,
             Exchange::RiseX => &self.risex,
+            Exchange::Bulk => &self.bulk,
         }
     }
 }
@@ -347,6 +353,7 @@ impl AllMarketData {
             hotstuff: new_coll(),
             zeroone: new_coll(),
             risex: new_coll(),
+            bulk: new_coll(),
         }
     }
 }

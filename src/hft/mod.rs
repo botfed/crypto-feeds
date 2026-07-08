@@ -17,6 +17,7 @@
 
 pub mod ws_framer;
 pub mod binance;
+pub mod bulk;
 pub mod hibachi;
 pub mod hyperliquid;
 pub mod risex;

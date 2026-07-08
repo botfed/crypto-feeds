@@ -158,6 +158,7 @@ pub struct AllTradeData {
     pub hotstuff: Arc<TradeDataCollection>,
     pub zeroone: Arc<TradeDataCollection>,
     pub risex: Arc<TradeDataCollection>,
+    pub bulk: Arc<TradeDataCollection>,
 }
 
 impl std::fmt::Debug for AllTradeData {
@@ -189,6 +190,7 @@ impl AllTradeData {
             (Hotstuff, &self.hotstuff),
             (ZeroOne, &self.zeroone),
             (RiseX, &self.risex),
+            (Bulk, &self.bulk),
         ]
         .into_iter()
     }
@@ -214,6 +216,7 @@ impl AllTradeData {
             Exchange::Hotstuff => &self.hotstuff,
             Exchange::ZeroOne => &self.zeroone,
             Exchange::RiseX => &self.risex,
+            Exchange::Bulk => &self.bulk,
         }
     }
 
@@ -243,6 +246,7 @@ impl AllTradeData {
             hotstuff: new_coll(),
             zeroone: new_coll(),
             risex: new_coll(),
+            bulk: new_coll(),
         }
     }
 }
