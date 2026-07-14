@@ -17,9 +17,10 @@
 /// URL: `wss://data-api.hibachi.xyz/ws/market`
 /// Subscribe: `{"method":"subscribe","parameters":{"subscriptions":[{"symbol":"BTC/USDT-P","topic":"orderbook"},...]}}`
 use crate::hft::{HftFeed, TickScratch, extract_str_after, find_bytes, parse_f64};
-use crate::market_data::MarketData;
+use crate::market_data::{MarketData, BookSnapshot, BookLevel, BookCollection, MAX_BOOK_LEVELS};
 use crate::symbol_registry::SymbolId;
 use ordered_float::OrderedFloat;
+use std::sync::Arc;
 use std::time::Instant;
 
 // Byte patterns for zero-alloc JSON scanning.
@@ -124,6 +125,21 @@ impl FixedBook {
             None
         }
     }
+
+    fn to_snapshot(&self) -> BookSnapshot {
+        let mut snap = BookSnapshot::default();
+        let bc = self.bid_count.min(MAX_BOOK_LEVELS);
+        for i in 0..bc {
+            snap.bids[i] = BookLevel { price: self.bids[i].price.into_inner(), qty: self.bids[i].qty };
+        }
+        snap.bid_count = bc as u8;
+        let ac = self.ask_count.min(MAX_BOOK_LEVELS);
+        for i in 0..ac {
+            snap.asks[i] = BookLevel { price: self.asks[i].price.into_inner(), qty: self.asks[i].qty };
+        }
+        snap.ask_count = ac as u8;
+        snap
+    }
 }
 
 // ── Symbol lookup ──────────────────────────────────────────────────
@@ -148,6 +164,7 @@ pub struct HibachiHftFeed {
     symbol_count: usize,
     books: Vec<FixedBook>,
     sub_message: String,
+    book_collection: Option<Arc<BookCollection>>,
 }
 
 impl HibachiHftFeed {
@@ -192,7 +209,14 @@ impl HibachiHftFeed {
             symbol_count: count,
             books,
             sub_message,
+            book_collection: None,
         }
+    }
+
+    /// Set a book collection to receive full book snapshots on each update.
+    pub fn with_book_collection(mut self, coll: Arc<BookCollection>) -> Self {
+        self.book_collection = Some(coll);
+        self
     }
 
     /// Lookup symbol by native name bytes. O(N) scan, N ≤ 32.
@@ -267,6 +291,11 @@ impl HibachiHftFeed {
                 let end = find_closing_bracket(section);
                 parse_levels(&section[..end], book, false);
             }
+        }
+
+        // Push full book snapshot if collection is configured
+        if let Some(ref coll) = self.book_collection {
+            coll.push(&symbol_id, book.to_snapshot());
         }
 
         let bid = book.best_bid();

@@ -7,6 +7,83 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
 
+// ── Full order book snapshots ────────────────────────────────────────
+
+pub const MAX_BOOK_LEVELS: usize = 32;
+
+#[derive(Clone, Copy, Default)]
+pub struct BookLevel {
+    pub price: f64,
+    pub qty: f64,
+}
+
+/// Fixed-size order book snapshot (top N levels per side).
+/// Bids sorted descending (best bid first), asks sorted ascending (best ask first).
+#[derive(Clone, Copy)]
+pub struct BookSnapshot {
+    pub bids: [BookLevel; MAX_BOOK_LEVELS],
+    pub asks: [BookLevel; MAX_BOOK_LEVELS],
+    pub bid_count: u8,
+    pub ask_count: u8,
+}
+
+impl Default for BookSnapshot {
+    fn default() -> Self {
+        Self {
+            bids: [BookLevel::default(); MAX_BOOK_LEVELS],
+            asks: [BookLevel::default(); MAX_BOOK_LEVELS],
+            bid_count: 0,
+            ask_count: 0,
+        }
+    }
+}
+
+impl BookSnapshot {
+    pub fn find_bid_wall(&self, threshold_usd: f64) -> Option<(f64, f64)> {
+        for i in 0..self.bid_count as usize {
+            let lvl = &self.bids[i];
+            if lvl.price * lvl.qty >= threshold_usd {
+                return Some((lvl.price, lvl.qty));
+            }
+        }
+        None
+    }
+
+    pub fn find_ask_wall(&self, threshold_usd: f64) -> Option<(f64, f64)> {
+        for i in 0..self.ask_count as usize {
+            let lvl = &self.asks[i];
+            if lvl.price * lvl.qty >= threshold_usd {
+                return Some((lvl.price, lvl.qty));
+            }
+        }
+        None
+    }
+}
+
+/// Per-symbol book snapshot storage using seqlock ring buffer (capacity 4).
+pub struct BookCollection {
+    slots: Box<[OnceLock<Box<RingBuffer<BookSnapshot>>>]>,
+}
+
+impl BookCollection {
+    pub fn new() -> Self {
+        let mut slots = Vec::with_capacity(MAX_SYMBOLS);
+        for _ in 0..MAX_SYMBOLS {
+            slots.push(OnceLock::new());
+        }
+        Self { slots: slots.into_boxed_slice() }
+    }
+
+    pub fn push(&self, id: &SymbolId, snapshot: BookSnapshot) {
+        let ring = self.slots[*id].get_or_init(|| Box::new(RingBuffer::with_capacity(4)));
+        ring.push(snapshot);
+    }
+
+    pub fn latest(&self, id: &SymbolId) -> Option<BookSnapshot> {
+        self.slots[*id].get()?.latest()
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct MarketData {
     pub bid: Option<f64>,
@@ -186,6 +263,8 @@ pub struct AllMarketData {
     pub zeroone: Arc<MarketDataCollection>,
     pub risex: Arc<MarketDataCollection>,
     pub bulk: Arc<MarketDataCollection>,
+    /// Shared order book snapshots (any exchange that provides full book data).
+    pub book: Arc<BookCollection>,
 }
 
 // Debug impl
@@ -354,6 +433,7 @@ impl AllMarketData {
             zeroone: new_coll(),
             risex: new_coll(),
             bulk: new_coll(),
+            book: Arc::new(BookCollection::new()),
         }
     }
 }

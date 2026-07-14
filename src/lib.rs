@@ -28,7 +28,7 @@ pub mod python;
 pub mod hft;
 
 pub use exchange_fees::{ExchangeFees, FeeSchedule};
-pub use market_data::{AllMarketData, MarketData, MarketDataCollection};
+pub use market_data::{AllMarketData, MarketData, MarketDataCollection, BookCollection, BookSnapshot, BookLevel};
 pub use trade_data::{AllTradeData, TradeData, TradeDataCollection, TradeSide};
 pub use orderbook::OrderBook;
 pub use analytics::{Analytics, SnapshotField};
