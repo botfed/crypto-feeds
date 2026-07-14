@@ -38,28 +38,6 @@ impl Default for BookSnapshot {
     }
 }
 
-impl BookSnapshot {
-    pub fn find_bid_wall(&self, threshold_usd: f64) -> Option<(f64, f64)> {
-        for i in 0..self.bid_count as usize {
-            let lvl = &self.bids[i];
-            if lvl.price * lvl.qty >= threshold_usd {
-                return Some((lvl.price, lvl.qty));
-            }
-        }
-        None
-    }
-
-    pub fn find_ask_wall(&self, threshold_usd: f64) -> Option<(f64, f64)> {
-        for i in 0..self.ask_count as usize {
-            let lvl = &self.asks[i];
-            if lvl.price * lvl.qty >= threshold_usd {
-                return Some((lvl.price, lvl.qty));
-            }
-        }
-        None
-    }
-}
-
 /// Per-symbol book snapshot storage using seqlock ring buffer (capacity 4).
 pub struct BookCollection {
     slots: Box<[OnceLock<Box<RingBuffer<BookSnapshot>>>]>,

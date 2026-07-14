@@ -293,7 +293,7 @@ impl HibachiHftFeed {
             }
         }
 
-        // Push full book snapshot if collection is configured
+        // Push book snapshot via seqlock — same pattern as BBO, always fresh
         if let Some(ref coll) = self.book_collection {
             coll.push(&symbol_id, book.to_snapshot());
         }
