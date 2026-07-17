@@ -531,7 +531,7 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
                 }
             }
 
-            info!("TLS handshake complete for {} ({})",
+            debug!("TLS handshake complete for {} ({})",
                 host,
                 tls_stream.conn.protocol_version()
                     .map(|v| format!("{:?}", v))
@@ -666,7 +666,7 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
             }
         }
 
-        info!("Connected to {} (ws://)", self.connections[idx].url);
+        debug!("Connected to {} (ws://)", self.connections[idx].url);
 
         // Notify feed of successful connection (e.g. reset dedup state)
         self.feed.on_connected(idx);
