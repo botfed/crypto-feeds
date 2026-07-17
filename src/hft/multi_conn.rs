@@ -177,7 +177,7 @@ where
         debug!("multi-conn wins: {} (total={})", pcts.join(" "), total);
 
         if (worst_wins as f64) < threshold {
-            warn!(
+            debug!(
                 "multi-conn: culling conn {} ({:.1}% wins, threshold={:.1}%)",
                 worst_idx,
                 worst_wins as f64 / total as f64 * 100.0,
