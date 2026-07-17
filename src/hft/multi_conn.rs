@@ -174,7 +174,7 @@ where
             .enumerate()
             .map(|(i, w)| format!("c{}={:.1}%", i, *w as f64 / total as f64 * 100.0))
             .collect();
-        info!("multi-conn wins: {} (total={})", pcts.join(" "), total);
+        debug!("multi-conn wins: {} (total={})", pcts.join(" "), total);
 
         if (worst_wins as f64) < threshold {
             warn!(
