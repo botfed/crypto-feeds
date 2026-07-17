@@ -10,7 +10,7 @@ use crate::hft::engine::{HftEngine, HftEngineConfig};
 use crate::hft::HftFeed;
 use crate::market_data::{DataSink, MarketData};
 use crate::symbol_registry::{MAX_SYMBOLS, SymbolId};
-use log::{info, warn};
+use log::{debug, info, warn};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
