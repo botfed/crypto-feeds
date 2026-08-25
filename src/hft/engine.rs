@@ -652,14 +652,12 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
             }
         }
 
-        // Verify 101 Switching Protocols
-        let response_str = std::str::from_utf8(&response_buf[..response_len]).unwrap_or("");
+        // Verify 101 Switching Protocols.
+        // Use lossy conversion: server may bundle WS frames (binary) right after the
+        // HTTP headers in the same read, making strict from_utf8 fail on the full buffer.
+        let response_str = String::from_utf8_lossy(&response_buf[..response_len]);
         if !response_str.contains("101") {
-            // Log first 120 bytes as hex + lossy ascii for debugging binary responses
-            let hex_preview: String = response_buf[..response_len.min(120)]
-                .iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-            let ascii_preview = String::from_utf8_lossy(&response_buf[..response_len.min(200)]);
-            error!("WS handshake rejected ({}B): hex=[{}] ascii=[{}]", response_len, hex_preview, ascii_preview);
+            error!("WS handshake rejected ({}B): {}", response_len, response_str.lines().next().unwrap_or("?"));
             self.disconnect(idx);
             return;
         }
