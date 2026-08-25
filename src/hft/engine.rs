@@ -590,12 +590,20 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
             path, host, ws_key_str
         );
 
-        // Write the upgrade request
+        // Write the upgrade request (flush required — non-blocking TLS may buffer)
         if let Some(ref mut stream) = self.connections[idx].stream {
             if let Err(e) = stream.write_all(upgrade.as_bytes()) {
                 error!("WS handshake write failed: {}", e);
                 self.disconnect(idx);
                 return;
+            }
+            if let Err(e) = stream.flush() {
+                // WouldBlock on flush is ok — data is queued, will be sent on next poll
+                if e.kind() != std::io::ErrorKind::WouldBlock {
+                    error!("WS handshake flush failed: {}", e);
+                    self.disconnect(idx);
+                    return;
+                }
             }
         }
 
