@@ -20,6 +20,7 @@ pub mod binance;
 pub mod bulk;
 pub mod hibachi;
 pub mod hyperliquid;
+pub mod lighter;
 pub mod risex;
 pub mod zeroone;
 pub mod engine;
@@ -209,6 +210,83 @@ pub fn extract_u64_after(json: &[u8], pattern: &[u8]) -> Option<u64> {
 #[inline]
 pub fn parse_f64(s: &str) -> Option<f64> {
     s.parse::<f64>().ok()
+}
+
+/// Fast fixed-decimal f64 parser for exchange price/quantity strings.
+///
+/// Handles only the format exchanges actually send: `digits[.digits]`.
+/// No sign, no scientific notation, no NaN/Inf. ~5-10x faster than stdlib.
+/// Returns `None` on empty input or non-digit characters.
+#[inline]
+pub fn parse_f64_fast(s: &[u8]) -> Option<f64> {
+    if s.is_empty() {
+        return None;
+    }
+
+    let mut i = 0;
+    let len = s.len();
+
+    // Integer part
+    let mut int_part: u64 = 0;
+    while i < len && s[i] != b'.' {
+        let d = s[i].wrapping_sub(b'0');
+        if d > 9 {
+            return None;
+        }
+        int_part = int_part * 10 + d as u64;
+        i += 1;
+    }
+
+    if i == len {
+        return Some(int_part as f64);
+    }
+
+    // Skip the dot
+    i += 1;
+
+    // Fractional part
+    let mut frac_part: u64 = 0;
+    let frac_start = i;
+    while i < len {
+        let d = s[i].wrapping_sub(b'0');
+        if d > 9 {
+            return None;
+        }
+        frac_part = frac_part * 10 + d as u64;
+        i += 1;
+    }
+
+    let frac_digits = i - frac_start;
+    if frac_digits == 0 {
+        return Some(int_part as f64);
+    }
+
+    const POW10: [f64; 19] = [
+        1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9,
+        1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18,
+    ];
+
+    let divisor = if frac_digits < POW10.len() {
+        POW10[frac_digits]
+    } else {
+        10.0_f64.powi(frac_digits as i32)
+    };
+
+    Some(int_part as f64 + frac_part as f64 / divisor)
+}
+
+/// Extract a JSON string value after a key pattern and parse as f64.
+/// Zero-allocation, single combined operation.
+#[inline]
+pub fn extract_f64_after(json: &[u8], pattern: &[u8]) -> Option<f64> {
+    let pos = find_bytes(json, pattern)?;
+    let start = pos + pattern.len();
+    if start >= json.len() {
+        return None;
+    }
+    let rest = &json[start..];
+    let end = rest.iter().position(|&b| b == b'"')?;
+    parse_f64_fast(&rest[..end])
 }
 
 #[cfg(test)]
