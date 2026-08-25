@@ -655,7 +655,11 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
         // Verify 101 Switching Protocols
         let response_str = std::str::from_utf8(&response_buf[..response_len]).unwrap_or("");
         if !response_str.contains("101") {
-            error!("WS handshake rejected ({}B): {}", response_len, response_str.lines().next().unwrap_or("?"));
+            // Log first 120 bytes as hex + lossy ascii for debugging binary responses
+            let hex_preview: String = response_buf[..response_len.min(120)]
+                .iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            let ascii_preview = String::from_utf8_lossy(&response_buf[..response_len.min(200)]);
+            error!("WS handshake rejected ({}B): hex=[{}] ascii=[{}]", response_len, hex_preview, ascii_preview);
             self.disconnect(idx);
             return;
         }
