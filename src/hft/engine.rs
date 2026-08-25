@@ -655,7 +655,7 @@ impl<F: HftFeed, S: DataSink<F::Item>> HftEngine<F, S> {
         // Verify 101 Switching Protocols
         let response_str = std::str::from_utf8(&response_buf[..response_len]).unwrap_or("");
         if !response_str.contains("101") {
-            error!("WS handshake rejected: {}", response_str.lines().next().unwrap_or("?"));
+            error!("WS handshake rejected ({}B): {}", response_len, response_str.lines().next().unwrap_or("?"));
             self.disconnect(idx);
             return;
         }
